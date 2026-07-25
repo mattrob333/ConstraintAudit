@@ -1,0 +1,26 @@
+[
+  {
+    "id": "workflow",
+    "title": "End-to-End Throughput Audit Workflow",
+    "description": "The approved two-call workflow, evidence rules, checkpoints, deliverables, sprint, and catalog loop.",
+    "url": "/docs/workflow.md"
+  },
+  {
+    "id": "architecture",
+    "title": "Advisor Cockpit Architecture",
+    "description": "Research sources, document routing, interface boundaries, and the lightweight CRM decision.",
+    "url": "/docs/architecture.md"
+  },
+  {
+    "id": "crm",
+    "title": "Google Sheets CRM Specification",
+    "description": "Engagement stages, activity history, controlled fields, and the interface write-back contract.",
+    "url": "/docs/crm.md"
+  },
+  {
+    "id": "integrations",
+    "title": "Integration and Authorization Guide",
+    "description": "Connector boundaries, account authorization, environment settings, health checks, and operational limitations.",
+    "url": "/docs/integrations.md"
+  }
+]
