@@ -42,8 +42,15 @@ type TranscriptSynthesis = {
 };
 
 const canvasBlocks = [
-  "Customer segments", "Value propositions", "Channels", "Customer relationships",
-  "Revenue streams", "Key resources", "Key activities", "Key partners", "Cost structure",
+  { title: "Key partners", area: "partners" },
+  { title: "Key activities", area: "activities" },
+  { title: "Key resources", area: "resources" },
+  { title: "Value propositions", area: "value" },
+  { title: "Customer relationships", area: "relationships" },
+  { title: "Channels", area: "channels" },
+  { title: "Customer segments", area: "segments" },
+  { title: "Cost structure", area: "cost" },
+  { title: "Revenue streams", area: "revenue" },
 ] as const;
 
 const callTopics = [
@@ -578,7 +585,7 @@ function Research({ company, onBack, onPrepare, research }: { company: string; o
   ]) : gaps.slice(0, 4).map((gap) => [`What would make ${gap.toLowerCase()} measurable?`, `Ask for the current fact, its source, and the person who owns it.`, "missing"]);
   return <section className="guided wide"><Back onClick={onBack}>Client intake</Back><PageHead eyebrow="Research · Canvas v0" side={<div className="research-progress"><span><Icon name="check" size={13} />Website read</span><span><Icon name="check" size={13} />Public context</span><span><Icon name="check" size={13} />Canvas drafted</span><span><Icon name="check" size={13} />Gaps found</span></div>} title="Here’s what we understand so far.">This first pass separates public evidence from interpretation. The gaps—not a generic script—guide the call with {company}.</PageHead>
     <div className="tabs">{(["canvas", "flow", "questions"] as const).map((item) => <button aria-selected={tab === item} className={tab === item ? "active" : ""} key={item} onClick={() => setTab(item)} role="tab" type="button">{item === "canvas" ? "Business model" : item === "flow" ? "Flow of work" : "Call questions"}</button>)}</div>
-    {tab === "canvas" ? <><div className="legend"><Pill tone="inferred">Public research</Pill><span>source-linked, not client-verified</span><Pill tone="assumed">Assumed</Pill><span>advisor hypothesis</span><Pill tone="missing">Missing</Pill><span>required gap</span></div><div className="canvas">{canvasBlocks.map((title, index) => <article key={title}><h3>{title}</h3><ul><li><span>{index === 1 ? publicSummary : `Client confirmation needed for ${title.toLowerCase()}.`}</span><Pill tone={index === 1 && research?.facts.length ? "inferred" : "missing"}>{index === 1 && research?.facts.length ? "Public" : "Missing"}</Pill></li></ul></article>)}</div></> : null}
+    {tab === "canvas" ? <><div className="legend"><Pill tone="inferred">Public research</Pill><span>source-linked, not client-verified</span><Pill tone="assumed">Assumed</Pill><span>advisor hypothesis</span><Pill tone="missing">Missing</Pill><span>required gap</span></div><div aria-label="Business Model Canvas" className="canvas">{canvasBlocks.map(({ title, area }) => { const hasPublicEvidence = area === "value" && Boolean(research?.facts.length); return <article className={`canvas-block canvas-${area}`} key={area}><h3>{title}</h3><ul><li><span>{area === "value" ? publicSummary : `Client confirmation needed for ${title.toLowerCase()}.`}</span><Pill tone={hasPublicEvidence ? "inferred" : "missing"}>{hasPublicEvidence ? "Public" : "Missing"}</Pill></li></ul></article>; })}</div></> : null}
     {tab === "flow" ? <div className="flow-panel"><p className="eyebrow">Flow to trace live</p><div className="flow">{["Demand enters", "Work is qualified", "Work is committed", "Work is scheduled", "Work is delivered", "Outcome is closed"].map((item, index) => <div key={item}><span>{index + 1}</span><strong>{item}</strong><small>Confirm live</small></div>)}</div><div className="two-columns"><article><h3>What the public source supports</h3><p>{publicSummary}</p></article><article><h3>What remains unknown</h3><p>{gaps.join(", ")}.</p></article></div></div> : null}
     {tab === "questions" ? <div className="question-list">{questions.map(([title, text, tone], index) => <article key={title}><b>0{index + 1}</b><div><Pill tone={tone as Tone}>{tone === "missing" ? "Baseline gap" : "Internal · unconfirmed"}</Pill><h3>{title}</h3><p>{text}</p></div></article>)}</div> : null}
     <div className="page-actions"><div><Button variant="quiet">Correct research</Button><Button variant="quiet">Add a source</Button><Button variant="quiet">Research a gap</Button></div><Button icon="arrow" onClick={onPrepare}>Prepare the client</Button></div>

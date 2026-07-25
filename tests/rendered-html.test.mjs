@@ -39,7 +39,11 @@ test("keeps frontend workflow gates and accessibility in the owned client surfac
   assert.match(cockpit, /aria-controls="primary-navigation"/);
   assert.match(cockpit, /aria-haspopup="menu"/);
   assert.match(cockpit, /aria-modal="true"/);
+  assert.match(cockpit, /aria-label="Business Model Canvas"/);
+  assert.match(cockpit, /canvas-\$\{area\}/);
   assert.match(css, /@media \(max-width: 720px\)/);
   assert.match(css, /prefers-reduced-motion/);
   assert.match(css, /\.consent-status\.not-recorded/);
+  assert.match(css, /"partners partners activities activities value value relationships relationships segments segments"/);
+  assert.match(css, /"cost cost cost cost cost revenue revenue revenue revenue revenue"/);
 });
