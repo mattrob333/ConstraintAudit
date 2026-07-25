@@ -31,8 +31,14 @@ function firstMatch(html: string, pattern: RegExp): string {
   return compactText(html.match(pattern)?.[1] ?? "");
 }
 
+export function normalizePublicUrlInput(input: string): string {
+  const value = input.trim();
+  if (!value) return "";
+  return /^[a-z][a-z\d+.-]*:\/\//i.test(value) ? value : `https://${value}`;
+}
+
 export function validatePublicUrl(input: string): URL {
-  const url = new URL(input);
+  const url = new URL(normalizePublicUrlInput(input));
   if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) {
     throw new Error("Research URL must be a public HTTP(S) URL without embedded credentials.");
   }

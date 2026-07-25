@@ -56,6 +56,7 @@ test("public URL guard rejects local and credential-bearing targets", () => {
   assert.throws(() => validatePublicUrl("http://127.0.0.1/admin"), /public website/);
   assert.throws(() => validatePublicUrl("https://user:pass@example.com/"), /without embedded credentials/);
   assert.equal(validatePublicUrl("https://example.com/about").hostname, "example.com");
+  assert.equal(validatePublicUrl("www.tier4advisors.com").toString(), "https://www.tier4advisors.com/");
 });
 
 test("transcript parser preserves timestamp, speaker, and wording", () => {

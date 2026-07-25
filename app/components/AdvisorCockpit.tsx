@@ -74,6 +74,12 @@ function stageFor(screen: Screen): Stage | null {
   return null;
 }
 
+function normalizeWebsiteInput(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  return /^[a-z][a-z\d+.-]*:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+}
+
 async function api<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, { ...init, headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) } });
   if (!response.ok) {
@@ -290,16 +296,18 @@ export default function AdvisorCockpit() {
   async function createEngagement(event: FormEvent) {
     event.preventDefault();
     try {
+      const normalizedWebsite = normalizeWebsiteInput(website);
+      setWebsite(normalizedWebsite);
       const response = await save<{ engagement: BackendEngagement }>("/api/engagements", {
         client: company,
-        website,
+        website: normalizedWebsite,
         primaryContact: contact,
         notes: [role ? `Contact role: ${role}` : "", context].filter(Boolean).join("\n\n"),
       });
       const id = response.engagement.id;
       setActiveId(id);
       setEngagements((items) => [toEngagement(response.engagement), ...items.filter((item) => item.id !== id)]);
-      const researchResponse = await save<{ research: ResearchPayload }>(`/api/engagements/${id}/research`, { sourceUrl: website });
+      const researchResponse = await save<{ research: ResearchPayload }>(`/api/engagements/${id}/research`, { sourceUrl: normalizedWebsite });
       setResearchResult(researchResponse.research);
       go("research");
     } catch {
@@ -531,7 +539,7 @@ function Intake(props: {
   const [attachment, setAttachment] = useState("");
   return <section className="guided narrow"><Back onClick={props.onBack}>Entry options</Back><PageHead eyebrow="Client · Starting point" title="Who are we learning about?">Give us a starting point. We’ll research the business, draft a first-pass business model, and prepare the questions that matter for your call.</PageHead>
     <form className="intake-form" onSubmit={props.onSubmit}>
-      <div className="field-row"><label><span>Company name <em>Required</em></span><input autoFocus onChange={(e) => props.onCompany(e.target.value)} placeholder="Acme Industrial" required value={props.company} /></label><label><span>Company website</span><input onChange={(e) => props.onWebsite(e.target.value)} placeholder="https://example.com" type="url" value={props.website} /></label></div>
+      <div className="field-row"><label><span>Company name <em>Required</em></span><input autoFocus onChange={(e) => props.onCompany(e.target.value)} placeholder="Acme Industrial" required value={props.company} /></label><label><span>Company website</span><input autoCapitalize="none" inputMode="url" onBlur={(e) => props.onWebsite(normalizeWebsiteInput(e.target.value))} onChange={(e) => props.onWebsite(e.target.value)} placeholder="tier4advisors.com" spellCheck={false} type="text" value={props.website} /></label></div>
       <div className="field-row"><label><span>Primary contact name</span><input onChange={(e) => props.onContact(e.target.value)} placeholder="Maya Chen" value={props.contact} /></label><label><span>Primary contact role</span><input onChange={(e) => props.onRole(e.target.value)} placeholder="Chief Operating Officer" value={props.role} /></label></div>
       <label><span>What prompted this conversation? <small>Optional</small></span><textarea onChange={(e) => props.onContext(e.target.value)} placeholder="What is changing, stuck, or important right now?" rows={5} value={props.context} /></label>
       <label className="upload"><input accept=".pdf,.doc,.docx,.txt,.md,.csv" onChange={(e) => setAttachment(e.target.files?.[0]?.name ?? "")} type="file" /><span><Icon name="upload" size={20} /></span><span><strong>{attachment || "Add an email, notes, proposal, or prior document"}</strong><small>{attachment ? "Source staged for the engagement register" : "Optional · PDF, DOCX, TXT, Markdown, or CSV"}</small></span></label>

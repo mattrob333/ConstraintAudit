@@ -60,6 +60,7 @@ export async function runResearch(id: string, sourceUrl?: string) {
   const url = sourceUrl?.trim() || engagement.website;
   if (!url) throw new Error("website or sourceUrl is required");
   const synthesis = await researchPublicWebsite(url, engagement.client);
+  const canonicalUrl = synthesis.sourceUrl;
   const source = {
     id: makeId("src"),
     label: "Public website research",
@@ -70,7 +71,7 @@ export async function runResearch(id: string, sourceUrl?: string) {
   const updated = await updateEngagement(id, {
     stage: "Research",
     status: "In progress",
-    website: url,
+    website: canonicalUrl,
     nextAction: "Review research gaps and draft the pre-call readiness brief",
     data: {
       research: synthesis,
@@ -83,7 +84,7 @@ export async function runResearch(id: string, sourceUrl?: string) {
     title: `${updated.client} — Public Research Brief`,
     status: "draft",
     provenance: "public-research",
-    sourceUrl: url,
+    sourceUrl: canonicalUrl,
     content: `# ${synthesis.title}\n\n${synthesis.description}\n\n## Known public facts\n\n${synthesis.facts.map((fact) => `- ${fact.statement}`).join("\n") || "- No public facts extracted."}\n\n## Missing\n\n${synthesis.gaps.map((gap) => `- ${gap}`).join("\n")}`,
     data: synthesis,
   });
@@ -92,7 +93,7 @@ export async function runResearch(id: string, sourceUrl?: string) {
     summary: `Researched ${url}`,
     outcome: synthesis.fetchStatus === "fetched" ? "Public page extracted; claims labeled public-research" : "Fetch unavailable; deterministic gap brief created",
     nextAction: updated.nextAction,
-    sourceLink: url,
+    sourceLink: canonicalUrl,
   });
   return { engagement: updated, research: synthesis, document: artifact };
 }

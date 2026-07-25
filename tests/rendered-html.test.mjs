@@ -30,6 +30,9 @@ test("keeps frontend workflow gates and accessibility in the owned client surfac
   assert.match(cockpit, /api<\{ engagements: BackendEngagement\[\] \}>\("\/api\/engagements"\)/);
   assert.doesNotMatch(cockpit, /fallbackEngagements|local-\$\{Date\.now/);
   assert.match(cockpit, /Action not completed:/);
+  assert.match(cockpit, /normalizeWebsiteInput/);
+  assert.match(cockpit, /inputMode="url"/);
+  assert.doesNotMatch(cockpit, /type="url"/);
   assert.match(cockpit, /"pending" \| "recorded" \| "not-recorded"/);
   assert.match(cockpit, /Continue without recording/);
   assert.match(cockpit, /Approve send intent/);
