@@ -206,6 +206,7 @@ export function synthesizeResearch(
       confidence: 0.8,
       sourceLabel: "Public website description",
       sourceUrl,
+      canvasBlock: "Value Propositions",
     });
   }
 
@@ -238,6 +239,9 @@ export function synthesizeResearch(
       "Cost of delay or failure",
     ],
     constraintHypotheses,
+    researchMode: "deterministic",
+    providerStatus: "not-configured",
+    sourceCount: facts.length ? 1 : 0,
   };
 }
 

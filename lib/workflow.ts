@@ -111,6 +111,7 @@ export interface EvidenceClaim {
   confidence: number;
   sourceLabel: string;
   sourceUrl?: string;
+  canvasBlock?: string;
 }
 
 export interface ConstraintHypothesis {
@@ -130,6 +131,10 @@ export interface ResearchSynthesis {
   facts: EvidenceClaim[];
   gaps: string[];
   constraintHypotheses: ConstraintHypothesis[];
+  researchMode?: "deterministic" | "openai-web-search";
+  providerStatus?: "used" | "not-configured" | "failed";
+  providerModel?: string;
+  sourceCount?: number;
 }
 
 export interface TranscriptLine {

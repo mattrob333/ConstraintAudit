@@ -1,7 +1,7 @@
 # Tier 4 Advisor Cockpit Integration Contract
 
 **Status:** Research and implementation boundary  
-**Verified:** 2026-07-24  
+**Verified:** 2026-07-25
 **Governing documents:** `Tier4_Throughput_Audit_Codex_Workflow_v1.md` and `Tier4_Advisor_Cockpit_Architecture_Decisions.md`
 
 ## 1. Non-negotiable boundary
@@ -17,7 +17,7 @@ For this build, the architecture remains connector-first:
 
 - Fireflies, Apollo, PandaDoc, Google Drive/Sheets, and Gmail are available through installed Codex connectors.
 - Resend has no installed connector in the current environment and is a deployed-app API only.
-- OpenAI runtime key provisioning was declined at the secure confirmation boundary. No `OPENAI_API_KEY`, model variable, SDK adapter, or direct Responses API call belongs in this build.
+- OpenAI web research is a deployed-app API. It runs server-side, uses the Responses API web-search tool, and falls back to deterministic website extraction.
 
 Connector availability above is an observation of the current Codex environment, not a promise that the same connectors exist in every Codex account, workspace, or future release.
 
@@ -27,6 +27,8 @@ These names are reserved for **server-side direct API adapters only**. A variabl
 
 | Variable | Required when | Notes |
 | --- | --- | --- |
+| `OPENAI_API_KEY` | OpenAI web research is enabled | Project-scoped server secret; never exposed to the browser |
+| `OPENAI_RESEARCH_MODEL` | A model override is required | Optional; defaults to `gpt-5.6-sol` |
 | `FIREFLIES_API_KEY` | A deployed server fetches Fireflies transcripts directly | Secret bearer token; not needed for the Codex connector |
 | `APOLLO_API_KEY` | A deployed server calls Apollo directly | Secret API key; not needed for the Codex connector |
 | `PANDADOC_API_KEY` | A single-workspace deployed server calls PandaDoc directly | Secret; use only one PandaDoc auth mode |
@@ -41,13 +43,11 @@ These names are reserved for **server-side direct API adapters only**. A variabl
 | `EMAIL_FROM` | Resend sending is enabled | Full sender, for example `Tier 4 <advisor@verified.example>` |
 | `EMAIL_REPLY_TO` | Replies should go somewhere other than `EMAIL_FROM` | Optional |
 
-Do not add an OpenAI environment variable at this stage. If OpenAI is approved later, use the OpenAI Platform secure setup flow first and update this contract as part of that separately authorized change.
-
 ## 3. Integration matrix
 
 | Integration | Purpose in the approved workflow | Codex connector lane | Deployed-app lane |
 | --- | --- | --- | --- |
-| OpenAI Responses API | Optional future synthesis or structured extraction | Secure OpenAI Platform setup is available, but was not authorized for this build | Not implemented or configured |
+| OpenAI Responses API | Public company research with structured source-backed Canvas facts | Secure Platform setup provisions the key; connector tokens are not reused | Implemented with `store: false`, web search, strict JSON schema, source filtering, and deterministic fallback |
 | Fireflies | Retrieve full Call 1 and Call 2 transcripts, speakers, timestamps, and source URLs | Preferred now: search meetings, then fetch the complete transcript | Optional read-only server adapter using `FIREFLIES_API_KEY` |
 | Apollo | Fill a named company or roster evidence gap after cost disclosure and approval | Preferred now: connector exposes search, usage, and credit-gated enrichment actions | Optional server adapter using `APOLLO_API_KEY`; the app must reproduce the credit gate |
 | PandaDoc | Create reviewed proposal/SOW drafts and, only after a second approval, send for signature | Preferred now: create from Markdown or a selected template, inspect status, and send behind approval | Optional server adapter using template or file upload; the public API is not a raw-Markdown endpoint |
@@ -55,30 +55,29 @@ Do not add an OpenAI environment variable at this stage. If OpenAI is approved l
 | Gmail | Read prior context; create reviewed drafts; send only after explicit confirmation | Preferred now: connector-managed search/read/draft/send | Optional OAuth server adapter using the app's own Google Cloud credentials |
 | Resend | Transactional email when Gmail is intentionally not the sender | No installed connector in the current environment | Backend-only `POST /emails` |
 
-## 4. OpenAI Responses API — optional future enhancement only
+## 4. OpenAI Responses API — active public-research enhancement
 
 ### Purpose
 
-If separately approved later, the Responses API could produce structured, clearly labeled advisor synthesis from deterministic evidence. It must not replace transcripts, calculations, source records, confirmation status, or human approval.
+The Responses API enriches the validated company website with public web search. It returns a short company summary, source-linked facts assigned to Business Model Canvas blocks, missing baselines, and constraint hypotheses to test live. It does not replace transcripts, calculations, source records, confirmation status, or human approval.
 
 ### Authorization state
 
-Secure key provisioning was declined for this build. Therefore:
+The key is project-scoped and held in local or production server environment storage. The browser never receives it. `OPENAI_RESEARCH_MODEL` defaults to `gpt-5.6-sol` and can be changed without client-code changes.
 
-- no direct OpenAI runtime integration is authorized;
-- no OpenAI environment variables are standardized now;
-- no health check should run;
-- no model should be selected or pinned in this document.
+### Endpoint and controls
 
-A future implementation must begin through the Codex/OpenAI Platform secure setup flow. It must use a project-scoped server key held in deployment secret storage, never the browser.
+The endpoint is `POST https://api.openai.com/v1/responses`. The request sets `store: false`, enables the built-in `web_search` tool, requests web-search source records, and requires a strict JSON schema. Only facts whose URLs match returned web-search sources or the validated company website survive parsing.
 
-### Future endpoint and controls
+### Health check
 
-The official endpoint is `POST https://api.openai.com/v1/responses`. OpenAI recommends the Responses API for new projects. Responses are stored by default, so a future Tier 4 adapter should explicitly evaluate `store: false` for client evidence, apply data-retention requirements, and preserve human review before any output is promoted.
+The local verification uses a public company website, not a client transcript. A failed OpenAI request does not block research: the app retains the deterministic website result and labels the provider status as failed.
 
-### Future health check
+### Provider roadmap
 
-After separately authorized provisioning, perform one minimal non-customer test response in the staging project and verify authentication, model access, usage attribution, and `store` behavior. Do not use a client transcript as a credential test.
+- **Exa:** preferred second provider when advisors need deliberate company/domain discovery, ranked results, or a separate search index. Add it behind an explicit provider selector or fallback policy, not as an automatic duplicate call.
+- **Firecrawl:** add when the known company site cannot be read reliably, requires JavaScript rendering, or needs a controlled multi-page crawl. Use it as a retrieval layer for named URLs, not as the default search engine.
+- Do not run OpenAI, Exa, and Firecrawl on every engagement. Route by need, cap results/pages, show the selected provider, and preserve source URLs.
 
 ### Limitations
 
@@ -398,4 +397,5 @@ Rules:
 3. Decide whether the Google integration remains single-advisor or becomes multi-user before implementing token storage.
 4. Confirm whether Gmail prior-context retrieval is required in the deployed app. If not, omit `gmail.readonly` and keep reads in the Codex connector lane.
 5. Decide whether Resend is necessary at all while reviewed Gmail drafts satisfy the workflow.
-6. If OpenAI is reconsidered, restart from the secure OpenAI Platform setup boundary and re-review data retention, model, cost, and evaluation requirements. Do not infer authorization from this document.
+6. Decide whether Exa should be the first optional search fallback after representative audits reveal a discovery-recall gap.
+7. Decide whether Firecrawl is necessary only after measuring failures on JavaScript-heavy or multi-page client sites.

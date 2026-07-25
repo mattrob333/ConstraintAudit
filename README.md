@@ -18,6 +18,8 @@ The local app is fully usable with its deterministic audit engine and D1 persist
 
 The app never sends email, publishes a document, or silently upgrades an uncertain statement into client evidence. External writes remain approval-gated intents until the matching integration is configured.
 
+When `OPENAI_API_KEY` is configured, public research is enriched server-side with the Responses API web-search tool. Unsupported facts are discarded, retained facts carry public source URLs and Canvas blocks, and a failed AI request falls back to the deterministic website reader.
+
 ## Run locally
 
 Requirements: Node.js 22.13 or newer.
@@ -41,6 +43,9 @@ npm test
 
 Copy `.env.example` to `.env.local`. The app does not require secrets for its core workflow. Add only the integrations you intend to activate:
 
+- `OPENAI_API_KEY` — server-side OpenAI Responses API authentication for public web research.
+- `OPENAI_RESEARCH_MODEL` — optional model override; defaults to `gpt-5.6-sol`.
+
 - `FIREFLIES_API_KEY` — imports completed transcripts by transcript ID.
 - `APOLLO_API_KEY` — optional paid company-data enrichment.
 - `PANDADOC_API_KEY` and `PANDADOC_TEMPLATE_UUID` — optional formal proposal/SOW generation.
@@ -50,7 +55,7 @@ Copy `.env.example` to `.env.local`. The app does not require secrets for its co
 The current lightweight CRM is:
 [Tier 4 Throughput Audit CRM](https://docs.google.com/spreadsheets/d/1ANLc7vhkhkJBtkvoeLDeuXJw4yIlCJcyz3j6B_69GX8)
 
-OpenAI is intentionally optional and not part of the working runtime. The current engine is deterministic so the application runs without an API key. If a future AI-assisted adapter is added, its server-side key should be provisioned through the secure OpenAI Platform flow and never committed or exposed to the browser.
+OpenAI remains optional. Its key must be provisioned through the secure OpenAI Platform flow, stored only in the server runtime, and never committed or exposed to the browser.
 
 See [INTEGRATIONS.md](./INTEGRATIONS.md) for account setup, permission scopes, pricing boundaries, and production recommendations. The same guide is available inside the app under Documents.
 

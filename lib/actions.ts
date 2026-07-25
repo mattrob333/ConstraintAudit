@@ -8,6 +8,7 @@ import {
   generateRoadmap,
 } from "./deliverables";
 import { researchPublicWebsite } from "./research";
+import { enrichResearchWithOpenAI } from "./openai-research";
 import {
   requireApprovedReadinessArtifact,
   requireConsentAttestation,
@@ -59,15 +60,32 @@ export async function runResearch(id: string, sourceUrl?: string) {
   const engagement = await requireEngagement(id);
   const url = sourceUrl?.trim() || engagement.website;
   if (!url) throw new Error("website or sourceUrl is required");
-  const synthesis = await researchPublicWebsite(url, engagement.client);
+  const websiteResearch = await researchPublicWebsite(url, engagement.client);
+  const synthesis = await enrichResearchWithOpenAI(websiteResearch, engagement.client);
   const canonicalUrl = synthesis.sourceUrl;
-  const source = {
-    id: makeId("src"),
-    label: "Public website research",
-    url: synthesis.sourceUrl,
-    provenance: "public-research" as const,
-    capturedAt: synthesis.fetchedAt,
-  };
+  const sourceCandidates = [
+    {
+      label: "Public website research",
+      url: synthesis.sourceUrl,
+    },
+    ...synthesis.facts.map((fact) => ({
+      label: fact.sourceLabel,
+      url: fact.sourceUrl,
+    })),
+  ].filter((source): source is { label: string; url: string } => Boolean(source.url));
+  const knownSources = new Set((engagement.data.sourceRegister ?? []).map((source) => source.url));
+  const addedSources = sourceCandidates
+    .filter((source, index, all) =>
+      !knownSources.has(source.url) &&
+      all.findIndex((candidate) => candidate.url === source.url) === index
+    )
+    .map((source) => ({
+      id: makeId("src"),
+      label: source.label,
+      url: source.url,
+      provenance: "public-research" as const,
+      capturedAt: synthesis.fetchedAt,
+    }));
   const updated = await updateEngagement(id, {
     stage: "Research",
     status: "In progress",
@@ -75,7 +93,7 @@ export async function runResearch(id: string, sourceUrl?: string) {
     nextAction: "Review research gaps and draft the pre-call readiness brief",
     data: {
       research: synthesis,
-      sourceRegister: [...(engagement.data.sourceRegister ?? []), source],
+      sourceRegister: [...(engagement.data.sourceRegister ?? []), ...addedSources],
     },
     expectedVersion: engagement.version,
   });
@@ -85,13 +103,19 @@ export async function runResearch(id: string, sourceUrl?: string) {
     status: "draft",
     provenance: "public-research",
     sourceUrl: canonicalUrl,
-    content: `# ${synthesis.title}\n\n${synthesis.description}\n\n## Known public facts\n\n${synthesis.facts.map((fact) => `- ${fact.statement}`).join("\n") || "- No public facts extracted."}\n\n## Missing\n\n${synthesis.gaps.map((gap) => `- ${gap}`).join("\n")}`,
+    content: `# ${synthesis.title}\n\n${synthesis.description}\n\n## Research mode\n\n${synthesis.researchMode === "openai-web-search" ? `OpenAI web search (${synthesis.providerModel}) with ${synthesis.sourceCount ?? 0} public source(s).` : "Deterministic website extraction."}\n\n## Known public facts\n\n${synthesis.facts.map((fact) => `- ${fact.statement}${fact.sourceUrl ? ` — ${fact.sourceUrl}` : ""}`).join("\n") || "- No public facts extracted."}\n\n## Missing\n\n${synthesis.gaps.map((gap) => `- ${gap}`).join("\n")}`,
     data: synthesis,
   });
   await addActivity(updated, {
     activityType: "Research",
     summary: `Researched ${url}`,
-    outcome: synthesis.fetchStatus === "fetched" ? "Public page extracted; claims labeled public-research" : "Fetch unavailable; deterministic gap brief created",
+    outcome: synthesis.researchMode === "openai-web-search"
+      ? `OpenAI web search used; ${synthesis.sourceCount ?? 0} public sources retained`
+      : synthesis.providerStatus === "failed"
+        ? "OpenAI web search unavailable; deterministic website research retained"
+        : synthesis.fetchStatus === "fetched"
+          ? "Public page extracted; claims labeled public-research"
+          : "Fetch unavailable; deterministic gap brief created",
     nextAction: updated.nextAction,
     sourceLink: canonicalUrl,
   });

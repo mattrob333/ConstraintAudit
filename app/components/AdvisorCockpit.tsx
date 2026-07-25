@@ -25,9 +25,13 @@ type BackendEngagement = {
 
 type ResearchPayload = {
   title: string; description: string; sourceUrl: string; fetchStatus: string;
-  facts: Array<{ statement: string; provenance: string; sourceUrl?: string }>;
+  facts: Array<{ statement: string; provenance: string; sourceUrl?: string; canvasBlock?: string }>;
   gaps: string[];
   constraintHypotheses: Array<{ canvasBlock: string; type: string; evidenceHint: string; confirmationCondition: string; killCondition: string }>;
+  researchMode?: "deterministic" | "openai-web-search";
+  providerStatus?: "used" | "not-configured" | "failed";
+  providerModel?: string;
+  sourceCount?: number;
 };
 type TranscriptSynthesis = {
   baselineStatus: "Missing" | "Partial" | "Confirmed";
@@ -583,9 +587,10 @@ function Research({ company, onBack, onPrepare, research }: { company: string; o
     `${item.confirmationCondition} Kill this hypothesis if: ${item.killCondition}`,
     "assumed",
   ]) : gaps.slice(0, 4).map((gap) => [`What would make ${gap.toLowerCase()} measurable?`, `Ask for the current fact, its source, and the person who owns it.`, "missing"]);
-  return <section className="guided wide"><Back onClick={onBack}>Client intake</Back><PageHead eyebrow="Research · Canvas v0" side={<div className="research-progress"><span><Icon name="check" size={13} />Website read</span><span><Icon name="check" size={13} />Public context</span><span><Icon name="check" size={13} />Canvas drafted</span><span><Icon name="check" size={13} />Gaps found</span></div>} title="Here’s what we understand so far.">This first pass separates public evidence from interpretation. The gaps—not a generic script—guide the call with {company}.</PageHead>
+  const openAIUsed = research?.researchMode === "openai-web-search";
+  return <section className="guided wide"><Back onClick={onBack}>Client intake</Back><PageHead eyebrow="Research · Canvas v0" side={<div className="research-progress"><span><Icon name="check" size={13} />Website read</span><span><Icon name={openAIUsed ? "check" : "info"} size={13} />{openAIUsed ? "Web search" : "Local research"}</span><span><Icon name="check" size={13} />Canvas drafted</span><span><Icon name="check" size={13} />Gaps found</span></div>} title="Here’s what we understand so far.">This first pass separates public evidence from interpretation. The gaps—not a generic script—guide the call with {company}.</PageHead>
     <div className="tabs">{(["canvas", "flow", "questions"] as const).map((item) => <button aria-selected={tab === item} className={tab === item ? "active" : ""} key={item} onClick={() => setTab(item)} role="tab" type="button">{item === "canvas" ? "Business model" : item === "flow" ? "Flow of work" : "Call questions"}</button>)}</div>
-    {tab === "canvas" ? <><div className="legend"><Pill tone="inferred">Public research</Pill><span>source-linked, not client-verified</span><Pill tone="assumed">Assumed</Pill><span>advisor hypothesis</span><Pill tone="missing">Missing</Pill><span>required gap</span></div><div aria-label="Business Model Canvas" className="canvas">{canvasBlocks.map(({ title, area }) => { const hasPublicEvidence = area === "value" && Boolean(research?.facts.length); return <article className={`canvas-block canvas-${area}`} key={area}><h3>{title}</h3><ul><li><span>{area === "value" ? publicSummary : `Client confirmation needed for ${title.toLowerCase()}.`}</span><Pill tone={hasPublicEvidence ? "inferred" : "missing"}>{hasPublicEvidence ? "Public" : "Missing"}</Pill></li></ul></article>; })}</div></> : null}
+    {tab === "canvas" ? <><div className="legend"><Pill tone="inferred">Public research</Pill><span>source-linked, not client-verified</span><Pill tone="assumed">Assumed</Pill><span>advisor hypothesis</span><Pill tone="missing">Missing</Pill><span>required gap</span></div>{openAIUsed ? <div className="research-source-note"><Icon name="spark" size={17} /><span><strong>OpenAI web search used</strong>{research?.providerModel} · {research?.sourceCount ?? 0} public source(s) retained</span></div> : research?.providerStatus === "failed" ? <div className="research-source-note warning"><Icon name="info" size={17} /><span><strong>Web search was unavailable</strong>Deterministic website research was retained; no claims were invented.</span></div> : null}<div aria-label="Business Model Canvas" className="canvas">{canvasBlocks.map(({ title, area }) => { const blockFacts = (research?.facts ?? []).filter((fact) => fact.canvasBlock?.toLowerCase() === title.toLowerCase()).slice(0, 2); return <article className={`canvas-block canvas-${area}`} key={area}><h3>{title}</h3><ul>{blockFacts.length ? blockFacts.map((fact) => <li key={`${fact.statement}${fact.sourceUrl ?? ""}`}><span>{fact.statement}</span><Pill tone="inferred">Public</Pill></li>) : <li><span>Client confirmation needed for {title.toLowerCase()}.</span><Pill tone="missing">Missing</Pill></li>}</ul></article>; })}</div></> : null}
     {tab === "flow" ? <div className="flow-panel"><p className="eyebrow">Flow to trace live</p><div className="flow">{["Demand enters", "Work is qualified", "Work is committed", "Work is scheduled", "Work is delivered", "Outcome is closed"].map((item, index) => <div key={item}><span>{index + 1}</span><strong>{item}</strong><small>Confirm live</small></div>)}</div><div className="two-columns"><article><h3>What the public source supports</h3><p>{publicSummary}</p></article><article><h3>What remains unknown</h3><p>{gaps.join(", ")}.</p></article></div></div> : null}
     {tab === "questions" ? <div className="question-list">{questions.map(([title, text, tone], index) => <article key={title}><b>0{index + 1}</b><div><Pill tone={tone as Tone}>{tone === "missing" ? "Baseline gap" : "Internal · unconfirmed"}</Pill><h3>{title}</h3><p>{text}</p></div></article>)}</div> : null}
     <div className="page-actions"><div><Button variant="quiet">Correct research</Button><Button variant="quiet">Add a source</Button><Button variant="quiet">Research a gap</Button></div><Button icon="arrow" onClick={onPrepare}>Prepare the client</Button></div>
@@ -680,6 +685,13 @@ function Deliver({ approved, generated, onBack, onGenerate, onSync }: { approved
 }
 
 function IntegrationCenter({ onBack }: { onBack: () => void }) {
+  const [openAI, setOpenAI] = useState<{ status: string; model?: string } | null>(null);
+  useEffect(() => {
+    api<{ integrations: Array<{ id: string; status: string; model?: string }> }>("/api/integrations")
+      .then((result) => setOpenAI(result.integrations.find((item) => item.id === "openai") ?? null))
+      .catch(() => setOpenAI({ status: "unavailable" }));
+  }, []);
+  const openAIReady = openAI?.status === "configured";
   const items: [string, IconName, string, Tone, string, string][] = [
     ["Local workflow engine", "shield", "Ready", "success", "Deterministic state, sample research, guided call, synthesis, and artifacts. No secret required.", "Working default"],
     ["Google Drive & Sheets", "folder", "Not connected", "neutral", "Canonical records, inspectable registry, approved artifacts, and source links.", "Authorize Google"],
@@ -688,7 +700,7 @@ function IntegrationCenter({ onBack }: { onBack: () => void }) {
     ["PandaDoc", "document", "Not connected", "neutral", "Formal proposal and statement-of-work generation from approved templates.", "Add API key"],
     ["Resend", "upload", "Not connected", "neutral", "Optional transactional delivery for approved client-facing documents.", "Add API key"],
     ["Gmail & Calendar", "calendar", "Not connected", "neutral", "Meeting identity, attendees, correspondence, and reviewed drafts.", "Authorize Google"],
-    ["OpenAI", "spark", "Secure authorization pending", "assumed", "Optional enhancement for richer synthesis and drafting. Local mode works fully without it.", "Authorization pending"],
+    ["OpenAI web research", "spark", openAIReady ? "Ready" : openAI ? "Not connected" : "Checking", openAIReady ? "success" : "assumed", openAIReady ? `Responses API web search is connected server-side${openAI?.model ? ` with ${openAI.model}` : ""}.` : "Connect a server-side API key to enrich public company research. Local research remains available.", openAIReady ? "Connected" : "Add API key"],
   ];
   return <section className="guided wide integrations"><Back onClick={onBack}>Start</Back><PageHead eyebrow="Setup & data sources" title="Integration Center">The working default is local and deterministic. Connectors add source access or external delivery only after explicit authorization.</PageHead>
     <div className="local-default"><Icon name="shield" size={23} /><div><strong>Ready without credentials</strong><p>Intake, research, guided call, transcript paste/upload, synthesis, findings, and deliverables remain usable.</p></div><Pill tone="success">Working default</Pill></div>

@@ -17,6 +17,10 @@ import {
   validatePublicUrl,
 } from "../lib/research.ts";
 import {
+  collectOpenAIWebSources,
+  parseOpenAIResearchPayload,
+} from "../lib/openai-research-schema.ts";
+import {
   baselineStatusFor,
   extractMetrics,
   parseTranscriptText,
@@ -50,6 +54,50 @@ test("research fallback makes gaps instead of company claims", () => {
   assert.deepEqual(result.facts, []);
   assert.equal(result.gaps.includes("End-to-end cycle time"), true);
   assert.match(result.description, /No company fact was inferred/);
+});
+
+test("OpenAI research keeps only source-backed canvas facts", () => {
+  const response = {
+    output: [{
+      type: "web_search_call",
+      action: {
+        sources: [
+          { type: "url", url: "https://acme.example/services" },
+        ],
+      },
+    }],
+  };
+  const sources = collectOpenAIWebSources(response);
+  const result = parseOpenAIResearchPayload({
+    summary: "Acme serves industrial buyers.",
+    facts: [
+      {
+        statement: "Acme offers custom fabrication.",
+        canvas_block: "Value Propositions",
+        source_label: "Acme services",
+        source_url: "https://acme.example/services",
+        confidence: 0.9,
+      },
+      {
+        statement: "Acme has a hidden approval bottleneck.",
+        canvas_block: "Key Activities",
+        source_label: "Unsupported",
+        source_url: "https://unsupported.example/claim",
+        confidence: 0.9,
+      },
+    ],
+    gaps: ["Monthly demand volume"],
+    constraint_hypotheses: [{
+      canvas_block: "Key Activities",
+      type: "latency",
+      evidence_hint: "Public copy emphasizes turnaround.",
+      confirmation_condition: "Client evidence identifies a measurable delay.",
+      kill_condition: "Flow evidence shows no limiting delay.",
+    }],
+  }, "https://acme.example/", sources);
+  assert.equal(result.facts.length, 1);
+  assert.equal(result.facts[0].canvasBlock, "Value Propositions");
+  assert.equal(result.constraintHypotheses[0].type, "latency");
 });
 
 test("public URL guard rejects local and credential-bearing targets", () => {

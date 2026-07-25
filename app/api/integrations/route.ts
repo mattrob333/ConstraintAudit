@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers";
 import { firefliesConfigured } from "@/lib/fireflies";
+import { openAIResearchConfigured, openAIResearchModel } from "@/lib/openai-research";
 import { route } from "@/lib/http";
 import { ensureDatabase } from "@/lib/store";
 
@@ -109,10 +110,12 @@ export async function GET() {
         },
         {
           id: "openai",
-          name: "OpenAI enhancement",
-          status: "future_optional",
-          mode: "not_present_in_runtime",
-          setup: "A future enhancement must use Codex secure authorization. This build is deterministic.",
+          name: "OpenAI web research",
+          status: openAIResearchConfigured() ? "configured" : "not_configured",
+          mode: "responses_api_web_search",
+          setup: "The server uses the Responses API web-search tool. The browser never receives the credential.",
+          environmentVariables: ["OPENAI_API_KEY", "OPENAI_RESEARCH_MODEL"],
+          model: openAIResearchModel(),
           storesSecrets: false,
         },
       ],
