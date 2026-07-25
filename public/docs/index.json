@@ -22,5 +22,11 @@
     "title": "Integration and Authorization Guide",
     "description": "Connector boundaries, account authorization, environment settings, health checks, and operational limitations.",
     "url": "/docs/integrations.md"
+  },
+  {
+    "id": "current-state",
+    "title": "Current Build State and Developer Handoff",
+    "description": "What is working, what is still scaffolded, the integration status, and the next implementation milestone.",
+    "url": "/docs/current-state.md"
   }
 ]

@@ -1,8 +1,9 @@
 # Tier 4 Advisor Cockpit
 ## Research, Document, and Interface Architecture Decisions
 
-**Status:** Architecture decided; Superdesign draft created and pending advisor approval  
-**Governing workflow:** `Tier4_Throughput_Audit_Codex_Workflow_v1.md`
+**Status:** Implemented single-advisor prototype; production-hardening and adaptive-workflow work remain  
+**Last reconciled with code:** 2026-07-25  
+**Governing workflow:** `public/docs/workflow.md`
 
 ---
 
@@ -84,6 +85,21 @@ Apollo is invoked only when:
 ### Conclusion
 
 For Tier 4, the free-first stack is usually as good or better for diagnosis because it preserves source authority and makes uncertainty visible. Apollo is better for speed, normalization, direct-contact discovery, and scale—not for proving the operating constraint.
+
+### Active and planned provider routing
+
+The shipped application currently uses deterministic website extraction and optional OpenAI Responses API web search. The returned facts are parsed through a strict schema, facts without retained sources are discarded, and provider failure falls back to deterministic gaps.
+
+The planned routing is:
+
+```text
+OpenAI web research
+    -> Exa fallback when authoritative company/source coverage misses a defined threshold
+    -> Firecrawl for a known page or site that requires deeper or JavaScript-rendered extraction
+    -> Apollo only for a named, paid enrichment gap with explicit approval
+```
+
+Exa and Firecrawl are not yet implemented. No provider should become the default based on vendor claims alone. Evaluate a fixed company corpus for authoritative-source recall, unsupported claims, Canvas coverage, Value Flow usefulness, question specificity, latency, and cost.
 
 ---
 
@@ -324,20 +340,40 @@ Supabase is a later migration when concurrency, row-level permissions, event vol
 
 ---
 
-## Build Boundary
+## Current Build Boundary
 
-The first advisor-cockpit design draft now exists in Superdesign:
+The advisor-cockpit UI has been implemented and deployed. The approved visual direction is now represented by the local application rather than the original design prototype.
 
-- [Project canvas](https://superdesign.dev/teams/258e32f2-498e-4e39-b378-76b962c2925a/projects/6c8fe8b6-be6c-4710-9564-f3ec44a85167)
-- [Guided Canvas Session preview](https://p.superdesign.dev/draft/b5c230d2-868f-43a4-a846-ecb23c2746c9)
+### Shipped control surface
 
-No UI code has been generated yet because the design approval gate is still active.
+- Client intake, external migration, and engagement resume
+- Research review with a correctly shaped nine-block Business Model Canvas
+- Pre-Call Readiness Brief preview and approval
+- Large-type Call 1 screen with recording-consent gate
+- Transcript intake and synthesis review
+- Findings Call with missing-baseline provisional handling
+- Deliverable generation and CRM write-back intent
+- Documents menu and Integration Center
 
-Next:
+### Current architectural limitations
 
-1. Review the live-call flow and client-safe/internal-safe boundaries.
-2. Obtain advisor approval or iterate the design.
-3. Initialize the local site.
-4. Implement the approved interface.
-5. Run it in Codex and verify the main interactions in the in-app browser.
-6. Keep connector mutations behind Codex approval actions rather than calling external systems directly from untrusted browser state.
+- Value Flow and live-call topics are frontend scaffolds rather than engagement data.
+- The research record and final-document Canvas are not yet one canonical versioned object.
+- Transcript file upload does not ingest the selected file's contents.
+- Transcript synthesis is deterministic keyword matching rather than full evidence reconciliation.
+- Most connectors create intents or report setup state but do not execute external actions.
+- The Integration Center does not render the complete backend integration-status response.
+- No app-layer identity, tenant ownership, or route authorization exists.
+- Sprint measurement and catalog write-back are not implemented.
+
+### Next architecture milestone
+
+1. Extend `ResearchSynthesis` with source-grounded `valueFlow` and `discoveryQuestions`.
+2. Persist a versioned canonical Canvas and bind all UI and document renderers to it.
+3. Bind Call 1 to the engagement's editable discovery plan.
+4. Implement real transcript file ingestion and structured transcript reconciliation.
+5. Add tenancy before widening production access.
+6. Implement external adapters in the order Fireflies, Google Sheets, Google Docs, email, PandaDoc.
+7. Add Exa only after an evaluation shows a measurable retrieval gap; use Firecrawl for targeted extraction failures.
+
+Connector mutations remain behind explicit, reviewed, idempotent approval actions rather than untrusted browser state.

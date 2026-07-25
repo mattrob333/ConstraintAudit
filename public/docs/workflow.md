@@ -1,8 +1,39 @@
 # Tier 4 Throughput Audit
 ## Corrected Sales-to-Delivery Workflow for Codex
 
-**Status:** Approved workflow specification — Pre-Call Readiness Addendum incorporated  
+**Status:** Approved target workflow — current implementation delta documented 2026-07-25  
 **Purpose:** Define the evidence-grounded, two-call workflow that locates the single constraint governing a client's throughput, validates it with the client, prescribes the smallest intervention that removes it, measures the result, and writes the outcome back to the Tier 4 intervention catalog.
+
+---
+
+## 0. Specification and Implementation Truth
+
+This document is the canonical target workflow. It intentionally distinguishes the approved product behavior from what the current application has shipped.
+
+As of 2026-07-25:
+
+| Area | Current implementation |
+| --- | --- |
+| Public research | Working through deterministic website extraction plus optional OpenAI Responses API web search |
+| Business Model Canvas v0 | Dynamic and source-backed in the research interface |
+| Value Flow v0 | Not implemented; the interface shows a fixed six-stage scaffold |
+| Recon question generation | Constraint metadata is dynamic, but displayed question wording is generic |
+| Guided Call 1 plan | Not implemented from research; the client-call view uses six fixed demo topics |
+| Readiness Brief | Working as an approved artifact and send intent; no email is sent |
+| Transcript paste | Working with deterministic evidence and metric extraction |
+| Transcript file upload | Incomplete; only the filename is submitted |
+| Fireflies | Backend import adapter exists; requires server-side authorization |
+| Transcript synthesis | Deterministic keyword rules; full research/Canvas/flow reconciliation is not implemented |
+| Findings governance | Consent, evidence, named-owner, and missing-baseline gates are working |
+| Final documents | Internal Markdown artifacts only; external renderers are not implemented |
+| CRM and catalog | Reviewed intents only; no Google Sheets write or measured-outcome catalog loop |
+| Identity and tenancy | Not implemented at the application layer |
+
+No current UI placeholder, intent record, or documented connector may be represented as a completed integration.
+
+The next required product milestone is:
+
+> A fresh engagement must turn research into a source-grounded Value Flow v0 and a client-specific discovery plan, use that plan during Call 1, reconcile the transcript into the same canonical Canvas and value flow, and carry those verified facts into every final deliverable.
 
 ---
 
@@ -109,11 +140,15 @@ flowchart LR
 Recon uses:
 
 - Calendar for meeting identity, attendees, timing, and agenda.
-- Apollo for company and roster research, subject to Apollo credit approval.
 - Gmail and Drive for prior correspondence, notes, proposals, and client-provided documents.
-- Public research for sourced company facts.
+- OpenAI Responses API web search as the active default for sourced public company research.
+- Exa as a future fallback when source coverage is insufficient or company-specific retrieval fails a defined quality threshold.
+- Firecrawl as a future targeted crawler when a known source cannot be extracted reliably, especially for multi-page or JavaScript-rendered sites.
+- Apollo only for a named company or roster gap, subject to explicit credit approval.
 
-Recon produces six artifacts.
+OpenAI, Exa, Firecrawl, and Apollo are provider roles, not evidence statuses. Every retained claim still carries its original source URL and Tier 4 provenance.
+
+Recon produces seven artifacts.
 
 #### 1. Company Brief
 
@@ -153,7 +188,29 @@ Create a draft organization sketch from available company, Apollo, and public in
 
 Public roster data remains `public-research` until the client confirms it.
 
-#### 4. Constraint Hypotheses
+#### 4. Value Flow v0
+
+Generate a source-grounded hypothesis for how value moves from demand entering the business through the customer's definition of completion.
+
+Each proposed step contains:
+
+| Field | Meaning |
+| --- | --- |
+| Order and name | Position in the proposed end-to-end flow |
+| Input | What enters the step |
+| Output | What leaves the step |
+| Actor | Publicly supported role or explicit `Missing` owner |
+| System | Publicly supported system or explicit `Missing` system |
+| Evidence status | `public-research`, `advisor-note`, or `gap` |
+| Source links | Public sources supporting the proposed step |
+| Confidence | Confidence in the public interpretation, never client confirmation |
+| Confirmation question | The live question that confirms, corrects, reorders, or removes the step |
+
+Public research will rarely establish the complete internal operating flow. Thin areas must remain explicit gaps. Do not fill unknown internal handoffs with a universal sales or delivery template.
+
+The Value Flow v0 shown in the application must be generated from this artifact. A fixed sequence such as “Demand enters → Work is qualified → Work is committed → Work is scheduled → Work is delivered → Outcome is closed” may be used only as an empty-state tracing frame, never represented as a researched company fact.
+
+#### 5. Constraint Hypotheses
 
 Generate one to three hypotheses. Each must state:
 
@@ -165,11 +222,37 @@ Generate one to three hypotheses. Each must state:
 | Confirmation condition | What evidence would strengthen it |
 | Kill condition | What evidence would disprove it |
 
-#### 5. Question Set
+#### 6. Private Discovery Plan and Question Set
 
-Questions are generated from Canvas gaps and constraint hypotheses. The gaps are the agenda.
+Questions are generated from:
 
-#### 6. Pre-Call Readiness Brief
+- retained public facts that require live confirmation;
+- missing or thin Canvas blocks;
+- Value Flow v0 steps and gaps;
+- constraint hypotheses and their confirmation/kill conditions;
+- baseline requirements;
+- role and task ownership inside the traced flow;
+- prescription-feasibility inputs that matter only after the constraint is understood.
+
+Each question contains:
+
+| Field | Required content |
+| --- | --- |
+| Section | `demand`, `promise`, `flow`, `constraint`, `baseline`, `roles`, or `feasibility` |
+| Question | Client-specific wording suitable for the call screen |
+| Why it matters | Short advisor-facing diagnostic purpose |
+| Public assumption | The sourced claim or explicit gap being tested |
+| Source links | Supporting public evidence, when any |
+| Evidence status | `public-research`, `advisor-note`, or `gap` |
+| Expected answer | Narrative, number, person, or choice |
+| Follow-ups | Conditional probes based on the expected answer |
+| Required | Whether the diagnostic contract requires an answer or explicit `Missing` result |
+
+The question set must be specific to the researched company. Generic mandatory coverage may determine what the interview must establish, but it must not become the visible question wording when company context exists.
+
+The gaps are the agenda. The advisor may edit, reorder, add, disable, or mark questions answered before Call 1. The approved private plan remains hidden from the client until each question is asked live.
+
+#### 7. Pre-Call Readiness Brief
 
 Produce a short, client-facing brief after Recon and before Call 1. Its purpose is to put the required baseline numbers within the client's reach so quantification does not stall the session.
 
@@ -238,6 +321,18 @@ The advisor then screen-shares Canvas v0 and opens with:
 > “Here is what we found publicly. Correct us.”
 
 The session is guided, not open-ended. It updates the canvas, traces the actual operating flow, quantifies queues and delays, and creates the task-level people map.
+
+The call interface consumes the approved private discovery plan from Recon. It must not use a universal demo script. Each screen displays:
+
+- one client-specific question;
+- why the answer matters to the advisor;
+- the public fact, Value Flow step, hypothesis, or explicit gap being tested;
+- source access for the advisor without exposing internal hypotheses to the client;
+- confirm, correct, and unknown outcomes;
+- space for the client's exact words, numbers, and named owners;
+- conditional follow-up questions.
+
+The interview must still establish demand, customer promise, actual end-to-end flow, the current queue or constraint, a baseline or named Missing action, and role ownership inside the traced flow.
 
 #### Flow Tracing
 
@@ -642,3 +737,24 @@ Use these replacements in prompts, schemas, and templates:
 | How the client could use AI | Locate the single constraint limiting throughput and put a number on removing it |
 
 The workflow must never drift back into a portfolio-style AI opportunity assessment.
+
+---
+
+## 11. End-to-End Implementation Acceptance
+
+The cockpit is not considered research-adaptive until all of these conditions pass:
+
+1. Two materially different companies produce different source-backed Canvas content, Value Flow v0 steps, assumptions, and discovery questions.
+2. Every public fact and proposed flow step has a retained source URL or is labeled `advisor-note`/`gap`.
+3. The live Call 1 interface reads the engagement's approved discovery plan rather than a frontend constant.
+4. Advisor changes to the Canvas, flow, questions, and named roles persist to the canonical engagement record.
+5. Uploaded transcript formats submit and preserve actual content rather than filenames.
+6. Transcript synthesis compares the conversation with the original facts, flow, hypotheses, and questions and preserves contradictions.
+7. Call 2 reconciliation appends later evidence without silently overwriting Call 1 history.
+8. The Canvas shown in the application and the Canvas rendered in the Audit Report come from the same versioned data.
+9. A missing baseline produces only a provisional diagnosis, named-input formula, and instrumentation plan.
+10. External emails, documents, CRM changes, paid enrichment, and signatures execute only through separately approved, idempotent actions.
+11. Every engagement record is authorized to an authenticated tenant and user before multi-advisor access is enabled.
+12. A measured result can progress through `SPRINT_ACTIVE`, `OUTCOME_MEASURED`, and `CATALOG_WRITTEN` with an auditable constraint-migration record.
+
+Provider quality must be evaluated rather than assumed. Before changing the default research provider, run the same test corpus through the current OpenAI path and the proposed provider path, then compare authoritative-source recall, unsupported-claim rate, Canvas coverage, value-flow usefulness, question specificity, latency, and cost.
