@@ -63,7 +63,7 @@ See [INTEGRATIONS.md](./INTEGRATIONS.md) for account setup, permission scopes, p
 - `public/docs/` — in-app operating documentation.
 - `tests/` — workflow, contract, and rendered-product checks.
 
-The Sites project and database bindings are declared in `.openai/hosting.json`. Production is designed for private workspace access; the API also enforces per-user ownership when platform identity headers are present.
+The Sites project and database bindings are declared in `.openai/hosting.json`. The current production deployment is owner-only. Before sharing it with additional advisors, add app-layer tenant ownership to engagement records and enforce that ownership in every API route.
 
 ## Operating boundaries
 
