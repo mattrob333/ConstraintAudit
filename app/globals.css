@@ -617,7 +617,7 @@ blockquote { margin: 0; }
 
 .secondary-entries {
   display: grid;
-  grid-template-rows: 1fr 1fr;
+  grid-auto-rows: minmax(0, 1fr);
   gap: 16px;
 }
 
@@ -2913,4 +2913,415 @@ blockquote { margin: 0; }
   .briefing-arc li { grid-template-columns: minmax(0, 1fr); gap: 2px; }
   .briefing > summary { grid-template-columns: auto minmax(0, 1fr); }
   .briefing > summary > svg:last-child { display: none; }
+}
+
+/* ===========================================================================
+ * PRACTICE MODE
+ * ---------------------------------------------------------------------------
+ * Two independent things live here.
+ *
+ * `.practice-bar` is the DEMO marker. It is sticky at the top of the page for
+ * as long as the practice engagement is open, on every screen including the two
+ * client-facing ones, and there is no rule anywhere that hides it. The app
+ * header gives up its own stickiness while it is present so that the warning is
+ * the thing pinned to the top of the viewport rather than the chrome.
+ *
+ * `.tour-dock` is the walkthrough. It is advisor guidance, so it is not styled
+ * out of view on a client-facing screen — it is not rendered at all.
+ * =========================================================================== */
+
+.practice-bar {
+  position: sticky;
+  z-index: 55;
+  top: 0;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  border-bottom: 2px solid #b8571f;
+  background: repeating-linear-gradient(135deg, rgba(255, 255, 255, .12) 0 12px, transparent 12px 24px), #d9721f;
+  padding: 9px max(24px, calc((100vw - var(--max)) / 2));
+  color: #22150a;
+}
+
+.practice-bar strong {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 7px;
+  border-radius: 999px;
+  background: #22150a;
+  padding: 5px 12px;
+  color: #ffe9d2;
+  font-family: "JetBrains Mono", monospace;
+  font-size: .66rem;
+  font-weight: 500;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+
+.practice-bar p {
+  margin: 0;
+  font-size: .84rem;
+  line-height: 1.4;
+}
+
+.practice-bar p b { font-weight: 700; }
+
+.practice-bar-actions {
+  display: inline-flex;
+  flex: none;
+  margin-left: auto;
+  gap: 7px;
+}
+
+.practice-bar-actions button {
+  border: 1px solid rgba(34, 21, 10, .45);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .82);
+  padding: 6px 13px;
+  color: #22150a;
+  font-size: .76rem;
+  font-weight: 650;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.practice-bar-actions button:hover:not(:disabled) { background: white; }
+.practice-bar-actions button:disabled { opacity: .55; cursor: not-allowed; }
+
+/* The header stops competing for the top of the viewport while the marker is up. */
+.cockpit.practice .app-header { position: static; }
+
+.practice-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin-bottom: 18px;
+}
+
+.practice-error button {
+  margin-left: auto;
+  border: 0;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+}
+
+/* The inline marker, wherever a practice record sits beside real ones. */
+.practice-mark {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid #e0a463;
+  border-radius: 999px;
+  background: #fdefdd;
+  padding: 3px 10px;
+  color: #8a4a12;
+  font-family: "JetBrains Mono", monospace;
+  font-size: .64rem;
+  font-weight: 500;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+/* Entry card */
+.entry.secondary.practice-entry {
+  border-color: #e0a463;
+  background: linear-gradient(180deg, #fffaf3 0%, rgba(255, 255, 255, .86) 100%);
+}
+
+.entry.secondary.practice-entry:hover { border-color: #c8802f; }
+.entry.secondary.practice-entry .entry-icon { background: #fdefdd; color: #8a4a12; }
+.entry.secondary.practice-entry small { color: #8a4a12; }
+.entry.secondary.practice-entry:disabled { cursor: progress; opacity: .75; }
+
+.entry-busy {
+  margin-top: 10px;
+  color: #8a4a12;
+  font-family: "JetBrains Mono", monospace;
+  font-size: .68rem;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+/* Practice records on the start screen, separated out of the client list. */
+.practice-recent {
+  position: relative;
+  z-index: 1;
+  margin-top: 34px;
+  border: 1px solid #e0a463;
+  border-radius: 12px;
+  background: rgba(255, 250, 243, .8);
+  padding: 15px 16px;
+}
+
+.practice-recent-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 11px;
+  flex-wrap: wrap;
+}
+
+.practice-recent-head > span { color: var(--muted); font-size: .84rem; }
+.practice-recent .recent-list { margin: 0; }
+
+.recent-list .recent.practice { border-color: #e0a463; background: rgba(255, 255, 255, .9); }
+.recent-list .recent.practice:hover { border-color: #c8802f; }
+.recent-list .recent.practice .initials { background: #fdefdd; color: #8a4a12; }
+
+/* Practice rows in the full registry, in their own labelled group. */
+.registry tr.registry-group td {
+  background: var(--paper);
+  padding-top: 15px;
+  vertical-align: middle;
+}
+
+.registry tr.registry-group td > span,
+.registry tr.registry-group td > strong { font-size: .84rem; vertical-align: middle; }
+.registry tr.registry-group td > strong { margin-right: 9px; }
+.registry tr.registry-group td > span { color: var(--muted); }
+.registry tr.registry-group .practice-mark { margin: 0 9px 0 0; vertical-align: middle; }
+.registry tbody.registry-practice tr:not(.registry-group) { background: rgba(255, 250, 243, .75); }
+.registry tbody.registry-practice tr:not(.registry-group) td:first-child { box-shadow: inset 3px 0 0 #d9721f; }
+.registry td .practice-mark { margin-top: 6px; }
+
+/* ---------------------------------------------------------------------------
+ * The walkthrough dock. Bottom right; `.save-state` owns the bottom left.
+ * ------------------------------------------------------------------------- */
+
+.tour-dock {
+  position: fixed;
+  z-index: 50;
+  right: 20px;
+  bottom: 20px;
+  width: min(430px, calc(100vw - 40px));
+  max-height: min(78vh, 780px);
+  overflow: auto;
+  border-radius: 13px;
+  box-shadow: 0 18px 46px rgba(20, 37, 29, .22);
+}
+
+/* On the guided call the coaching rail owns the right column, and `.save-state` is not
+   rendered, so the dock moves to the free bottom-left corner instead of covering it. */
+.client-call .tour-dock { right: auto; left: 20px; }
+
+.tour-dock .advisor-only {
+  border-color: #c8802f;
+  border-style: solid;
+  background: repeating-linear-gradient(135deg, rgba(217, 114, 31, .05) 0 9px, transparent 9px 18px), var(--surface);
+}
+
+.tour-dock .advisor-only-flag { margin-bottom: 10px; color: #8a4a12; }
+
+.tour-dock.collapsed {
+  width: auto;
+  max-width: min(360px, calc(100vw - 40px));
+  overflow: visible;
+}
+
+.tour-dock.collapsed .advisor-only { padding: 8px; }
+.tour-dock.collapsed .advisor-only-flag { display: none; }
+
+.tour-rejoin {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  padding: 6px 8px;
+  color: var(--forest);
+  text-align: left;
+  cursor: pointer;
+}
+
+.tour-rejoin:hover { background: var(--step); }
+.tour-rejoin strong { display: block; font-size: .9rem; }
+.tour-rejoin small { display: block; color: var(--muted); font-size: .76rem; }
+
+.tour-panel { display: grid; gap: 12px; }
+
+.tour-panel > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.tour-panel > header .eyebrow { margin: 0 0 3px; color: #8a4a12; }
+.tour-panel > header h2 { margin: 0; font-size: 1.28rem; }
+
+.tour-count {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--paper);
+  padding: 5px 11px;
+  color: var(--muted);
+  font-family: "JetBrains Mono", monospace;
+  font-size: .68rem;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.tour-count:hover { border-color: var(--forest); color: var(--forest); }
+.tour-count[aria-expanded="true"] > svg { transform: rotate(90deg); }
+
+.tour-progress {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--soft);
+  overflow: hidden;
+}
+
+.tour-progress i { display: block; height: 100%; background: #d9721f; transition: width .25s ease; }
+
+.tour-list {
+  display: grid;
+  gap: 2px;
+  max-height: 230px;
+  overflow: auto;
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--paper);
+  padding: 6px;
+  list-style: none;
+}
+
+.tour-list button {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  padding: 6px 7px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.tour-list button:hover { background: var(--step); }
+.tour-list button.active { background: var(--step); }
+.tour-list button.active strong { color: var(--forest); }
+.tour-list button.done b { background: var(--forest); color: white; }
+
+.tour-list b {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--soft);
+  color: var(--muted);
+  font-family: "JetBrains Mono", monospace;
+  font-size: .66rem;
+  font-weight: 500;
+}
+
+.tour-list strong { display: block; font-size: .84rem; }
+.tour-list small { display: block; color: var(--muted); font-size: .7rem; }
+
+.tour-body { display: grid; gap: 13px; }
+.tour-body section { display: grid; gap: 5px; }
+.tour-body .eyebrow { margin: 0; color: var(--forest); }
+.tour-body p { margin: 0; color: var(--ink); font-size: .88rem; line-height: 1.55; }
+
+.tour-body ul { display: grid; gap: 7px; margin: 0; padding: 0 0 0 17px; }
+.tour-body li { color: var(--muted); font-size: .85rem; line-height: 1.5; }
+
+.tour-lead { margin: 0; font-size: .89rem; line-height: 1.55; }
+
+.tour-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0;
+  border-left: 3px solid #d9721f;
+  border-radius: 6px;
+  background: #fffaf3;
+  padding: 10px 12px;
+  color: var(--muted);
+  font-size: .82rem;
+  line-height: 1.5;
+}
+
+.tour-note > svg { flex: none; margin-top: 2px; color: #8a4a12; }
+.tour-note .call-link { padding: 0; font-size: inherit; text-decoration: underline; }
+
+.tour-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.tour-actions .button { flex: 1 1 auto; justify-content: center; }
+
+.tour-remove {
+  justify-self: start;
+  border: 0;
+  background: none;
+  padding: 0;
+  color: #8a4a12;
+  font-size: .78rem;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.tour-remove:disabled { opacity: .55; cursor: not-allowed; }
+
+.tour-foot {
+  display: grid;
+  gap: 4px;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+
+.tour-foot button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  justify-self: start;
+  border: 0;
+  background: none;
+  padding: 0;
+  color: var(--forest);
+  font-size: .8rem;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.tour-foot small { color: var(--muted); font-size: .74rem; }
+
+@media (max-width: 1240px) {
+  .tour-dock { width: min(380px, calc(100vw - 40px)); }
+}
+
+@media (max-width: 900px) {
+  .practice-bar { flex-wrap: wrap; gap: 9px; }
+  .practice-bar-actions { margin-left: 0; }
+  .secondary-entries { grid-auto-rows: auto; }
+  .secondary-entries .practice-entry { grid-column: 1 / -1; }
+  .tour-dock,
+  .client-call .tour-dock {
+    right: 12px;
+    left: 12px;
+    bottom: 12px;
+    width: auto;
+    max-height: 62vh;
+  }
+
+  .tour-dock.collapsed { max-width: none; }
+}
+
+@media (max-width: 720px) {
+  .practice-bar { padding-inline: 14px; }
+  .practice-bar p { font-size: .78rem; }
+  .tour-panel > header { flex-direction: column; }
+  .tour-actions .button { flex-basis: 100%; }
 }
