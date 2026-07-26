@@ -1,75 +1,87 @@
 ---
 type: Roadmap
 title: Production Readiness Roadmap
-description: Prioritized work required to make the research workflow adaptive, transcript analysis trustworthy, integrations operational, and the app safe for multiple advisors.
+description: What the gap-closure change completed, the work that remains before the app is production-ready for multiple advisors and formal client documents, and the open product-owner decisions.
 tags: [roadmap, production-readiness, integrations, tenancy]
 ---
 
 # Production-readiness roadmap
 
-## P0 — Make research drive the workflow
+## Completed by the gap-closure change
 
-- Add a source-grounded Value Flow v0 to `ResearchSynthesis`.
-- Add a structured, editable, company-specific discovery plan.
-- Persist one canonical, versioned Business Model Canvas.
-- Bind Flow of Work and Call 1 to engagement data rather than frontend constants.
-- Prove two contrasting companies produce different flows and questions.
-- Make the Integration Center render the complete backend status response.
+The three P0 tracks that dominated the previous roadmap are now implemented in source and covered by tests. They are listed here so nobody re-plans them.
 
-**Exit:** research visibly changes the client session and the final report uses the same Canvas the advisor reviewed.
+| Track | Result |
+| --- | --- |
+| Research drives the workflow | `valueFlow` and `discoveryQuestions` are in `ResearchSynthesis`, produced deterministically and enriched by OpenAI; the Flow of Work tab and the Call 1 script read them; the hardcoded flow and `callTopics` are gone; the Integration Center renders `/api/integrations` |
+| One canonical Canvas | `lib/canvas.ts` plus `engagement.data.canvas`, written by `runResearch()` and corrected by transcript evidence; `"Key Partnerships"` normalized; the Audit Report renders the Canvas the advisor reviewed |
+| Transcript evidence | TXT, VTT, SRT, JSON, and DOCX decode into real speaker-attributed lines; raw text stays immutable; synthesis reconciles contradictions, Canvas updates, flow confirmations, decisions, tasks, roles, and metrics; Call 2 reconciles against Call 1 without silent overwrite |
+| Identity and tenancy | `lib/auth.ts`, `owner_id` on every table, SQL-scoped queries, `REQUIRE_ADVISOR_AUTH`, `LEGACY_OWNER_EMAIL` backfill, `drizzle/0001_tenancy.sql` |
+| Operational integrations | Resend, Google Sheets, and Google Drive/Docs adapters execute from approved intents |
+| The operational loop | `SPRINT_ACTIVE`, `OUTCOME_MEASURED`, `CATALOG_WRITTEN` are implemented with an evidence-gated delta |
 
-## P0 — Fix transcript evidence
+## P0 — Prove research adapts per company
 
-- Ingest actual TXT, VTT, SRT, and DOCX content.
-- Preserve immutable raw transcripts.
-- Add structured transcript reconciliation against facts, flow, hypotheses, questions, roles, and baselines.
-- Retain deterministic evidence and approval guards after model analysis.
-- Preserve Call 1 and Call 2 history without silent overwrites.
+Everything else is downstream of this claim being true.
 
-**Exit:** a real transcript changes the canonical Canvas/flow through a reviewable evidence diff.
+- Build an automated test that runs research for two contrasting companies and asserts the resulting value flows and discovery questions differ.
+- Add `researchQuality` — coverage and source-authority signals — so a weak result is detectable rather than merely unimpressive.
+- Add an explicit `canvasRevision` so Canvas versions are addressable across approvals and documents.
 
-## P0 — Add identity and tenancy
+**Exit:** a failing test, not a manual impression, catches a regression to a generic script.
 
-- Require authenticated user identity.
-- Add tenant and owner columns to engagement-owned records.
-- Enforce ownership in every API query and mutation.
-- Add retention, deletion, rate limiting, and audit logging.
+## P0 — Tenancy hardening
 
-**Exit:** two unrelated advisors cannot read or mutate one another's engagements, artifacts, transcripts, activities, or intents.
+Row scoping exists; the surrounding policy does not.
 
-## P1 — Operational integrations
+- Add an automated cross-owner isolation test.
+- Add retention, deletion, and rate limiting.
+- Decide whether an organization or team layer is needed above the individual advisor.
+- Reconcile `integrationRuntimeStatus()` in `lib/integrations/index.ts` with the hand-built response in `app/api/integrations/route.ts`; one of the two should be the single source.
 
-1. Fireflies import and health UX.
-2. Google Sheets CRM execution.
-3. Google Drive/Docs approved-artifact rendering.
-4. Gmail or Resend approved delivery.
-5. PandaDoc approved proposal/SOW draft and second send/signature approval.
+**Exit:** two unrelated advisors provably cannot read or mutate one another's records, and transcript retention has a stated period.
 
-Every adapter must be server-side, least-privilege, idempotent, observable, and separately approval-gated.
+## P1 — Transcript synthesis depth
+
+Synthesis is deterministic. That is honest and testable, and it is also the ceiling on diagnosis quality.
+
+- Add model-assisted analysis **behind** the existing deterministic guards, never replacing them.
+- Keep provenance rules intact: an advisor or unknown line may never become client evidence.
+- Preserve the deterministic result alongside the model result so the two can be diffed.
+
+**Exit:** a model pass improves recall on a fixed transcript corpus without weakening any evidence rule.
+
+## P1 — Remaining integrations
+
+1. Gmail, only if sending must come from the advisor's own mailbox rather than Resend.
+2. PandaDoc proposal/SOW draft with a second explicit send and signature approval.
+3. Exa as a threshold-triggered retrieval fallback, once `researchQuality` exists to trigger it.
+4. Firecrawl for targeted known-site extraction failures.
+5. Apollo, optional and credit-gated, only for a named unresolved gap.
+
+Every adapter must be server-side, least-privilege, idempotent, observable, separately approval-gated, and must return `not-configured` rather than failing when its credential is absent.
 
 ## P1 — Research resilience
 
 - Build a fixed evaluation corpus.
-- Score OpenAI source recall, unsupported-claim rate, Canvas coverage, value-flow usefulness, question specificity, latency, and cost.
-- Add Exa only as a threshold-triggered fallback if it improves measured retrieval quality.
-- Add Firecrawl for targeted known-site extraction failures.
-- Keep Apollo optional and credit-gated.
+- Score source recall, unsupported-claim rate, Canvas coverage, value-flow usefulness, question specificity, latency, and cost.
+- Add a fallback provider only where it improves a measured number.
 
-## P2 — Formal documents and operational loop
+## P2 — Formal documents
 
-- Render polished Diagnosis and Audit Report DOCX/PDF artifacts.
-- Create collaborative Google Docs.
-- Create proposal/SOW drafts from an approved PandaDoc template.
-- Add a separate Roles and Responsibility Map artifact.
-- Implement Sprint activation, baseline timestamp, ending measurement, actual delta, constraint migration, and catalog write-back.
+- Native DOCX or PDF rendering for the Diagnosis Package and Audit Report. Today the options are Markdown, printable HTML, and Google Docs conversion.
+- A separate Roles and Responsibility Map artifact. Role entries are captured in `engagement.data.roles` but no artifact renders them.
+- Proposal and SOW drafts from an approved PandaDoc template.
 
 ## Product-owner decisions
 
 - Advisor identity provider and invitation model
+- Whether tenancy needs an organization layer or stays per advisor
 - Canonical CRM: D1 with Sheet export versus Google Sheet registry
 - Google Workspace ownership and OAuth policy
+- Email sender of record: Resend versus the advisor's Gmail
 - PandaDoc template and commercial approval policy
 - Transcript retention and deletion period
-- Per-engagement research budget and Exa fallback threshold
+- Per-engagement research budget and fallback-provider threshold
 - Transcript-analysis model and cost ceiling
 - OpenWiki CI schedule, secret policy, and telemetry preference

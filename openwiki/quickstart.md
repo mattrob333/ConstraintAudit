@@ -15,7 +15,7 @@ The application is not a generic AI-opportunity assessment. AI may be part of a 
 
 ## Current truth in one paragraph
 
-The prototype now runs the whole workflow. It creates engagements; conducts deterministic and OpenAI-backed public research that also produces a company-specific value flow and discovery-question set; writes one canonical Business Model Canvas to `engagement.data.canvas`; decodes uploaded TXT, VTT, SRT, JSON, and DOCX transcripts into real speaker-attributed lines; reconciles those lines against research for contradictions, Canvas updates, flow confirmations, decisions, tasks, roles, and metrics; enforces consent, provisional-baseline, and diagnosis gates; scopes every D1 row to an owning advisor; generates Markdown deliverables plus a printable self-contained HTML rendering; and completes SPRINT_ACTIVE, OUTCOME_MEASURED, and CATALOG_WRITTEN. External actions execute for real through Resend, Google Sheets, and Google Drive/Docs, but only from an intent that was created `pending_review` and then explicitly approved. Still absent: Apollo and PandaDoc adapters, a Gmail sender, native DOCX or PDF output, model-assisted transcript synthesis, Exa and Firecrawl, and any automated test proving two different companies produce different flows and questions.
+The prototype now runs the whole workflow. It creates engagements; conducts deterministic and OpenAI-backed public research that also produces a company-specific value flow and discovery-question set; writes one canonical Business Model Canvas to `engagement.data.canvas`; decodes uploaded TXT, VTT, SRT, JSON, and DOCX transcripts into real speaker-attributed lines; reconciles those lines against research for contradictions, Canvas updates, flow confirmations, decisions, tasks, roles, and metrics; enforces consent, provisional-baseline, and diagnosis gates; scopes every D1 row to an owning advisor; generates Markdown deliverables plus a printable self-contained HTML rendering; and completes SPRINT_ACTIVE, OUTCOME_MEASURED, and CATALOG_WRITTEN. External actions execute for real through Resend, Google Sheets, and Google Drive/Docs, but only from an intent that was created `pending_review` and then explicitly approved. Still absent: Apollo and PandaDoc adapters, a Gmail sender, native DOCX or PDF output, model-assisted transcript synthesis, and Exa and Firecrawl.
 
 ## Status at a glance
 
@@ -33,7 +33,7 @@ The prototype now runs the whole workflow. It creates engagements; conducts dete
 | Gmail | Specified but not implemented; Resend is the implemented sender |
 | Native DOCX / PDF | Not implemented; Google Docs conversion is the route to a formal document |
 | Exa, Firecrawl | Not implemented |
-| Proof that two companies produce different flows and questions | Not implemented |
+| Proof that two companies produce different flows and questions | Covered by `tests/gap-closure.test.mjs` |
 
 ## Reading order
 
@@ -60,7 +60,7 @@ npx tsc --noEmit
 npm test
 ```
 
-`npm test` builds the application, runs two rendered-frontend tests, then runs `tests/backend-workflow.test.mjs` and `tests/gap-closure.test.mjs` — 25 backend tests together.
+`npm test` builds the application, runs two rendered-frontend tests, then runs `tests/backend-workflow.test.mjs` and `tests/gap-closure.test.mjs` — 26 backend tests together.
 
 The application runs with no credentials at all. Without `OPENAI_API_KEY` research stays deterministic and still produces a flow and questions. Without a provider credential an approved intent returns `not-configured`, performs no network call, and remains approved so it can be retried later.
 
@@ -86,6 +86,7 @@ The application runs with no credentials at all. Without `OPENAI_API_KEY` resear
 ## Canonical documentation
 
 - `public/docs/workflow.md` — approved target workflow.
+- `public/docs/current-state.md` — dated snapshot of what is real versus scaffolded.
 - `README.md` — setup, architecture, and capability truth.
 - `DEVELOPER_HANDOFF.md` — gaps and next implementation slices.
 - `INTEGRATIONS.md` — integration contracts and authorization boundaries.
@@ -93,8 +94,9 @@ The application runs with no credentials at all. Without `OPENAI_API_KEY` resear
 
 ## Critical warning for future agents
 
-A rendered screen is still not proof of a shipped capability. Inspect the data contract, event handler, API route, persistence action, and test before calling anything shipped. Three traps remain in this codebase:
+A rendered screen is still not proof of a shipped capability. Inspect the data contract, event handler, API route, persistence action, and test before calling anything shipped. Two traps remain in this codebase:
 
 - A connector card reading `configured` means credentials are present, not that the app may act. Execution still requires a separately approved intent.
 - Transcript synthesis is deterministic keyword, overlap, and regex analysis. It is testable and honest, but it is not model-assisted reasoning and it will miss evidence a human would catch.
-- `DEVELOPER_HANDOFF.md` is dated 2026-07-25 and its "Not implemented or defective" list predates the gap-closure change. Where it disagrees with the source, the source wins.
+
+`DEVELOPER_HANDOFF.md`, `README.md`, and `public/docs/current-state.md` were all refreshed on 2026-07-26 and agree with the source. Where any document disagrees with the source in future, the source wins.

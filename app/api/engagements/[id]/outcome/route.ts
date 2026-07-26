@@ -11,6 +11,7 @@ export async function POST(request: Request, context: Context) {
     const id = await engagementId(context);
     const input = await readJson<{
       endingMetric: BaselineMetric;
+      improvedWhen?: "higher" | "lower";
       constraintMoved?: boolean;
       nextConstraintObserved?: string;
       evidence?: Array<{ quote: string; source: string }>;

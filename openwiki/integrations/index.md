@@ -1,3 +1,3 @@
 # Integrations
 
-- [Status and authorization](status-and-authorization.md) — what is connected, what is intent-only, required credentials, and recommended sequencing.
+- [Status and authorization](status-and-authorization.md) — which adapters execute, the intent approval boundary, `not-configured` semantics, required credentials, and what is still unimplemented.

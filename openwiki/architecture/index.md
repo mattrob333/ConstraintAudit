@@ -1,3 +1,3 @@
 # Architecture
 
-- [System overview](system-overview.md) — runtime, persistence, request flow, source-of-truth boundaries, and known architectural gaps.
+- [System overview](system-overview.md) — runtime, owner-scoped persistence, the canonical Canvas, request and intent-execution flows, transcript ingestion, and remaining architectural gaps.

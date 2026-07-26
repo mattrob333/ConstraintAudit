@@ -76,7 +76,7 @@ Still absent: foreign-key enforcement, an organization or team layer above the i
 - Setting `REQUIRE_ADVISOR_AUTH=1` disables that fallback, so an unauthenticated request receives 401. Set it in any deployment reachable by more than one person.
 - `app/chatgpt-auth.ts` remains the server-component counterpart for Sites sign-in redirects.
 
-Every API route calls `requirePrincipal` with one deliberate exception: `GET /api/integrations` is unauthenticated. It returns only per-provider `configured` / `not_configured` booleans, capability descriptions, and the names of expected environment variables — never a credential value. Treat that as the documented boundary, not an oversight to copy elsewhere.
+Every API route calls `requirePrincipal`, including `GET /api/integrations`. That route returns only per-provider `configured` / `not_configured` booleans, capability descriptions, and the names of expected environment variables — never a credential value — but which providers a deployment has wired up still describes the deployment, so it is scoped like everything else.
 
 ## The canonical Canvas
 

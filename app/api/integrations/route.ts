@@ -1,5 +1,7 @@
 import { env } from "cloudflare:workers";
+import { requirePrincipal } from "@/lib/auth";
 import { firefliesConfigured } from "@/lib/fireflies";
+import { integrationRuntimeStatus } from "@/lib/integrations";
 import { openAIResearchConfigured, openAIResearchModel } from "@/lib/openai-research";
 import { route } from "@/lib/http";
 import { ensureDatabase } from "@/lib/store";
@@ -13,9 +15,16 @@ function hasAll(...names: string[]): boolean {
   return names.every((name) => typeof bindings[name] === "string" && String(bindings[name]).trim().length > 0);
 }
 
-export async function GET() {
+export async function GET(request: Request) {
   return route(async () => {
+    // Which providers are wired up is not public information: it describes the
+    // deployment. Scope it to a signed-in advisor like every other route.
+    requirePrincipal(request);
     await ensureDatabase();
+    // The adapters decide whether they are configured. Reading that back here keeps
+    // this screen from drifting away from what a write would actually do.
+    const runtime = new Map(integrationRuntimeStatus().map((item) => [item.id, item]));
+    const adapterReady = (id: string): boolean => runtime.get(id)?.configured ?? false;
     return {
       integrations: [
         {
@@ -71,9 +80,7 @@ export async function GET() {
         {
           id: "google_sheets",
           name: "Google Sheets CRM",
-          status: hasAll("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REFRESH_TOKEN", "GOOGLE_SHEETS_ID")
-            ? "configured"
-            : "intent_only",
+          status: adapterReady("google_sheets") ? "configured" : "intent_only",
           mode: "reviewed_write_back_intent",
           setup: "The app writes the row itself once the intent is explicitly approved and then executed. Without credentials it stops at the reviewed intent.",
           environmentVariables: [
@@ -86,9 +93,7 @@ export async function GET() {
         {
           id: "google_drive_docs",
           name: "Google Drive / Docs",
-          status: hasAll("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REFRESH_TOKEN")
-            ? "configured"
-            : "connector_first",
+          status: adapterReady("google_drive_docs") ? "configured" : "connector_first",
           mode: "approved_artifact_intent",
           setup: "An approved publication intent creates the Google Doc directly using the narrow drive.file scope.",
           environmentVariables: [
@@ -111,7 +116,7 @@ export async function GET() {
         {
           id: "resend",
           name: "Resend",
-          status: hasAll("RESEND_API_KEY", "EMAIL_FROM") ? "configured" : "not_configured",
+          status: adapterReady("resend") ? "configured" : "not_configured",
           mode: "approved_intent_send_adapter",
           setup: "Sends the approved readiness brief. Sending requires an approved, idempotent intent and never happens automatically.",
           environmentVariables: ["RESEND_API_KEY", "EMAIL_FROM", "EMAIL_REPLY_TO"],
