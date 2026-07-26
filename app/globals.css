@@ -2148,11 +2148,262 @@ blockquote { margin: 0; }
   font-style: italic;
 }
 
+/* Resumed engagement: where the record actually is, before anything else on the screen. */
+.resume-banner {
+  position: relative;
+  display: grid;
+  grid-template-columns: 46px minmax(0, 1.2fr) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 18px;
+  margin-bottom: 22px;
+  border: 1px solid #a9d7ba;
+  border-radius: 10px;
+  background: var(--confirmed);
+  padding: 18px 20px;
+}
+
+.resume-mark {
+  display: grid;
+  width: 46px;
+  height: 46px;
+  place-items: center;
+  border-radius: 9px;
+  background: var(--forest);
+  color: white;
+}
+
+.resume-banner .eyebrow { margin-bottom: 5px; color: #155b35; }
+.resume-banner strong { display: block; font-family: "Space Grotesk", system-ui, sans-serif; font-size: 1.14rem; }
+.resume-banner p:not(.eyebrow) { margin: 4px 0 0; color: #24513c; font-size: .86rem; }
+
+.resume-banner dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 16px;
+  margin: 0;
+}
+
+.resume-banner dt { color: #2e6d50; }
+.resume-banner dd { margin: 2px 0 0; font-size: .8rem; word-break: break-word; }
+
+.resume-banner > button {
+  align-self: start;
+  border: 0;
+  background: none;
+  color: #24513c;
+  cursor: pointer;
+}
+
+/* A field that explains itself. Used where skipping the input has a downstream consequence. */
+.field-note small { color: var(--muted); font-size: .78rem; }
+.field-note input.invalid { border-color: #c8674f; box-shadow: 0 0 0 3px rgba(200, 103, 79, .12); }
+.field-note input.invalid + small { color: #8c3f2c; }
+
+.schedule-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(180px, 1fr) minmax(180px, 1fr) auto;
+  align-items: end;
+  gap: 16px;
+  margin-bottom: 22px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  padding: 18px 20px;
+}
+
+.schedule-panel > div { display: grid; gap: 3px; }
+.schedule-panel > div strong { font-family: "Space Grotesk", system-ui, sans-serif; font-size: 1.05rem; }
+.schedule-panel > div small { color: var(--muted); font-size: .78rem; }
+.schedule-panel label { display: grid; gap: 7px; }
+.schedule-panel > .upload-state, .schedule-note { grid-column: 1 / -1; margin: 0; }
+
+.schedule-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: .8rem;
+}
+
+/* Entry point into the client-facing Findings Call. */
+.present-cta {
+  display: grid;
+  grid-template-columns: 46px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+  margin: 18px 0 24px;
+  border: 1px solid var(--forest);
+  border-radius: 10px;
+  background: var(--step);
+  padding: 18px 20px;
+}
+
+.present-mark {
+  display: grid;
+  width: 46px;
+  height: 46px;
+  place-items: center;
+  border-radius: 9px;
+  background: var(--forest);
+  color: white;
+}
+
+.present-cta strong { font-family: "Space Grotesk", system-ui, sans-serif; font-size: 1.08rem; }
+.present-cta p { margin: 4px 0 0; color: #24513c; font-size: .85rem; }
+.present-cta > small { grid-column: 2 / -1; color: var(--muted); font-size: .78rem; }
+.present-cta > .upload-state { grid-column: 1 / -1; margin: 0; }
+
+.call-scheduled {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-left: 1px solid var(--line);
+  padding-left: 9px;
+}
+
+.present-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  max-width: 1020px;
+}
+
+.present-body h1 { font-size: clamp(2.4rem, 4.6vw, 4.6rem); }
+
+.present-narrative {
+  max-width: 900px;
+  margin-bottom: 26px;
+  color: var(--muted);
+  font-size: clamp(1.05rem, 1.6vw, 1.35rem);
+  line-height: 1.5;
+}
+
+/* The client's own sentences. Deliberately the loudest thing on the screen. */
+.client-words {
+  max-width: 940px;
+  border: 2px solid var(--forest);
+  border-radius: 12px;
+  background: var(--surface);
+  padding: 22px 24px;
+}
+
+.client-words > header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.client-words > header span { color: var(--muted); font-size: .78rem; }
+
+.client-words ul {
+  display: grid;
+  gap: 16px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.client-words li {
+  border-left: 5px solid var(--forest);
+  background: var(--step);
+  padding: 15px 18px;
+}
+
+.client-words blockquote {
+  margin: 0;
+  font-family: "Space Grotesk", system-ui, sans-serif;
+  font-size: clamp(1.15rem, 2vw, 1.7rem);
+  line-height: 1.35;
+}
+
+.client-words cite {
+  display: block;
+  margin-top: 9px;
+  color: #2e6d50;
+  font-family: "JetBrains Mono", monospace;
+  font-size: .74rem;
+  font-style: normal;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+}
+
+.findings-present .call-actions { margin-top: 30px; }
+
+/* Deliverables: publication is two deliberate steps, and the card says so. */
+.send-explainer {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 20px;
+  border: 1px solid #e2c55f;
+  border-radius: 10px;
+  background: #fff9df;
+  padding: 16px 18px;
+}
+
+.send-explainer strong { display: block; }
+.send-explainer p { margin: 4px 0 0; color: #735c07; font-size: .84rem; }
+
+.deliver-publish {
+  width: 100%;
+  margin-top: auto;
+  display: grid;
+  gap: 12px;
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+}
+
+.deliver-publish-status { display: grid; gap: 6px; justify-items: start; }
+.deliver-publish-status small { color: var(--muted); font-size: .78rem; line-height: 1.45; }
+
+.deliver-publish button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--paper);
+  padding: 9px 13px;
+  color: var(--forest);
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.deliver-publish button:hover:not(:disabled) { border-color: var(--forest); background: var(--step); }
+.deliver-publish button:disabled { opacity: .5; cursor: not-allowed; }
+.deliver-grid article { min-height: 300px; }
+
+.intent-result {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin: 0 0 12px;
+  border-radius: 8px;
+  padding: 11px 13px;
+  font-size: .82rem;
+}
+
+.intent-result > span { display: grid; gap: 3px; }
+.intent-result b { font-weight: 650; }
+.intent-result.assumed { border: 1px solid #e2c55f; background: #fff9df; color: #735c07; }
+.intent-result.success { border: 1px solid #a9d7ba; background: var(--confirmed); color: #155b35; }
+.intent-result.missing { border: 1px solid #e49787; background: #f9d5ce; color: #7b2c20; }
+
 @media (max-width: 900px) {
   .value-flow dl { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .ops-columns { grid-template-columns: 1fr; }
   .intent-confirm { grid-template-columns: auto minmax(0, 1fr); }
   .intent-confirm .button { grid-column: 2; justify-self: start; }
+  .resume-banner { grid-template-columns: 46px minmax(0, 1fr) auto; }
+  .resume-banner dl { grid-column: 2 / -1; }
+  .schedule-panel { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .schedule-panel > div, .schedule-panel .button { grid-column: 1 / -1; }
+  .send-explainer { grid-template-columns: auto minmax(0, 1fr); }
+  .send-explainer .pill, .send-explainer .button { grid-column: 2; justify-self: start; }
 }
 
 @media (max-width: 720px) {
@@ -2164,4 +2415,12 @@ blockquote { margin: 0; }
   .answer-value { width: 100%; }
   .direction-choices, .delta-readings { grid-template-columns: 1fr; }
   .sprint-path button.sprint-step { grid-template-columns: 26px minmax(0, 1fr) auto; }
+  .resume-banner { grid-template-columns: minmax(0, 1fr) auto; }
+  .resume-mark { display: none; }
+  .resume-banner dl, .resume-banner > div { grid-column: 1 / -1; }
+  .schedule-panel, .present-cta { grid-template-columns: minmax(0, 1fr); }
+  .present-mark { display: none; }
+  .present-cta > small, .present-cta > .upload-state { grid-column: 1; }
+  .call-scheduled { border-left: 0; padding-left: 0; }
+  .call-mode > header div { flex-wrap: wrap; }
 }

@@ -7,25 +7,47 @@ const stages = ["Client", "Research", "Prepare", "Call", "Synthesize", "Deliver"
 type Stage = (typeof stages)[number];
 type Screen =
   | "home" | "intake" | "migration" | "engagements" | "research" | "prepare"
-  | "call" | "transcript" | "synthesis" | "findings" | "deliver" | "sprint"
+  | "call" | "transcript" | "synthesis" | "findings" | "findings-call" | "deliver" | "sprint"
   | "measure" | "catalog" | "actions" | "integrations";
 type Tone = "neutral" | "known" | "inferred" | "assumed" | "missing" | "success";
+/** Mirrors WORKFLOW_STATES in lib/workflow.ts, in canonical order. */
+const workflowStates = [
+  "RECON_DRAFT", "GUIDED_CANVAS_COMPLETE", "TRANSCRIPT_1_SYNTHESIZED", "CANVAS_COMMIT_APPROVED",
+  "FINDINGS_CALL_COMPLETE", "TRANSCRIPT_2_RECONCILED", "DIAGNOSIS_APPROVED", "SPRINT_ACTIVE",
+  "OUTCOME_MEASURED", "CATALOG_WRITTEN",
+] as const;
+type WorkflowState = (typeof workflowStates)[number];
 type Engagement = {
-  id: string; companyName: string; website: string; stage: Stage; status: string;
-  nextAction: string; updatedAt: string;
+  id: string; companyName: string; website: string; stage: Stage; workflowState: WorkflowState | null;
+  status: string; nextAction: string; updatedAt: string; primaryContact: string;
+  primaryContactRole: string; email: string; call1At: string | null; call2At: string | null;
 };
 type DocumentItem = {
   id: string; name: string; kind: "workflow" | "generated";
   status: "approved" | "draft" | "provisional"; href?: string;
 };
+type ConsentRecord = { grantedBeforeCapture: boolean; attestedBy: string; attestedAt: string; note?: string };
 type BackendEngagement = {
   id: string; client: string; website: string; stage: string; status: string;
   nextAction: string; updatedAt: string; version: number;
+  workflowState: string; primaryContact: string; primaryContactRole: string; email: string;
+  call1At: string | null; call2At: string | null; notes: string; readinessBriefStatus: string;
   data?: {
     research?: ResearchPayload; transcriptSynthesis?: TranscriptSynthesis[]; canvas?: CanvasRecord;
     sprint?: SprintRecord; outcome?: OutcomeMeasurement; catalogEntry?: CatalogEntry;
+    recordingConsent?: Partial<Record<"call1" | "call2", ConsentRecord>>;
   };
 };
+/** An artifact row as `GET /api/engagements/:id` and the deliverables endpoint return it. */
+type ArtifactRecord = { id: string; kind: string; title: string; status: string; created_at: string };
+/** What `executeIntent` stored on the last execution attempt. `not-configured` means nothing was attempted. */
+type IntentResult = { ok?: boolean; status?: string; provider?: string; detail?: string; externalUrl?: string };
+/** `document.data` of the findings agenda. Only `evidence` carries the client's own words. */
+type FindingsAgendaSection = {
+  heading: string; body: string;
+  evidence: Array<{ quote: string; speaker: string; timestamp: string }>;
+};
+type FindingsAgendaDocument = { id: string; title: string; content: string; data?: { sections?: FindingsAgendaSection[] } };
 
 type EvidenceStatus = "public-research" | "advisor-note" | "gap";
 type DiscoverySection = "demand" | "promise" | "flow" | "constraint" | "baseline" | "roles" | "feasibility";
@@ -74,7 +96,7 @@ type CatalogEntry = {
 };
 type IntentItem = {
   id: string; engagement_id: string; type: string; status: string;
-  payload: unknown; created_at: string; executed_at?: string | null;
+  payload: unknown; created_at: string; executed_at?: string | null; result?: IntentResult | null;
 };
 type IntegrationItem = {
   id: string; name: string; status: string; mode: string; setup?: string;
@@ -209,9 +231,14 @@ const statusLegend: Array<[string, string]> = [
 ];
 
 const transcriptMimeTypes: Record<string, string> = {
-  txt: "text/plain", vtt: "text/vtt", srt: "application/x-subrip", json: "application/json",
+  txt: "text/plain", md: "text/markdown", csv: "text/csv", vtt: "text/vtt",
+  srt: "application/x-subrip", json: "application/json",
   doc: "application/msword", docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 };
+
+/** What `POST /api/engagements/:id/sources` accepts. PDF is deliberately absent: the server rejects it. */
+const sourceExtensions = ["txt", "md", "csv", "docx", "vtt", "srt", "json"] as const;
+const sourceAccept = sourceExtensions.map((extension) => `.${extension}`).join(",");
 
 const MAX_TRANSCRIPT_BYTES = 2 * 1024 * 1024;
 
@@ -235,13 +262,14 @@ async function readTranscriptFile(file: File): Promise<TranscriptFile> {
   return { content: await file.text(), encoding: "utf8", mimeType, name: file.name };
 }
 
+/** Each card is bound to the artifact `kind` its generator writes, so no card can point at nothing. */
 const deliverables = [
-  ["Diagnosis package", "Canvas v1, constraint card, evidence, baseline, prescription, owner, and predicted next constraint."],
-  ["Audit report", "Canvas-block narrative that ends in the single constraint finding."],
-  ["Proposal & business case", "One metric delta, a fixed two-week sprint, and formulas without invented ROI."],
-  ["Implementation roadmap", "Remove and measure, record constraint migration, then diagnose the next constraint."],
-  ["Developer specification", "Human owner, scope, guardrails, evidence, escalation, and acceptance criteria."],
-  ["Roles & responsibility map", "Task-level ownership in the constrained flow, ready to carry into implementation."],
+  ["Diagnosis package", "Canvas v1, constraint card, evidence, baseline, prescription, owner, and predicted next constraint.", "diagnosis_package"],
+  ["Audit report", "Canvas-block narrative that ends in the single constraint finding.", "audit_report"],
+  ["Proposal & business case", "One metric delta, a fixed two-week sprint, and formulas without invented ROI.", "proposal"],
+  ["Implementation roadmap", "Remove and measure, record constraint migration, then diagnose the next constraint.", "implementation_roadmap"],
+  ["Developer specification", "Human owner, scope, guardrails, evidence, escalation, and acceptance criteria.", "developer_spec"],
+  ["Roles & responsibility map", "Task-level ownership in the constrained flow, ready to carry into implementation.", "roles_map"],
 ] as const;
 
 function stageFor(screen: Screen): Stage | null {
@@ -249,10 +277,149 @@ function stageFor(screen: Screen): Stage | null {
   if (screen === "research") return "Research";
   if (screen === "prepare") return "Prepare";
   if (["call", "transcript"].includes(screen)) return "Call";
-  if (["synthesis", "findings"].includes(screen)) return "Synthesize";
+  if (["synthesis", "findings", "findings-call"].includes(screen)) return "Synthesize";
   if (screen === "deliver") return "Deliver";
   if (["sprint", "measure", "catalog", "actions"].includes(screen)) return "Operate";
   return null;
+}
+
+/** The two screens that are shared with the client. They drop the advisor chrome entirely. */
+function isClientFacing(screen: Screen): boolean {
+  return screen === "call" || screen === "findings-call";
+}
+
+function isWorkflowState(value: string): value is WorkflowState {
+  return (workflowStates as readonly string[]).includes(value);
+}
+
+/**
+ * Where the advisor's NEXT action lives for each canonical state. Resume routes on this,
+ * never on the lossy CRM stage: `Call` alone cannot tell call 1 from call 2, and an
+ * unmatched stage must never drop the advisor on the final Deliver screen.
+ */
+const resumeScreens: Record<WorkflowState, Screen> = {
+  RECON_DRAFT: "research",
+  GUIDED_CANVAS_COMPLETE: "transcript",
+  TRANSCRIPT_1_SYNTHESIZED: "synthesis",
+  CANVAS_COMMIT_APPROVED: "findings",
+  FINDINGS_CALL_COMPLETE: "transcript",
+  TRANSCRIPT_2_RECONCILED: "findings",
+  DIAGNOSIS_APPROVED: "deliver",
+  SPRINT_ACTIVE: "sprint",
+  OUTCOME_MEASURED: "catalog",
+  CATALOG_WRITTEN: "actions",
+};
+
+/** Plain language for the state the record is actually in, and what happens next on that screen. */
+const workflowCopy: Record<WorkflowState, [string, string]> = {
+  RECON_DRAFT: ["Researched, not yet on a call", "Review the research and prepare the client brief."],
+  GUIDED_CANVAS_COMPLETE: ["Discovery call held", "Add the Call 1 transcript so the client's words become evidence."],
+  TRANSCRIPT_1_SYNTHESIZED: ["Call 1 synthesized", "Review the evidence diff and approve the Canvas commit."],
+  CANVAS_COMMIT_APPROVED: ["Canvas committed", "Run the Findings Call and present the diagnosis."],
+  FINDINGS_CALL_COMPLETE: ["Findings Call held", "Add the Call 2 transcript so clarifications are reconciled."],
+  TRANSCRIPT_2_RECONCILED: ["Call 2 reconciled", "Review the finding once more and approve the diagnosis."],
+  DIAGNOSIS_APPROVED: ["Diagnosis approved", "Generate the deliverable suite and send documents to the client."],
+  SPRINT_ACTIVE: ["Sprint running", "Work the sprint tasks, then record the ending metric."],
+  OUTCOME_MEASURED: ["Outcome measured", "Write the reusable pattern back to the catalog."],
+  CATALOG_WRITTEN: ["Engagement complete", "Review anything still queued for an external write."],
+};
+
+const screenLabels: Partial<Record<Screen, string>> = {
+  research: "Research review", prepare: "Client preparation", call: "Guided call",
+  transcript: "Transcript evidence", synthesis: "Synthesis review", findings: "Findings Call",
+  "findings-call": "Findings Call presentation", deliver: "Deliverables", sprint: "Sprint",
+  measure: "Outcome", catalog: "Catalog", actions: "Reviewed actions",
+};
+
+/** Deliberately permissive: this only decides whether Submit is enabled, it is not an address check. */
+function looksLikeEmail(value: string): boolean {
+  const trimmed = value.trim();
+  return /^[^\s@]+@[^\s@.]+(\.[^\s@.]+)+$/.test(trimmed);
+}
+
+function extensionOf(name: string): string {
+  return name.includes(".") ? name.slice(name.lastIndexOf(".") + 1).toLowerCase() : "";
+}
+
+/** `datetime-local` speaks local wall-clock; the server stores ISO. These two convert, and only these two. */
+function toLocalInput(iso: string | null): string {
+  if (!iso) return "";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function fromLocalInput(value: string): string | null {
+  if (!value.trim()) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function formatMeeting(iso: string | null): string {
+  if (!iso) return "Not scheduled";
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? "Not scheduled" : date.toLocaleString(undefined, {
+    weekday: "short", month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit",
+  });
+}
+
+/**
+ * The presentation order the Findings Call is walked in. The server already returns the
+ * sections in this order; ranking by heading keeps the client-facing sequence correct even
+ * if it ever does not, and anything unrecognized keeps its position at the end.
+ */
+const agendaOrder: Array<[string, RegExp]> = [
+  ["What we heard", /heard|told us|conversation/i],
+  ["The constraint", /constraint|limiting|bottleneck/i],
+  ["Your own words", /own words|evidence|quote/i],
+  ["What we propose", /propose|prescription|recommend/i],
+  ["What it would take", /take|effort|scope|resourc/i],
+  ["What we'd measure", /measure|metric|baseline/i],
+];
+
+function orderedAgenda(input: FindingsAgendaSection[]): FindingsAgendaSection[] {
+  const sections = input.map((section) => ({
+    heading: section.heading || "This part of the finding",
+    body: section.body ?? "",
+    evidence: (section.evidence ?? []).filter((item) => item.quote?.trim()),
+  }));
+  const rank = (section: FindingsAgendaSection, index: number) => {
+    const found = agendaOrder.findIndex(([, pattern]) => pattern.test(section.heading));
+    return found < 0 ? agendaOrder.length + index : found;
+  };
+  return sections.map((section, index) => ({ section, index })).sort((a, b) =>
+    rank(a.section, a.index) - rank(b.section, b.index) || a.index - b.index,
+  ).map((item) => item.section);
+}
+
+/** How a publication intent reads on a deliverable card. Never claims a send that did not happen. */
+function publishStatusCopy(intent: IntentItem | null): { tone: Tone; label: string; detail: string } {
+  if (!intent) return { tone: "neutral", label: "Not queued", detail: "Nothing has been proposed for this document yet." };
+  if (intent.status === "pending_review") return { tone: "assumed", label: "Queued for review", detail: "Waiting for approval in Reviewed actions. Nothing has left this app." };
+  if (intent.status === "rejected") return { tone: "missing", label: "Rejected", detail: "This publication was rejected. Queue it again if that was a mistake." };
+  if (intent.status === "failed") return { tone: "missing", label: "Send failed", detail: intent.result?.detail || "The external write failed. Re-approve before trying again." };
+  if (intent.status === "executed") return { tone: "success", label: "Sent to client", detail: intent.result?.detail || "The document was published to the connected provider." };
+  if (intent.result?.status === "not-configured") {
+    return {
+      tone: "assumed", label: "Approved · Google not connected",
+      detail: `${intent.result.detail || "No Google credential is configured on the server."} Nothing failed and nothing was sent — the approval is still good. Connect Google in the Integration Center, then execute this action again.`,
+    };
+  }
+  return { tone: "known", label: "Approved, not sent", detail: "Approved but not yet executed. Send it from the Reviewed actions panel." };
+}
+
+/** The last execution attempt on an intent, in words an advisor can read out loud. */
+function intentResultCopy(intent: IntentItem): { tone: Tone; title: string; detail: string } | null {
+  const result = intent.result;
+  if (!result?.status) return null;
+  if (result.status === "not-configured") return {
+    tone: "assumed",
+    title: `${result.provider || "The provider"} is not configured on the server`,
+    detail: `${result.detail || "No credential is present."} Nothing was attempted and nothing failed, so this intent stays approved. Add the credential and execute again.`,
+  };
+  if (result.ok) return { tone: "success", title: "External write completed", detail: result.detail || `${result.provider || "The provider"} accepted the write.` };
+  return { tone: "missing", title: "The external write did not complete", detail: result.detail || "The provider returned no detail." };
 }
 
 function normalizeWebsiteInput(value: string): string {
@@ -270,14 +437,37 @@ async function api<T>(url: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+/**
+ * Explicit, not substring-matched. `TRANSCRIPT_2_RECONCILED` contains "RECON", so a
+ * contains() chain silently labelled a reconciled call-2 engagement as Research.
+ */
+const STAGE_FOR_STATE: Record<WorkflowState, Stage> = {
+  RECON_DRAFT: "Research",
+  GUIDED_CANVAS_COMPLETE: "Call",
+  TRANSCRIPT_1_SYNTHESIZED: "Synthesize",
+  CANVAS_COMMIT_APPROVED: "Synthesize",
+  FINDINGS_CALL_COMPLETE: "Call",
+  TRANSCRIPT_2_RECONCILED: "Synthesize",
+  DIAGNOSIS_APPROVED: "Deliver",
+  SPRINT_ACTIVE: "Operate",
+  OUTCOME_MEASURED: "Operate",
+  CATALOG_WRITTEN: "Operate",
+};
+
+/** CRM stage names, used only when a record predates the workflow state being stored. */
+const STAGE_FOR_CRM_STAGE: Record<string, Stage> = {
+  Client: "Client",
+  Research: "Research",
+  Prepare: "Prepare",
+  Call: "Call",
+  Synthesize: "Synthesize",
+  Deliver: "Deliver",
+  "Sprint & Catalog": "Operate",
+};
+
 function uiStage(value: string): Stage {
-  const stage = value.toUpperCase();
-  if (stage.includes("RECON")) return "Research";
-  if (stage.includes("GUIDED") || stage.includes("CALL")) return "Call";
-  if (stage.includes("TRANSCRIPT") || stage.includes("CANVAS_COMMIT")) return "Synthesize";
-  if (stage.includes("SPRINT") || stage.includes("OUTCOME") || stage.includes("CATALOG")) return "Operate";
-  if (stage.includes("DIAGNOSIS") || stage.includes("DELIVER")) return "Deliver";
-  return "Client";
+  if (isWorkflowState(value)) return STAGE_FOR_STATE[value as WorkflowState];
+  return STAGE_FOR_CRM_STAGE[value] ?? "Client";
 }
 
 function toEngagement(item: BackendEngagement): Engagement {
@@ -285,10 +475,16 @@ function toEngagement(item: BackendEngagement): Engagement {
     id: item.id,
     companyName: item.client,
     website: item.website ?? "",
-    stage: uiStage(item.stage),
+    stage: uiStage(item.workflowState || item.stage),
+    workflowState: isWorkflowState(item.workflowState ?? "") ? item.workflowState as WorkflowState : null,
     status: item.status,
     nextAction: item.nextAction,
     updatedAt: item.updatedAt ? new Date(item.updatedAt).toLocaleString() : "Not yet updated",
+    primaryContact: item.primaryContact ?? "",
+    primaryContactRole: item.primaryContactRole ?? "",
+    email: item.email ?? "",
+    call1At: item.call1At ?? null,
+    call2At: item.call2At ?? null,
   };
 }
 
@@ -395,6 +591,7 @@ export default function AdvisorCockpit() {
   const [website, setWebsite] = useState("");
   const [contact, setContact] = useState("");
   const [role, setRole] = useState("");
+  const [email, setEmail] = useState("");
   const [context, setContext] = useState("");
   const [activeId, setActiveId] = useState<string | null>(null);
   const [engagements, setEngagements] = useState<Engagement[]>([]);
@@ -429,7 +626,23 @@ export default function AdvisorCockpit() {
   const [transcriptCallNumber, setTranscriptCallNumber] = useState<1 | 2>(1);
   const [call2Processed, setCall2Processed] = useState(false);
   const [diagnosisApproved, setDiagnosisApproved] = useState(false);
-  const [generated, setGenerated] = useState<string[]>([]);
+  const [artifacts, setArtifacts] = useState<ArtifactRecord[]>([]);
+  const [intents, setIntents] = useState<IntentItem[]>([]);
+  const [deliverBusy, setDeliverBusy] = useState("");
+  const [deliverError, setDeliverError] = useState("");
+  const [call1At, setCall1At] = useState<string | null>(null);
+  const [call2At, setCall2At] = useState<string | null>(null);
+  const [scheduleBusy, setScheduleBusy] = useState(false);
+  const [scheduleError, setScheduleError] = useState("");
+  const [scheduleSavedAt, setScheduleSavedAt] = useState("");
+  const [intakeFile, setIntakeFile] = useState<TranscriptFile | null>(null);
+  const [intakeFileName, setIntakeFileName] = useState("");
+  const [intakeFileState, setIntakeFileState] = useState<{ tone: "reading" | "ready" | "error" | "added"; message: string } | null>(null);
+  const [resumed, setResumed] = useState<{ state: WorkflowState | null; stage: Stage; status: string; nextAction: string; screen: Screen } | null>(null);
+  const [agenda, setAgenda] = useState<FindingsAgendaSection[]>([]);
+  const [agendaStep, setAgendaStep] = useState(0);
+  const [agendaBusy, setAgendaBusy] = useState(false);
+  const [agendaError, setAgendaError] = useState("");
   const [mobileNav, setMobileNav] = useState(false);
   const modalRef = useRef<HTMLDivElement>(null);
   const currentStage = stageFor(screen);
@@ -470,7 +683,7 @@ export default function AdvisorCockpit() {
   }, [confirmSend]);
 
   function go(next: Screen) {
-    setScreen(next); setNotice(""); setMobileNav(false);
+    setScreen(next); setNotice(""); setMobileNav(false); setResumed(null);
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
@@ -488,6 +701,41 @@ export default function AdvisorCockpit() {
     }
   }
 
+  /**
+   * The intake attachment is chosen before the engagement exists, so it is parsed here and
+   * uploaded to the source register the moment `createEngagement` returns an id.
+   */
+  async function selectIntakeFile(file: File | null) {
+    setIntakeFile(null); setIntakeFileState(null);
+    if (!file) return setIntakeFileName("");
+    setIntakeFileName(file.name);
+    const extension = extensionOf(file.name);
+    if (extension === "pdf") {
+      setIntakeFileState({ tone: "error", message: "PDF cannot be read by the source register. Export it to DOCX, TXT, Markdown, or CSV and choose it again." });
+      return;
+    }
+    if (!(sourceExtensions as readonly string[]).includes(extension)) {
+      setIntakeFileState({ tone: "error", message: `${file.name} is not a supported source format. Use TXT, MD, CSV, DOCX, VTT, SRT, or JSON.` });
+      return;
+    }
+    if (file.size > MAX_TRANSCRIPT_BYTES) {
+      setIntakeFileState({ tone: "error", message: `${file.name} is ${formatBytes(file.size)}. The upload limit is ${formatBytes(MAX_TRANSCRIPT_BYTES)}.` });
+      return;
+    }
+    setIntakeFileState({ tone: "reading", message: `Reading ${file.name}…` });
+    try {
+      const payload = await readTranscriptFile(file);
+      if (!payload.content.length) {
+        setIntakeFileState({ tone: "error", message: `${file.name} contained no readable content. Choose another file.` });
+        return;
+      }
+      setIntakeFile(payload);
+      setIntakeFileState({ tone: "ready", message: `${formatBytes(file.size)} read. It will be added to the engagement's source register once the engagement is created.` });
+    } catch (reason) {
+      setIntakeFileState({ tone: "error", message: `The file could not be read: ${reason instanceof Error ? reason.message : "unknown error"}` });
+    }
+  }
+
   async function createEngagement(event: FormEvent) {
     event.preventDefault();
     try {
@@ -497,24 +745,44 @@ export default function AdvisorCockpit() {
         client: company,
         website: normalizedWebsite,
         primaryContact: contact,
-        notes: [role ? `Contact role: ${role}` : "", context].filter(Boolean).join("\n\n"),
+        primaryContactRole: role,
+        email: email.trim(),
+        notes: context,
       });
       const id = response.engagement.id;
       setActiveId(id);
+      setCall1At(response.engagement.call1At ?? null);
+      setCall2At(response.engagement.call2At ?? null);
       setEngagements((items) => [toEngagement(response.engagement), ...items.filter((item) => item.id !== id)]);
+      let sourceOutcome = "";
+      if (intakeFile) {
+        setIntakeFileState({ tone: "reading", message: `Adding ${intakeFile.name} to the source register…` });
+        try {
+          await api(`/api/engagements/${id}/sources`, { method: "POST", body: JSON.stringify({ file: intakeFile }) });
+          setIntakeFileState({ tone: "added", message: `${intakeFile.name} was added to the engagement's source register.` });
+          sourceOutcome = `${intakeFile.name} was added to the engagement's source register.`;
+        } catch (reason) {
+          const message = reason instanceof Error ? reason.message : "unknown request failure";
+          setIntakeFileState({ tone: "error", message: `${intakeFile.name} was NOT added to the source register: ${message}` });
+          sourceOutcome = `The engagement was created, but ${intakeFile.name} was not added to the source register: ${message}`;
+        }
+        // Cleared either way: a retry belongs to this engagement, not to the next one created.
+        setIntakeFile(null);
+      }
       const researchResponse = await save<{ engagement?: BackendEngagement; research: ResearchPayload }>(`/api/engagements/${id}/research`, { sourceUrl: normalizedWebsite });
       setResearchResult(researchResponse.research);
       setCanvas(researchResponse.engagement?.data?.canvas ?? null);
       setCallIndex(0);
       go("research");
+      if (sourceOutcome) setNotice(sourceOutcome);
     } catch {
       // save() leaves the advisor on intake with a visible error.
     }
   }
 
-  async function loadEngagement(id: string): Promise<boolean> {
+  async function loadEngagement(id: string): Promise<BackendEngagement | null> {
     try {
-      const response = await api<{ engagement: BackendEngagement }>(`/api/engagements/${id}`);
+      const response = await api<{ engagement: BackendEngagement; documents?: ArtifactRecord[]; intents?: IntentItem[] }>(`/api/engagements/${id}`);
       const data = response.engagement.data;
       setResearchResult(data?.research ?? null);
       setCanvas(data?.canvas ?? null);
@@ -522,18 +790,98 @@ export default function AdvisorCockpit() {
       setOutcome(data?.outcome ?? null);
       setCatalogEntry(data?.catalogEntry ?? null);
       setSynthesisResult((data?.transcriptSynthesis ?? []).at(-1) ?? null);
-      return true;
+      setArtifacts(response.documents ?? []);
+      setIntents(response.intents ?? []);
+      setCall1At(response.engagement.call1At ?? null);
+      setCall2At(response.engagement.call2At ?? null);
+      return response.engagement;
     } catch (reason) {
       const message = reason instanceof Error ? reason.message : "Unknown request failure";
       setNotice(`The engagement could not be read: ${message}`);
-      return false;
+      return null;
     }
   }
 
+  /**
+   * Resume routes on `workflowState`, the precise checkpoint, rather than on the CRM stage —
+   * `Call` cannot distinguish call 1 from call 2, and an unmatched value used to fall through
+   * to the final Deliver screen. Anything unrecognized lands on research, never on Deliver.
+   */
   async function resume(item: Engagement) {
     setCompany(item.companyName); setWebsite(item.website); setActiveId(item.id); setCallIndex(0);
-    if (!await loadEngagement(item.id)) return;
-    go(item.stage === "Research" ? "research" : item.stage === "Synthesize" ? "synthesis" : item.stage === "Operate" ? "sprint" : "deliver");
+    setContact(item.primaryContact); setRole(item.primaryContactRole); setEmail(item.email);
+    setScheduleError(""); setScheduleSavedAt(""); setDeliverError(""); setAgendaError(""); setAgendaStep(0);
+    const record = await loadEngagement(item.id);
+    if (!record) return;
+    const state = isWorkflowState(record.workflowState ?? "") ? record.workflowState as WorkflowState : item.workflowState;
+    const reached = (target: WorkflowState) => state !== null && workflowStates.indexOf(state) >= workflowStates.indexOf(target);
+    const consent = record.data?.recordingConsent;
+    setConsent(consent?.call1 ? "recorded" : "pending");
+    setCall2Consent(consent?.call2 ? "recorded" : "pending");
+    setTranscriptCallNumber(reached("CANVAS_COMMIT_APPROVED") ? 2 : 1);
+    setCall2Processed(reached("TRANSCRIPT_2_RECONCILED"));
+    setDiagnosisApproved(reached("DIAGNOSIS_APPROVED"));
+    setTranscript(""); setFileName(""); setTranscriptFile(null); setFileSummary(""); setFileError("");
+    setBriefSent(record.readinessBriefStatus === "Approved" || record.readinessBriefStatus === "Sent");
+    const target = state ? resumeScreens[state] : "research";
+    go(target);
+    setResumed({ state, stage: uiStage(record.workflowState || record.stage), status: record.status, nextAction: record.nextAction, screen: target });
+  }
+
+  async function saveSchedule(fields: { call1At?: string | null; call2At?: string | null }) {
+    if (!activeId) return setNotice("Action not completed: select or create an engagement first.");
+    setScheduleBusy(true); setScheduleError(""); setScheduleSavedAt("");
+    try {
+      const current = await api<{ engagement: BackendEngagement }>(`/api/engagements/${activeId}`);
+      const response = await save<{ engagement: BackendEngagement }>(`/api/engagements/${activeId}`, {
+        command: "update_metadata",
+        expectedVersion: current.engagement.version,
+        fields,
+      }, "PATCH");
+      setCall1At(response.engagement.call1At ?? null);
+      setCall2At(response.engagement.call2At ?? null);
+      setScheduleSavedAt(new Date().toLocaleTimeString());
+      setEngagements((items) => items.map((item) => item.id === activeId ? { ...item, call1At: response.engagement.call1At ?? null, call2At: response.engagement.call2At ?? null } : item));
+    } catch (reason) {
+      setScheduleError(`The meeting time was not saved: ${reason instanceof Error ? reason.message : "unknown request failure"}`);
+    } finally {
+      setScheduleBusy(false);
+    }
+  }
+
+  /** Builds the client-facing Findings Call agenda, then hands over to the presentation screen. */
+  async function openFindingsPresentation() {
+    if (!activeId) return setNotice("Action not completed: select or create an engagement first.");
+    setAgendaBusy(true); setAgendaError("");
+    try {
+      const response = await save<{ document: FindingsAgendaDocument }>(`/api/engagements/${activeId}/findings-agenda`, {});
+      const sections = orderedAgenda(response.document.data?.sections ?? []);
+      setAgenda(sections);
+      if (!sections.length) {
+        setAgendaError("The findings agenda came back with no sections. Reconcile the transcript evidence before presenting.");
+        return;
+      }
+      setAgendaStep(0);
+      go("findings-call");
+    } catch (reason) {
+      setAgendaError(`The findings agenda could not be built: ${reason instanceof Error ? reason.message : "unknown request failure"}`);
+    } finally {
+      setAgendaBusy(false);
+    }
+  }
+
+  async function publishDocument(documentId: string) {
+    if (!activeId) return setNotice("Action not completed: select or create an engagement first.");
+    setDeliverBusy(documentId); setDeliverError("");
+    try {
+      const response = await save<{ intent: IntentItem }>(`/api/engagements/${activeId}/publish`, { documentId });
+      setIntents((items) => [response.intent, ...items.filter((item) => item.id !== response.intent.id)]);
+      setNotice("Queued for review. Nothing has been sent yet — open Reviewed actions to approve and send it.");
+    } catch (reason) {
+      setDeliverError(`This document could not be queued for the client: ${reason instanceof Error ? reason.message : "unknown request failure"}`);
+    } finally {
+      setDeliverBusy("");
+    }
   }
 
   async function openOperations(next: Screen) {
@@ -779,6 +1127,7 @@ export default function AdvisorCockpit() {
       });
       setDiagnosisApproved(true);
       go("deliver");
+      await loadEngagement(activeId);
     } catch {
       // Keep the advisor on the finding review after a failed approval.
     }
@@ -786,12 +1135,15 @@ export default function AdvisorCockpit() {
 
   async function generateAllDeliverables() {
     if (!activeId) return setNotice("Action not completed: select or create an engagement first.");
+    setDeliverBusy("suite"); setDeliverError("");
     try {
-      await save(`/api/engagements/${activeId}/deliverables`, {});
-      setGenerated(deliverables.map(([title]) => title));
-      setNotice("The full internal deliverable suite is ready in Documents.");
-    } catch {
-      // Do not mark deliverables generated after an API failure.
+      const response = await save<{ documents: ArtifactRecord[] }>(`/api/engagements/${activeId}/deliverables`, {});
+      setArtifacts((existing) => [...response.documents, ...existing.filter((item) => !response.documents.some((fresh) => fresh.kind === item.kind))]);
+      setNotice("The deliverable suite was generated. Each card below now points at a real document.");
+    } catch (reason) {
+      setDeliverError(`The deliverable suite could not be generated: ${reason instanceof Error ? reason.message : "unknown request failure"}`);
+    } finally {
+      setDeliverBusy("");
     }
   }
 
@@ -805,11 +1157,11 @@ export default function AdvisorCockpit() {
     }
   }
 
-  return <div className={`cockpit ${screen === "call" ? "client-call" : ""}`}>
+  return <div className={`cockpit ${isClientFacing(screen) ? "client-call" : ""}`}>
     <a className="skip" href="#main">Skip to main content</a>
     <header className="app-header">
       <button className="brand" onClick={() => go("home")} type="button"><span><Icon name="shield" size={18} /></span>TIER 4 <em>AUDIT</em></button>
-      {screen !== "home" ? <div className="header-context"><i />{displayCompany}<Pill tone={screen === "call" ? "known" : "neutral"}>{screen === "call" ? "Client call view" : "Advisor view"}</Pill></div> : null}
+      {screen !== "home" ? <div className="header-context"><i />{displayCompany}<Pill tone={isClientFacing(screen) ? "known" : "neutral"}>{isClientFacing(screen) ? "Client call view" : "Advisor view"}</Pill></div> : null}
       <button aria-controls="primary-navigation" aria-expanded={mobileNav} aria-label={mobileNav ? "Close navigation" : "Open navigation"} className="mobile-nav" onClick={() => setMobileNav(!mobileNav)} type="button"><Icon name={mobileNav ? "close" : "menu"} /></button>
       <nav aria-label="Product navigation" className={mobileNav ? "open" : ""} id="primary-navigation">
         <Documents activeId={activeId} />
@@ -818,33 +1170,41 @@ export default function AdvisorCockpit() {
         {screen !== "home" ? <button className="exit" onClick={() => go("home")} type="button">Exit</button> : null}
       </nav>
     </header>
-    {currentStage && screen !== "call" ? <Stepper current={currentStage} /> : null}
+    {currentStage && !isClientFacing(screen) ? <Stepper current={currentStage} /> : null}
     <main id="main">
       {notice ? <div className="notice" role="status"><Icon name="info" size={16} />{notice}<button aria-label="Dismiss" onClick={() => setNotice("")} type="button"><Icon name="close" size={14} /></button></div> : null}
+      {resumed && !isClientFacing(screen) ? <div className="resume-banner" role="status">
+        <span className="resume-mark"><Icon name="refresh" size={19} /></span>
+        <div><p className="eyebrow">Resumed · {displayCompany}</p><strong>{resumed.state ? workflowCopy[resumed.state][0] : "Stage not reported by the server"}</strong>
+          <p>Next: {resumed.nextAction || (resumed.state ? workflowCopy[resumed.state][1] : "Review the record and pick the next step.")}</p></div>
+        <dl><div><dt>Stage</dt><dd><Pill>{resumed.stage}</Pill></dd></div><div><dt>Checkpoint</dt><dd>{resumed.state ?? "unrecognized"}</dd></div><div><dt>Status</dt><dd>{resumed.status || "Not reported"}</dd></div><div><dt>Opened on</dt><dd>{screenLabels[resumed.screen] ?? resumed.screen}</dd></div></dl>
+        <button aria-label="Dismiss" onClick={() => setResumed(null)} type="button"><Icon name="close" size={15} /></button>
+      </div> : null}
       {screen === "home" ? <Home engagements={engagements} loading={registryLoading} onFresh={() => go("intake")} onMigration={() => go("migration")} onResume={resume} onUpdate={() => go("engagements")} /> : null}
-      {screen === "intake" ? <Intake apiState={apiState} company={company} contact={contact} context={context} onBack={() => go("home")} onCompany={setCompany} onContact={setContact} onContext={setContext} onRole={setRole} onSubmit={createEngagement} onWebsite={setWebsite} role={role} website={website} /> : null}
+      {screen === "intake" ? <Intake apiState={apiState} company={company} contact={contact} context={context} email={email} fileName={intakeFileName} fileState={intakeFileState} onBack={() => go("home")} onCompany={setCompany} onContact={setContact} onContext={setContext} onEmail={setEmail} onFile={selectIntakeFile} onRole={setRole} onSubmit={createEngagement} onWebsite={setWebsite} role={role} website={website} /> : null}
       {screen === "migration" ? <Migration onBack={() => go("home")} onContinue={() => { setNotice("Source material staged locally. Add the client anchor before research begins."); go("intake"); }} /> : null}
       {screen === "engagements" ? <Engagements engagements={engagements} loading={registryLoading} onBack={() => go("home")} onFresh={() => go("intake")} onResume={resume} /> : null}
       {screen === "research" ? <Research canvas={canvas} company={displayCompany} onBack={() => go("intake")} onPrepare={() => go("prepare")} research={researchResult} script={script} /> : null}
-      {screen === "prepare" ? <Prepare briefSent={briefSent} contact={contact || "Primary contact"} onBack={() => go("research")} onCall={() => { setCallIndex(0); go("call"); }} onSend={() => { setConfirmed(false); setConfirmSend(true); }} /> : null}
-      {screen === "call" && callQuestion ? <Call answer={answers[callQuestion.id] ?? ""} company={displayCompany} consent={consent} generic={script.generic} index={Math.min(callIndex, script.questions.length - 1)} notes={notes[callQuestion.id] ?? ""} onAnswer={(value) => setAnswers((all) => ({ ...all, [callQuestion.id]: value }))} onConsent={setConsent} onExit={() => go("prepare")} onNext={() => callIndex < script.questions.length - 1 ? setCallIndex(callIndex + 1) : go("transcript")} onNotes={(value) => setNotes((all) => ({ ...all, [callQuestion.id]: value }))} onPrevious={() => setCallIndex(Math.max(0, callIndex - 1))} onValue={(value) => setValues((all) => ({ ...all, [callQuestion.id]: value }))} question={callQuestion} total={script.questions.length} value={values[callQuestion.id] ?? ""} /> : null}
+      {screen === "prepare" ? <Prepare briefSent={briefSent} call1At={call1At} call2At={call2At} contact={contact || "Primary contact"} email={email} onBack={() => go("research")} onCall={() => { setCallIndex(0); go("call"); }} onSaveSchedule={saveSchedule} onSend={() => { setConfirmed(false); setConfirmSend(true); }} savedAt={scheduleSavedAt} scheduleBusy={scheduleBusy} scheduleError={scheduleError} /> : null}
+      {screen === "call" && callQuestion ? <Call answer={answers[callQuestion.id] ?? ""} company={displayCompany} consent={consent} generic={script.generic} index={Math.min(callIndex, script.questions.length - 1)} notes={notes[callQuestion.id] ?? ""} onAnswer={(value) => setAnswers((all) => ({ ...all, [callQuestion.id]: value }))} onConsent={setConsent} onExit={() => go("prepare")} onNext={() => callIndex < script.questions.length - 1 ? setCallIndex(callIndex + 1) : go("transcript")} onNotes={(value) => setNotes((all) => ({ ...all, [callQuestion.id]: value }))} onPrevious={() => setCallIndex(Math.max(0, callIndex - 1))} onValue={(value) => setValues((all) => ({ ...all, [callQuestion.id]: value }))} question={callQuestion} scheduledAt={call1At} total={script.questions.length} value={values[callQuestion.id] ?? ""} /> : null}
       {screen === "transcript" ? <Transcript callNumber={transcriptCallNumber} company={displayCompany} date={meetingDate} fileError={fileError} fileName={fileName} fileReading={fileReading} fileSummary={fileSummary} method={transcriptMethod} onAnalyze={analyze} onBack={() => transcriptCallNumber === 2 ? go("findings") : go("call")} onDate={setMeetingDate} onFile={selectTranscriptFile} onMethod={setTranscriptMethod} onText={setTranscript} ready={Boolean(transcriptFile)} text={transcript} /> : null}
       {screen === "synthesis" ? <Synthesis onApprove={() => approve("canvas")} onBack={() => go("transcript")} synthesis={synthesisResult} /> : null}
-      {screen === "findings" ? <Findings consent={call2Consent} onApprove={() => approve("diagnosis")} onBack={() => go("synthesis")} onConsent={setCall2Consent} owner={contact && role ? `${contact}, ${role}` : ""} synthesis={synthesisResult} /> : null}
-      {screen === "deliver" ? <Deliver approved={diagnosisApproved} generated={generated} onActions={() => openOperations("actions")} onBack={() => go("findings")} onGenerate={generateAllDeliverables} onOperate={openOperations} onSync={prepareCrmWriteBack} /> : null}
-      {screen === "sprint" ? <SprintScreen busy={opsBusy} error={opsError} onActivate={activateSprint} onBack={() => go("deliver")} onNavigate={openOperations} onTask={updateSprintTask} sprint={sprint} /> : null}
+      {screen === "findings" ? <Findings agendaBusy={agendaBusy} agendaError={agendaError} consent={call2Consent} onApprove={() => approve("diagnosis")} onBack={() => go("synthesis")} onConsent={setCall2Consent} onPresent={openFindingsPresentation} owner={contact && role ? `${contact}, ${role}` : ""} scheduledAt={call2At} synthesis={synthesisResult} /> : null}
+      {screen === "findings-call" ? <FindingsPresentation company={displayCompany} consent={call2Consent} index={Math.min(agendaStep, Math.max(0, agenda.length - 1))} onConsent={setCall2Consent} onExit={() => go("findings")} onNext={() => setAgendaStep((step) => Math.min(agenda.length - 1, step + 1))} onPrevious={() => setAgendaStep((step) => Math.max(0, step - 1))} scheduledAt={call2At} sections={agenda} /> : null}
+      {screen === "deliver" ? <Deliver approved={diagnosisApproved} artifacts={artifacts} busy={deliverBusy} error={deliverError} intents={intents} onActions={() => openOperations("actions")} onBack={() => go("findings")} onGenerate={generateAllDeliverables} onOperate={openOperations} onPublish={publishDocument} onSync={prepareCrmWriteBack} /> : null}
+      {screen === "sprint" ? <SprintScreen busy={opsBusy} error={opsError} onActivate={activateSprint} onBack={() => { go("deliver"); if (activeId) void loadEngagement(activeId); }} onNavigate={openOperations} onTask={updateSprintTask} sprint={sprint} /> : null}
       {screen === "measure" ? <Measure busy={opsBusy === "outcome"} correcting={opsBusy === "direction"} error={opsError} onBack={() => openOperations("sprint")} onCorrectDirection={correctOutcomeDirection} onNavigate={openOperations} onSubmit={recordOutcome} outcome={outcome} sprint={sprint} /> : null}
       {screen === "catalog" ? <Catalog busy={opsBusy === "catalog"} entry={catalogEntry} error={opsError} onBack={() => openOperations("measure")} onNavigate={openOperations} onSubmit={writeCatalog} outcome={outcome} /> : null}
       {screen === "actions" ? <ReviewedActions engagementId={activeId} onBack={() => openOperations("sprint")} onNavigate={openOperations} /> : null}
       {screen === "integrations" ? <IntegrationCenter onBack={() => go("home")} /> : null}
       {screen === "call" && !callQuestion ? <section className="guided narrow"><PageHead eyebrow="Call · guided script" title="No call question is available.">Run research for this engagement so the guided call can be driven by client-specific discovery questions.</PageHead><Button icon="back" onClick={() => go("research")}>Back to research</Button></section> : null}
     </main>
-    {screen !== "home" && screen !== "call" ? <div aria-live="polite" className="save-state"><i className={apiState} />{apiState === "saving" ? "Saving…" : apiState === "saved" ? "Saved" : apiState === "error" ? "Action failed" : "Ready"}</div> : null}
+    {screen !== "home" && !isClientFacing(screen) ? <div aria-live="polite" className="save-state"><i className={apiState} />{apiState === "saving" ? "Saving…" : apiState === "saved" ? "Saved" : apiState === "error" ? "Action failed" : "Ready"}</div> : null}
     {confirmSend ? <div className="modal-layer"><div aria-describedby="send-description" aria-labelledby="send-title" aria-modal="true" className="modal" ref={modalRef} role="dialog">
       <button aria-label="Close" className="modal-close" onClick={() => setConfirmSend(false)} type="button"><Icon name="close" size={17} /></button>
       <span className="modal-icon"><Icon name="mail" size={21} /></span><p className="eyebrow">External intent</p><h2 id="send-title">Approve this send intent</h2>
       <p id="send-description">This records approval and prepares a reviewed send intent. It does not send an email. The brief excludes the Canvas, internal questions, and constraint hypotheses.</p>
-      <dl><div><dt>Recipient</dt><dd>{contact || "Primary contact"}</dd></div><div><dt>Delivery intent</dt><dd>Email draft</dd></div><div><dt>Document</dt><dd>Pre-Call Readiness Brief</dd></div></dl>
+      <dl><div><dt>Recipient</dt><dd>{contact || "Primary contact"}</dd></div><div><dt>Email address</dt><dd>{email.trim() || "No address on the engagement — the send would have nowhere to go"}</dd></div><div><dt>Delivery intent</dt><dd>Email draft</dd></div><div><dt>Document</dt><dd>Pre-Call Readiness Brief</dd></div></dl>
       <label className="confirm"><input checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} type="checkbox" />I reviewed the recipient and client-facing content.</label>
       <div className="modal-actions"><Button onClick={() => setConfirmSend(false)} variant="secondary">Cancel</Button><Button disabled={!confirmed} icon="mail" onClick={sendBrief}>Approve send intent</Button></div>
       <small>No external provider is contacted by this action.</small>
@@ -873,19 +1233,25 @@ function Home({ engagements, loading, onFresh, onMigration, onResume, onUpdate }
 }
 
 function Intake(props: {
-  apiState: string; company: string; website: string; contact: string; role: string; context: string;
+  apiState: string; company: string; website: string; contact: string; role: string; email: string; context: string;
+  fileName: string; fileState: { tone: "reading" | "ready" | "error" | "added"; message: string } | null;
   onBack: () => void; onCompany: (v: string) => void; onWebsite: (v: string) => void;
-  onContact: (v: string) => void; onRole: (v: string) => void; onContext: (v: string) => void;
-  onSubmit: (e: FormEvent) => void;
+  onContact: (v: string) => void; onRole: (v: string) => void; onEmail: (v: string) => void;
+  onContext: (v: string) => void; onFile: (file: File | null) => void; onSubmit: (e: FormEvent) => void;
 }) {
-  const [attachment, setAttachment] = useState("");
+  const emailValid = looksLikeEmail(props.email);
+  const emailTouched = props.email.trim().length > 0;
+  const busy = props.apiState === "saving" || props.fileState?.tone === "reading";
   return <section className="guided narrow"><Back onClick={props.onBack}>Entry options</Back><PageHead eyebrow="Client · Starting point" title="Who are we learning about?">Give us a starting point. We’ll research the business, draft a first-pass business model, and prepare the questions that matter for your call.</PageHead>
     <form className="intake-form" onSubmit={props.onSubmit}>
       <div className="field-row"><label><span>Company name <em>Required</em></span><input autoFocus onChange={(e) => props.onCompany(e.target.value)} placeholder="Acme Industrial" required value={props.company} /></label><label><span>Company website</span><input autoCapitalize="none" inputMode="url" onBlur={(e) => props.onWebsite(normalizeWebsiteInput(e.target.value))} onChange={(e) => props.onWebsite(e.target.value)} placeholder="tier4advisors.com" spellCheck={false} type="text" value={props.website} /></label></div>
-      <div className="field-row"><label><span>Primary contact name</span><input onChange={(e) => props.onContact(e.target.value)} placeholder="Maya Chen" value={props.contact} /></label><label><span>Primary contact role</span><input onChange={(e) => props.onRole(e.target.value)} placeholder="Chief Operating Officer" value={props.role} /></label></div>
+      <div className="field-row"><label><span>Primary contact name</span><input onChange={(e) => props.onContact(e.target.value)} placeholder="Maya Chen" value={props.contact} /></label><label className="field-note"><span>Primary contact role</span><input onChange={(e) => props.onRole(e.target.value)} placeholder="Chief Operating Officer" value={props.role} /><small>Stored as its own field, not buried in notes. Diagnosis approval reuses the name and role as the named human owner.</small></label></div>
+      <label className="field-note"><span>Primary contact email <em>Required</em></span><input autoCapitalize="none" className={emailTouched && !emailValid ? "invalid" : ""} inputMode="email" onChange={(e) => props.onEmail(e.target.value)} placeholder="maya@acmeindustrial.com" spellCheck={false} type="email" value={props.email} />
+        <small>{emailTouched && !emailValid ? "That does not look like an email address yet." : "We’ll send the pre-call readiness brief here. Without it the brief has nowhere to go and cannot be sent."}</small></label>
       <label><span>What prompted this conversation? <small>Optional</small></span><textarea onChange={(e) => props.onContext(e.target.value)} placeholder="What is changing, stuck, or important right now?" rows={5} value={props.context} /></label>
-      <label className="upload"><input accept=".pdf,.doc,.docx,.txt,.md,.csv" onChange={(e) => setAttachment(e.target.files?.[0]?.name ?? "")} type="file" /><span><Icon name="upload" size={20} /></span><span><strong>{attachment || "Add an email, notes, proposal, or prior document"}</strong><small>{attachment ? "Source staged for the engagement register" : "Optional · PDF, DOCX, TXT, Markdown, or CSV"}</small></span></label>
-      <div className="action-row"><p><Icon name="shield" size={18} /><span><strong>Public sources first.</strong> Nothing is sent to the client, and paid enrichment never runs automatically.</span></p><Button disabled={!props.company.trim() || props.apiState === "saving"} icon="arrow" type="submit">{props.apiState === "saving" ? "Preparing research…" : "Research this business"}</Button></div>
+      <label className="upload"><input accept={sourceAccept} onChange={(e) => props.onFile(e.target.files?.[0] ?? null)} type="file" /><span><Icon name="upload" size={20} /></span><span><strong>{props.fileName || "Add an email, notes, proposal, or prior document"}</strong><small>Optional · TXT, Markdown, CSV, DOCX, VTT, SRT, or JSON. PDF cannot be read — export it first.</small></span></label>
+      {props.fileState ? <p className={`upload-state ${props.fileState.tone === "error" ? "error" : props.fileState.tone === "reading" ? "" : "ready"}`} role={props.fileState.tone === "error" ? "alert" : "status"}><Icon name={props.fileState.tone === "error" ? "info" : props.fileState.tone === "reading" ? "refresh" : "check"} size={15} />{props.fileState.message}</p> : null}
+      <div className="action-row"><p><Icon name="shield" size={18} /><span><strong>Public sources first.</strong> Nothing is sent to the client, and paid enrichment never runs automatically.</span></p><Button disabled={!props.company.trim() || !emailValid || busy} icon="arrow" type="submit">{props.apiState === "saving" ? "Preparing research…" : "Research this business"}</Button></div>
     </form>
   </section>;
 }
@@ -943,10 +1309,26 @@ function Research({ canvas, company, onBack, onPrepare, research, script }: {
   </section>;
 }
 
-function Prepare({ briefSent, contact, onBack, onCall, onSend }: { briefSent: boolean; contact: string; onBack: () => void; onCall: () => void; onSend: () => void }) {
+function Prepare({ briefSent, call1At, call2At, contact, email, onBack, onCall, onSaveSchedule, onSend, savedAt, scheduleBusy, scheduleError }: {
+  briefSent: boolean; call1At: string | null; call2At: string | null; contact: string; email: string;
+  onBack: () => void; onCall: () => void; onSend: () => void; savedAt: string; scheduleBusy: boolean; scheduleError: string;
+  onSaveSchedule: (fields: { call1At?: string | null; call2At?: string | null }) => void;
+}) {
+  const [call1, setCall1] = useState(toLocalInput(call1At));
+  const [call2, setCall2] = useState(toLocalInput(call2At));
+  const dirty = call1 !== toLocalInput(call1At) || call2 !== toLocalInput(call2At);
   return <section className="guided document-page"><Back onClick={onBack}>Research review</Back><PageHead eyebrow="Prepare · Client-facing brief" side={<Pill tone={briefSent ? "success" : "assumed"}>{briefSent ? "Send intent recorded" : "Draft · no send intent"}</Pill>} title="Put the right facts within reach.">Review exactly what the client will see. Internal research, questions, and constraint hypotheses stay private.</PageHead>
-    <div className="document-layout"><aside><div><span>Recipient</span><strong>{contact}</strong></div><div><span>Delivery</span><strong>Email</strong></div><div><span>Duration</span><strong>60 minutes</strong></div><div><span>Video link</span><strong>Calendar meeting</strong></div><p><Icon name="lock" size={17} />Canvas v0, internal questions, bottleneck hypotheses, and suspected findings are excluded.</p></aside>
-      <article className="document-preview"><header><span><Icon name="shield" size={16} />Tier 4 Audit</span><small>Pre-Call Readiness Brief</small></header><p className="document-kicker">For {contact} and the operating team</p><h2>Let’s understand how the business actually works.</h2>
+    <div className="schedule-panel">
+      <div><p className="eyebrow">Meeting times</p><strong>{formatMeeting(call1At)}</strong><small>Discovery call · {call2At ? `Findings Call ${formatMeeting(call2At)}` : "Findings Call not scheduled yet"}</small></div>
+      <label><span>Discovery call (call 1)</span><input onChange={(event) => setCall1(event.target.value)} type="datetime-local" value={call1} /></label>
+      <label><span>Findings Call (call 2)</span><input onChange={(event) => setCall2(event.target.value)} type="datetime-local" value={call2} /></label>
+      <Button disabled={scheduleBusy || !dirty} icon="calendar" onClick={() => onSaveSchedule({ call1At: fromLocalInput(call1), call2At: fromLocalInput(call2) })} variant="secondary">{scheduleBusy ? "Saving…" : "Save meeting times"}</Button>
+      {scheduleError ? <p className="upload-state error" role="alert"><Icon name="info" size={15} />{scheduleError}</p> : null}
+      {!scheduleError && savedAt && !dirty ? <p className="upload-state ready" role="status"><Icon name="check" size={15} />Saved to the engagement record at {savedAt}. It travels with the CRM write-back.</p> : null}
+      {!scheduleError && !savedAt ? <p className="schedule-note"><Icon name="info" size={15} />Times are stored on the engagement, shown on the call screens, and carried into the CRM write-back. Nothing is added to a calendar.</p> : null}
+    </div>
+    <div className="document-layout"><aside><div><span>Recipient</span><strong>{contact}</strong></div><div><span>Email</span><strong>{email.trim() || "Not captured — the brief cannot be sent"}</strong></div><div><span>Scheduled</span><strong>{formatMeeting(call1At)}</strong></div><div><span>Delivery</span><strong>Email</strong></div><div><span>Duration</span><strong>60 minutes</strong></div><p><Icon name="lock" size={17} />Canvas v0, internal questions, bottleneck hypotheses, and suspected findings are excluded.</p></aside>
+      <article className="document-preview"><header><span><Icon name="shield" size={16} />Tier 4 Audit</span><small>Pre-Call Readiness Brief</small></header><p className="document-kicker">For {contact} and the operating team{call1At ? ` · ${formatMeeting(call1At)}` : ""}</p><h2>Let’s understand how the business actually works.</h2>
         <section><h3>What this session is</h3><p>We’ll walk through a map of your business drafted from public information. You correct it. Expect specific questions about how work actually flows.</p></section>
         <section><h3>Who should attend</h3><p>The owner or decision-maker, plus the person who can speak to the daily operation of the main workflow. If one person prices, estimates, schedules, or approves everything, we’d love them in the room or available.</p></section>
         <section><h3>Have these within reach</h3><ul><li>Monthly volumes such as bids, orders, invoices, or leads</li><li>Typical end-to-end turnaround time</li><li>What is currently waiting in queue</li><li>Anything declined, missed, or turned away last quarter</li><li>Rough cost or revenue figures you would stand behind</li></ul><blockquote>Approximate is fine. No reports, no spreadsheets—we just don’t want you hunting for numbers live.</blockquote></section>
@@ -958,13 +1340,13 @@ function Prepare({ briefSent, contact, onBack, onCall, onSend }: { briefSent: bo
 
 function Call(props: {
   company: string; consent: "pending" | "recorded" | "not-recorded"; generic: boolean; index: number; total: number;
-  question: DiscoveryQuestion; answer: string; notes: string; value: string;
+  question: DiscoveryQuestion; answer: string; notes: string; value: string; scheduledAt: string | null;
   onConsent: (v: "pending" | "recorded" | "not-recorded") => void; onAnswer: (v: string) => void; onNotes: (v: string) => void;
   onValue: (v: string) => void; onPrevious: () => void; onNext: () => void; onExit: () => void;
 }) {
   const question = props.question;
   const needsValue = question.expectedAnswerType === "number" || question.expectedAnswerType === "person";
-  return <section className="call-mode"><header><div><i />Client call view · {props.company}</div><button onClick={props.onExit} type="button">Exit call view</button></header>
+  return <section className="call-mode"><header><div><i />Client call view · {props.company}{props.scheduledAt ? <span className="call-scheduled"><Icon name="calendar" size={14} />{formatMeeting(props.scheduledAt)}</span> : null}</div><button onClick={props.onExit} type="button">Exit call view</button></header>
     {props.consent === "pending" ? <div className="consent-gate"><span><Icon name="mic" size={29} /></span><p className="eyebrow">Before the conversation begins</p><h1>Confirm recording consent.</h1><blockquote>“With your permission, we’ll record and transcribe this session so we quote you accurately rather than paraphrasing you.”</blockquote><p>Do not begin transcript capture until the disclosure and applicable consent requirements are satisfied.</p><Button icon="check" onClick={() => props.onConsent("recorded")}>Consent confirmed</Button><button className="call-link" onClick={() => props.onConsent("not-recorded")} type="button">Continue without recording</button></div> :
       <div className="call-content"><div className="call-progress"><span>Conversation {props.index + 1} of {props.total}</span><div><i style={{ width: `${((props.index + 1) / props.total) * 100}%` }} /></div><span>{sectionLabels[question.section] ?? question.section}</span></div>
         <div className="question"><p className="call-opening">Let’s make sure we understand how your business actually works.</p>{props.generic ? <p className="call-generic"><Icon name="info" size={14} />Generic fallback question — research produced no client-specific script.</p> : null}<h1>{question.question}</h1><p className="why">{question.whyItMatters}</p><div className="call-tags"><Pill tone={evidenceTone[question.evidenceStatus] ?? "neutral"}>{evidenceLabel[question.evidenceStatus] ?? question.evidenceStatus}</Pill>{question.required ? <Pill tone="missing">Required answer</Pill> : null}{question.canvasBlock ? <Pill tone="inferred">{question.canvasBlock}</Pill> : null}</div><div className="assumption"><span>What we found publicly</span><p>{question.publicAssumption}</p></div>
@@ -1036,17 +1418,24 @@ function Synthesis({ onApprove, onBack, synthesis }: { onApprove: () => void; on
   </section>;
 }
 
-function Findings({ consent, onApprove, onBack, onConsent, owner, synthesis }: {
-  consent: "pending" | "recorded" | "not-recorded"; onApprove: () => void; onBack: () => void;
-  onConsent: (value: "pending" | "recorded" | "not-recorded") => void; owner: string; synthesis: TranscriptSynthesis | null;
+function Findings({ agendaBusy, agendaError, consent, onApprove, onBack, onConsent, onPresent, owner, scheduledAt, synthesis }: {
+  agendaBusy: boolean; agendaError: string; consent: "pending" | "recorded" | "not-recorded"; onApprove: () => void; onBack: () => void;
+  onConsent: (value: "pending" | "recorded" | "not-recorded") => void; onPresent: () => void; owner: string;
+  scheduledAt: string | null; synthesis: TranscriptSynthesis | null;
 }) {
   const [step, setStep] = useState(0);
   const candidate = synthesis?.constraintCandidate;
   const baseline = synthesis?.baselineStatus ?? "Missing";
   const steps = [["Reconcile the Canvas", "Confirm corrections, role ownership, and the actual flow."], ["Resolve the baseline", `${baseline} baseline. Confirm its source or assign instrumentation to the named owner.`], ["Test the constraint", candidate ? `Confirm or kill the ${candidate.constraintType} candidate in ${candidate.canvasBlock}.` : "No constraint signal was detected; collect stronger evidence before approval."], ["Reveal the prescription", "Constraint → prescription → metric formula → named owner."]];
-  if (consent === "pending") return <section className="guided narrow"><Back onClick={onBack}>Synthesis review</Back><div className="consent-gate"><span><Icon name="mic" size={29} /></span><p className="eyebrow">Findings Call · before the conversation</p><h1>Confirm recording consent again.</h1><blockquote>“With your permission, we’ll record and transcribe this session so we quote you accurately rather than paraphrasing you.”</blockquote><p>Consent is recorded separately for Call 2.</p><Button icon="check" onClick={() => onConsent("recorded")}>Consent confirmed</Button><button className="call-link" onClick={() => onConsent("not-recorded")} type="button">Continue without recording</button></div></section>;
-  return <section className="guided findings"><Back onClick={onBack}>Synthesis review</Back><PageHead eyebrow="Synthesize · Findings Call" title="Reconcile first. Reveal second.">The diagnosis stays provisional while the required baseline is missing. The call can continue, but numeric claims cannot.</PageHead>
+  if (consent === "pending") return <section className="guided narrow"><Back onClick={onBack}>Synthesis review</Back><div className="consent-gate"><span><Icon name="mic" size={29} /></span><p className="eyebrow">Findings Call · before the conversation{scheduledAt ? ` · ${formatMeeting(scheduledAt)}` : ""}</p><h1>Confirm recording consent again.</h1><blockquote>“With your permission, we’ll record and transcribe this session so we quote you accurately rather than paraphrasing you.”</blockquote><p>Consent is recorded separately for Call 2.</p><Button icon="check" onClick={() => onConsent("recorded")}>Consent confirmed</Button><button className="call-link" onClick={() => onConsent("not-recorded")} type="button">Continue without recording</button></div></section>;
+  return <section className="guided findings"><Back onClick={onBack}>Synthesis review</Back><PageHead eyebrow={`Synthesize · Findings Call${scheduledAt ? ` · ${formatMeeting(scheduledAt)}` : ""}`} title="Reconcile first. Reveal second.">The diagnosis stays provisional while the required baseline is missing. The call can continue, but numeric claims cannot.</PageHead>
     <SynthesisMode synthesis={synthesis} />
+    <div className="present-cta"><span className="present-mark"><Icon name="people" size={21} /></span>
+      <div><strong>Share your screen and walk them through it.</strong><p>Opens the client-facing Findings Call view: what we heard, the constraint, their own words, what we propose, what it would take, what we’d measure. One section per screen, with nothing internal on show.</p></div>
+      <Button disabled={agendaBusy || !candidate} icon="arrow" onClick={onPresent}>{agendaBusy ? "Building the agenda…" : "Enter presentation view"}</Button>
+      {!candidate ? <small>No supported constraint candidate yet, so there is nothing to present. Collect stronger evidence first.</small> : null}
+      {agendaError ? <p className="upload-state error" role="alert"><Icon name="info" size={15} />{agendaError}</p> : null}
+    </div>
     <div className="findings-flow"><ol>{steps.map(([title], index) => <li className={index === step ? "active" : index < step ? "done" : ""} key={title}><button onClick={() => setStep(index)} type="button"><span>{index < step ? <Icon name="check" size={13} /> : index + 1}</span>{title}</button></li>)}</ol>
       <article><p className="eyebrow">Part {step < 2 ? "A · Reconciliation" : "B · Reveal"}</p><h2>{steps[step][0]}</h2><p>{steps[step][1]}</p>
         {step === 1 ? <div className="baseline"><Pill tone={baseline === "Confirmed" ? "known" : "missing"}>{baseline} baseline</Pill><strong>{baseline === "Confirmed" ? "Verify the coherent metric and source." : "No benchmark will be substituted."}</strong><span>{synthesis?.gaps.join("; ") || "Assign baseline instrumentation as the first Sprint task."}</span></div> : null}
@@ -1057,14 +1446,61 @@ function Findings({ consent, onApprove, onBack, onConsent, owner, synthesis }: {
   </section>;
 }
 
-function Deliver({ approved, generated, onActions, onBack, onGenerate, onOperate, onSync }: {
-  approved: boolean; generated: string[]; onActions: () => void; onBack: () => void;
-  onGenerate: () => void; onOperate: (screen: Screen) => void; onSync: () => void;
+/**
+ * The client-facing Findings Call. One section per screen, screen-share quality, and the same
+ * consent gate as the guided call. Only the `evidence` quotes are presented as the client's own
+ * words; the section body is our reading of the call and is never attributed to them.
+ */
+function FindingsPresentation({ company, consent, index, onConsent, onExit, onNext, onPrevious, scheduledAt, sections }: {
+  company: string; consent: "pending" | "recorded" | "not-recorded"; index: number;
+  onConsent: (value: "pending" | "recorded" | "not-recorded") => void; onExit: () => void;
+  onNext: () => void; onPrevious: () => void; scheduledAt: string | null; sections: FindingsAgendaSection[];
 }) {
+  const total = sections.length;
+  const section = sections[Math.min(index, Math.max(0, total - 1))];
+  return <section className="call-mode findings-present">
+    <header><div><i />Findings Call · {company}{scheduledAt ? <span className="call-scheduled"><Icon name="calendar" size={14} />{formatMeeting(scheduledAt)}</span> : null}</div><button onClick={onExit} type="button">Exit to advisor view</button></header>
+    {consent === "pending" ? <div className="consent-gate"><span><Icon name="mic" size={29} /></span><p className="eyebrow">Findings Call · before the conversation</p><h1>Confirm recording consent.</h1><blockquote>“With your permission, we’ll record and transcribe this session so we quote you accurately rather than paraphrasing you.”</blockquote><p>Consent is recorded separately for this call. Do not begin transcript capture until the disclosure and applicable consent requirements are satisfied.</p><Button icon="check" onClick={() => onConsent("recorded")}>Consent confirmed</Button><button className="call-link" onClick={() => onConsent("not-recorded")} type="button">Continue without recording</button></div>
+      : !section ? <div className="call-content"><div className="question"><h1>The agenda came back empty.</h1><p className="why">Nothing is shown rather than filling the screen with something the transcript does not support.</p></div><div className="call-actions"><span /><Button icon="back" onClick={onExit}>Back to advisor view</Button></div></div>
+      : <div className="call-content">
+        <div className="call-progress"><span>Section {Math.min(index, total - 1) + 1} of {total}</span><div><i style={{ width: `${((Math.min(index, total - 1) + 1) / total) * 100}%` }} /></div><span>{section.heading}</span></div>
+        <div className="present-body">
+          <h1>{section.heading}</h1>
+          {section.body ? <p className="present-narrative">{section.body}</p> : null}
+          {section.evidence.length ? <div className="client-words"><header><Pill tone="known"><Icon name="check" size={12} /> In your own words</Pill><span>Recorded on the call, quoted exactly — not our paraphrase</span></header>
+            <ul>{section.evidence.map((item) => <li key={`${item.speaker}${item.timestamp}${item.quote}`}><blockquote>“{item.quote}”</blockquote><cite>{item.speaker || "Client"}{item.timestamp ? ` · ${item.timestamp}` : ""}</cite></li>)}</ul>
+          </div> : null}
+        </div>
+        <div className="call-actions"><Button disabled={index === 0} onClick={onPrevious} variant="secondary"><Icon name="back" size={16} />Back</Button>{index >= total - 1 ? <Button icon="check" onClick={onExit}>Finish and return to the advisor view</Button> : <Button icon="arrow" onClick={onNext}>Next</Button>}</div>
+        <div className={`consent-status ${consent}`}><Icon name={consent === "recorded" ? "mic" : "shield"} size={14} />{consent === "recorded" ? "Recording consent confirmed" : "Continuing without recording"}</div>
+      </div>}
+  </section>;
+}
+
+function Deliver({ approved, artifacts, busy, error, intents, onActions, onBack, onGenerate, onOperate, onPublish, onSync }: {
+  approved: boolean; artifacts: ArtifactRecord[]; busy: string; error: string; intents: IntentItem[];
+  onActions: () => void; onBack: () => void; onGenerate: () => void; onOperate: (screen: Screen) => void;
+  onPublish: (documentId: string) => void; onSync: () => void;
+}) {
+  const publishIntents = intents.filter((intent) => intent.type === "document_publish");
+  const intentFor = (documentId: string) => publishIntents.find((intent) =>
+    (intent.payload as { documentId?: string } | null)?.documentId === documentId) ?? null;
+  const queued = publishIntents.filter((intent) => intent.status === "pending_review" || intent.status === "approved").length;
   return <section className="guided wide deliver"><Back onClick={onBack}>Findings</Back><PageHead eyebrow="Deliver · Approved release" side={<Pill tone={approved ? "success" : "assumed"}>{approved ? "Release approved" : "Provisional release"}</Pill>} title="Turn the finding into usable work.">Every deliverable carries the evidence label, named owner, scope, guardrails, and measurement plan forward.</PageHead>
     <div className="deliver-banner"><div><span>Primary deliverable</span><strong>One constraint → one prescription → one metric → one named human owner</strong></div><div><span>Evidence label</span><strong>Provisional · baseline instrumentation required</strong></div></div>
-    <div className="deliver-grid">{deliverables.map(([title, text]) => { const done = generated.includes(title); return <article key={title}><div className="deliver-card-meta"><span className="deliver-icon"><Icon name="document" size={20} /></span><Pill tone={done ? "success" : "neutral"}>{done ? "Generated" : "Ready to draft"}</Pill></div><h3>{title}</h3><p>{text}</p><button onClick={onGenerate} type="button">{done ? "Regenerate suite" : "Generate suite"}<Icon name={done ? "refresh" : "arrow"} size={14} /></button></article>; })}</div>
-    <div className="page-actions"><p><Icon name="lock" size={16} />The CRM action creates a reviewed write-back intent. It does not change Google Sheets automatically.</p><div><Button onClick={onActions} variant="secondary">Reviewed actions <Icon name="lock" size={14} /></Button><Button icon="arrow" onClick={onSync} variant="secondary">Prepare CRM write-back</Button></div></div>
+    {error ? <p className="ops-error" role="alert"><Icon name="info" size={15} />{error}</p> : null}
+    <div className="send-explainer"><Icon name="lock" size={18} /><div><strong>Sending a document to the client is two steps, on purpose.</strong><p>“Send to client” queues a reviewed publication intent — nothing leaves this app. You then approve and send it from the Reviewed actions panel, so nothing can go out mid-call by accident.</p></div>{queued ? <Pill tone="assumed">{queued} waiting in Reviewed actions</Pill> : null}<Button onClick={onActions} variant="secondary">Reviewed actions <Icon name="lock" size={14} /></Button></div>
+    <div className="deliver-grid">{deliverables.map(([title, text, kind]) => {
+      const artifact = artifacts.find((item) => item.kind === kind) ?? null;
+      const intent = artifact ? intentFor(artifact.id) : null;
+      const publish = publishStatusCopy(intent);
+      return <article key={title}><div className="deliver-card-meta"><span className="deliver-icon"><Icon name="document" size={20} /></span><Pill tone={artifact ? "success" : "neutral"}>{artifact ? "Generated" : "Not generated yet"}</Pill></div><h3>{title}</h3><p>{text}</p>
+        {artifact ? <div className="deliver-publish"><div className="deliver-publish-status"><Pill tone={publish.tone}>{publish.label}</Pill><small>{publish.detail}</small></div>
+          <button disabled={busy === artifact.id} onClick={() => onPublish(artifact.id)} type="button">{busy === artifact.id ? "Queueing…" : !intent ? "Send to client" : intent.status === "pending_review" || intent.status === "approved" ? "Queue another copy" : "Send again"}<Icon name="mail" size={14} /></button>
+        </div> : <button disabled={Boolean(busy)} onClick={onGenerate} type="button">{busy === "suite" ? "Generating…" : "Generate suite"}<Icon name="arrow" size={14} /></button>}
+      </article>;
+    })}</div>
+    <div className="page-actions"><p><Icon name="lock" size={16} />The CRM action creates a reviewed write-back intent. It does not change Google Sheets automatically.</p><div><Button disabled={Boolean(busy)} icon="refresh" onClick={onGenerate} variant="secondary">{busy === "suite" ? "Generating…" : artifacts.length ? "Regenerate the suite" : "Generate the suite"}</Button><Button icon="arrow" onClick={onSync} variant="secondary">Prepare CRM write-back</Button></div></div>
     <div className="sprint-path"><div className="sprint-path-heading"><p className="eyebrow">Implementation roadmap</p><span>After diagnosis approval</span></div>{([["1", "Activate the sprint", "Fixed scope, named owner, measurement clock started.", "sprint"], ["2", "Remove & measure", "Capture the ending metric; the server decides whether a delta is claimable.", "measure"], ["3", "Catalog write-back", "Compound the reusable evidence pattern.", "catalog"]] as Array<[string, string, string, Screen]>).map(([number, title, text, target], index) => <button className="sprint-step" key={title} onClick={() => onOperate(target)} type="button">{index ? <Icon className="sprint-arrow" name="arrow" /> : null}<span className="sprint-number">{number}</span><section><strong>{title}</strong><small>{text}</small></section><Icon name="chevron" size={15} /></button>)}</div>
   </section>;
 }
@@ -1246,6 +1682,7 @@ function ReviewedActions({ engagementId, onBack, onNavigate }: { engagementId: s
     {engagementId && !loading && !error && intents.length === 0 ? <p className="registry-empty">No external actions have been proposed for this engagement.</p> : null}
     <div className="intent-list">{intents.map((intent) => <article key={intent.id}>
       <header><div><Pill tone={intent.status === "executed" ? "success" : intent.status === "approved" ? "known" : intent.status === "rejected" || intent.status === "failed" ? "missing" : "assumed"}>{intent.status.replace(/_/g, " ")}</Pill><strong>{intent.type.replace(/_/g, " ")}</strong></div><small>Created {intent.created_at ? new Date(intent.created_at).toLocaleString() : "unknown"}{intent.executed_at ? ` · executed ${new Date(intent.executed_at).toLocaleString()}` : ""}</small></header>
+      {(() => { const outcome = intentResultCopy(intent); return outcome ? <p className={`intent-result ${outcome.tone}`} role={outcome.tone === "missing" ? "alert" : "status"}><Icon name={outcome.tone === "success" ? "check" : "info"} size={15} /><span><b>{outcome.title}</b>{outcome.detail}</span></p> : null; })()}
       <details><summary>Payload sent on execution</summary><pre>{JSON.stringify(intent.payload, null, 2)}</pre></details>
       {confirming === intent.id ? <div className="intent-confirm"><Icon name="lock" size={17} /><div><strong>This performs a real external write now.</strong><small>The payload above is sent to the external provider for {intent.type.replace(/_/g, " ")}.</small></div><Button onClick={() => setConfirming("")} variant="secondary">Cancel</Button><Button disabled={busy === `${intent.id}:execute`} icon="external" onClick={() => act(intent, "execute")}>{busy === `${intent.id}:execute` ? "Executing…" : "Yes, execute the external write"}</Button></div> : <div className="intent-actions">
         <Button disabled={intent.status !== "pending_review" || busy === `${intent.id}:approve`} icon="check" onClick={() => act(intent, "approve")} variant="secondary">{busy === `${intent.id}:approve` ? "Approving…" : "Approve"}</Button>
