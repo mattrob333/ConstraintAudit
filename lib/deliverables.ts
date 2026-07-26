@@ -8,6 +8,7 @@ import {
   type EvidenceClaim,
   type OutcomeMeasurement,
   type Provenance,
+  type RoleMapEntry,
   type SprintRecord,
   type TranscriptSynthesis,
   type ValueFlowStep,
@@ -319,6 +320,55 @@ ${valueFlowSection(engagement)}${generateDiagnosisPackage(engagement, finding)}
  * Proposal
  * ------------------------------------------------------------------ */
 
+/**
+ * Current standard price point for the fixed two-week sprint, in USD.
+ * This is the single place to change the price: every document reads it from here.
+ */
+export const FIXED_SPRINT_PRICE_USD = 2500;
+
+/** Thousands grouping without locale data, so the printed price is identical everywhere. */
+function usd(amount: number): string {
+  return `$${Math.round(amount).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",")} USD`;
+}
+
+const PRICE_LABEL = usd(FIXED_SPRINT_PRICE_USD);
+
+/**
+ * The fee is a fixed fee and nothing else. A payback period, return multiple, or ROI would
+ * require a confirmed baseline and a projected delta, neither of which this app invents — so
+ * no number is ever printed beside the price.
+ */
+function investmentSection(finding: ConstraintFinding): string {
+  const owner = ownerName(finding);
+  const metricName = text(finding.baselineMetric?.name) || "the constraint metric";
+  const baselineConfirmed = Boolean(text(finding.baselineMetric?.value));
+  const included = [
+    `- The sprint scope above, and nothing outside it.`,
+    `- ${owner}'s review time: every consequential step is presented for approval as part of the fee.`,
+    `- Before-and-after measurement of ${metricName}: the starting reading, the ending reading, and the change between them.`,
+  ];
+  if (finding.baselineInstrumentation?.required) {
+    included.push(`- Instrumenting that starting reading, which is the first task of the sprint.`);
+  }
+  return `## Investment
+
+**${PRICE_LABEL} — fixed fee** for the two-week sprint described above. Agreed before work starts; it does not move with hours worked.
+
+What the fee includes:
+
+${included.join("\n")}
+
+What the fee does not include:
+
+- Anything listed under "Explicitly out of scope" below.
+- Ongoing operation, support, licence, or subscription costs after the sprint ends.
+- A second sprint on the next constraint. That is a separate decision, made after this one is measured.
+
+${baselineConfirmed
+  ? `The fee is stated on its own. No payback period, return multiple, or ROI is calculated against it, because that would require a projected result this engagement has not measured yet.`
+  : `The starting number for ${metricName} is not yet confirmed, so no return, payback period, or multiple is claimed against this fee. Confirming that number is the first task of the sprint; until it is measured, the fee is the only figure in this document.`}`;
+}
+
 export function generateProposal(engagement: Engagement, finding: ConstraintFinding): string {
   const numbers = clientStatedNumbers(engagement, finding);
   const appendix = finding.appendixItems ?? [];
@@ -365,6 +415,8 @@ Why this is the smallest intervention that moves the constraint: ${text(finding.
 ${finding.baselineInstrumentation?.required
   ? `First task in the sprint, before anything is built: ${text(finding.baselineInstrumentation.firstSprintTask) || "instrument the baseline."}`
   : "The baseline is already instrumented and reproducible."}
+
+${investmentSection(finding)}
 
 ## Explicitly out of scope
 
@@ -647,6 +699,393 @@ ${text(entry?.reusableFor) || "Not yet scoped. Do not apply this pattern elsewhe
 - Reuse this pattern only where the same constraint is diagnosed from client evidence, not by resemblance.
 - The measured result above belongs to this engagement. It is never a projection for another client.
 `;
+}
+
+/* ------------------------------------------------------------------ *
+ * Roles & responsibility map
+ * ------------------------------------------------------------------ */
+
+/** Roles as captured by transcript synthesis. A person without a name is not a role. */
+function roleEntries(engagement: Engagement): RoleMapEntry[] {
+  const direct = Array.isArray(engagement.data.roles) ? engagement.data.roles : [];
+  const fromCalls = synthesisRecords(engagement).flatMap((record) => record.roles ?? []);
+  const seen = new Set<string>();
+  const entries: RoleMapEntry[] = [];
+  for (const role of [...direct, ...fromCalls]) {
+    if (!role || typeof role !== "object") continue;
+    const person = text(role.person);
+    if (!person) continue;
+    const key = person.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    entries.push(role);
+  }
+  return entries;
+}
+
+const WORK_TYPE: Record<string, string> = {
+  judgment: "judgment — decisions only they can make",
+  grind: "grind — repetitive work that does not need their judgment",
+  mixed: "mixed — some judgment, a lot of repetition",
+};
+
+function workType(role: RoleMapEntry): string {
+  return WORK_TYPE[role.judgmentOrGrind] ?? "not recorded";
+}
+
+function bulletList(items: string[] | undefined, empty: string): string {
+  const lines = (items ?? []).map((item) => text(item)).filter(Boolean);
+  return lines.length ? lines.map((item) => `- ${item}`).join("\n") : `- ${empty}`;
+}
+
+const ROLE_QUESTIONS = [
+  "Walk me through one job. Who touches it, in order, by name?",
+  "Who is accountable for that job landing well, even when someone else does the work?",
+  "Who can approve a price, a scope change, or a spend — and who cannot?",
+  "If one person were out for a week, which step would stop?",
+  "Which part of their work needs their judgment, and which part is repetition anyone could take?",
+];
+
+function rolesMapEmpty(engagement: Engagement, finding: ConstraintFinding): string {
+  return `# ${engagement.client} — Roles & Responsibility Map
+
+## No role evidence was captured
+
+The calls on record do not say who does what. Rather than draw an org chart from guesswork, this page stays empty: no name, reporting line, or approval right is asserted here.
+
+Nothing below is a finding. It is the question set that turns this page into one.
+
+## Ask these, in these words
+
+${ROLE_QUESTIONS.map((question) => `- "${question}"`).join("\n")}
+
+## Why it matters
+
+The most common constraint we find is one person every job waits on — the one who prices, approves, or decides. It rarely shows up in an org chart, and it never shows up in public information. It only shows up when someone says it out loud on a call.
+
+## Where this engagement stands
+
+- Constraint of record: ${finding.constraintType} constraint in ${constraintBlock(finding)}.
+- Named human owner: ${ownerLabel(finding.humanOwner)}.
+- Role evidence: Missing. Until it is captured, this document may not be presented as a map of the business.
+`;
+}
+
+/**
+ * Who does the work, who owns the result, and where the flow waits on one person.
+ * Single-point dependencies lead the document because they are usually the constraint.
+ */
+export function generateRolesMap(engagement: Engagement, finding: ConstraintFinding): string {
+  const roles = roleEntries(engagement);
+  if (!roles.length) return rolesMapEmpty(engagement, finding);
+
+  const singlePoints = roles.filter((role) => role.singlePointDependency);
+  const doers = roles.filter((role) => role.doesTask && !role.accountableForOutcome);
+  const accountable = roles.filter((role) => role.accountableForOutcome && !role.doesTask);
+  const both = roles.filter((role) => role.doesTask && role.accountableForOutcome);
+  const approvers = roles.filter((role) => text(role.approvalAuthority));
+
+  const dependencyBlock = singlePoints.length
+    ? `${singlePoints
+        .map((role) => {
+          const tasks = (role.tasks ?? []).map((task) => text(task)).filter(Boolean);
+          const detail = tasks.length ? ` Work that waits on them: ${tasks.join("; ")}.` : "";
+          const approval = text(role.approvalAuthority) ? ` They also hold approval for ${text(role.approvalAuthority)}.` : "";
+          return `**${text(role.person)} is a single point of dependency.**${detail}${approval}`;
+        })
+        .join("\n\n")}
+
+Each person above is a place the whole flow can stop. If they are busy, away, or working on something else, the work behind them waits — no matter how much capacity anyone else has.`
+    : `No single point of dependency was recorded on the calls. That is not the same as there being none. Confirm it directly: "if one person were out for a week, which step would stop?"`;
+
+  const split = [
+    doers.length
+      ? `- Does the work, not accountable for the result: ${doers.map((role) => text(role.person)).join(", ")}.`
+      : "- No one is recorded as doing the work without owning the result.",
+    accountable.length
+      ? `- Accountable for the result, does not do the work: ${accountable.map((role) => text(role.person)).join(", ")}.`
+      : "- No one is recorded as owning a result someone else delivers.",
+    both.length
+      ? `- Both does the work and owns the result: ${both.map((role) => text(role.person)).join(", ")}. This is where a business is most often capped by one person's hours.`
+      : "- No one is recorded as both doing the work and owning the result.",
+  ].join("\n");
+
+  const table = roles
+    .map((role) =>
+      `| ${text(role.person)} | ${text(role.reportsTo) || "not recorded"} | ${role.doesTask ? "yes" : "no"} | ${role.accountableForOutcome ? "yes" : "no"} | ${text(role.approvalAuthority) || "none recorded"} | ${workType(role)} | ${role.singlePointDependency ? "**yes**" : "no"} |`,
+    )
+    .join("\n");
+
+  const detail = roles
+    .map((role) =>
+      `### ${text(role.person)}${role.singlePointDependency ? " — single point of dependency" : ""}
+
+- Reports to: ${text(role.reportsTo) || "not recorded"}
+- Does the task: ${role.doesTask ? "yes" : "no"} — Accountable for the outcome: ${role.accountableForOutcome ? "yes" : "no"}
+- Approval authority: ${text(role.approvalAuthority) || "none recorded"}
+- Type of work: ${workType(role)}
+
+Responsibilities:
+
+${bulletList(role.responsibilities, "None recorded on the calls.")}
+
+Tasks:
+
+${bulletList(role.tasks, "None recorded on the calls.")}`,
+    )
+    .join("\n\n");
+
+  const ownerIsDependency = singlePoints.some(
+    (role) => text(role.person).toLowerCase() === text(finding.humanOwner?.name).toLowerCase() && Boolean(text(finding.humanOwner?.name)),
+  );
+
+  return `# ${engagement.client} — Roles & Responsibility Map
+
+Who does the work, who owns the result, and where everything waits on one person. Every name below was stated on a call; no role has been inferred.
+
+## Read this first — single point of dependency
+
+${dependencyBlock}
+
+## The map
+
+| Person | Reports to | Does the task | Accountable for outcome | Approval authority | Type of work | Single point |
+| --- | --- | --- | --- | --- | --- | --- |
+${table}
+
+## Doing the work is not owning the result
+
+${split}
+
+## Who can approve
+
+${approvers.length
+  ? approvers.map((role) => `- ${text(role.person)}: ${text(role.approvalAuthority)}`).join("\n")
+  : "- No approval authority was recorded. Ask who can say yes to a price, a scope change, or a spend — an unrecorded approver is a hidden queue."}
+
+## Person by person
+
+${detail}
+
+## How this connects to the constraint
+
+- Constraint of record: ${finding.constraintType} constraint in ${constraintBlock(finding)}.
+- ${constraintStepLine(engagement, finding)}
+- Named human owner of the intervention: ${ownerLabel(finding.humanOwner)}.
+${ownerIsDependency
+  ? `- The named owner is also a single point of dependency. Any intervention that adds work to them will not move the constraint — it moves the queue onto the person the queue is already on.`
+  : `- No recorded single point of dependency is the named owner of the intervention.`}
+`;
+}
+
+/* ------------------------------------------------------------------ *
+ * Findings call agenda (Call 2)
+ * ------------------------------------------------------------------ */
+
+export interface FindingsAgendaQuote {
+  quote: string;
+  speaker: string;
+  timestamp: string;
+}
+
+export interface FindingsAgendaSection {
+  heading: string;
+  body: string;
+  evidence: FindingsAgendaQuote[];
+}
+
+/**
+ * Only the client's own words, and only when they carry a speaker and a timestamp.
+ * An advisor line, a research statement, or an unattributed paraphrase never reaches
+ * this list — the agenda is read back to the client as their own evidence.
+ */
+function clientStatedQuotes(engagement: Engagement, finding: ConstraintFinding): FindingsAgendaQuote[] {
+  const quotes: FindingsAgendaQuote[] = [];
+  const seen = new Set<string>();
+  const add = (quote: unknown, speaker: unknown, timestamp: unknown, provenance: unknown): void => {
+    if (provenance !== "client-stated") return;
+    const body = text(quote);
+    const who = text(speaker);
+    const when = text(timestamp);
+    if (!body || !who || !when) return;
+    const key = `${body}|${who}|${when}`.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    quotes.push({ quote: body, speaker: who, timestamp: when });
+  };
+  for (const item of finding.evidence ?? []) add(item.quote, item.speaker, item.timestamp, item.provenance);
+  for (const record of synthesisRecords(engagement)) {
+    for (const line of record.quotes ?? []) add(line.text, line.speaker, line.timestamp, line.provenance);
+  }
+  return quotes;
+}
+
+const PLAIN_CONSTRAINT: Record<string, string> = {
+  capacity: "more work is arriving than this part of the business can get through",
+  latency: "work sits waiting between steps, so a job takes far longer than the work itself does",
+  quality: "work comes back to be redone, so the same job is paid for twice",
+  knowledge: "what is needed to move a job lives in one person's head, so the job waits for that head",
+  policy: "a rule or an approval holds the work back — not the people, and not the tools",
+};
+
+function plainConstraint(finding: ConstraintFinding): string {
+  return PLAIN_CONSTRAINT[finding.constraintType] ?? "one step in the flow is limiting how much work gets finished";
+}
+
+function agendaHeardBody(engagement: Engagement, finding: ConstraintFinding, quoteCount: number): string {
+  const symptoms = (finding.symptoms ?? [])
+    .map((symptom) => {
+      const statement = text(symptom.statement);
+      if (!statement) return "";
+      const number = text(symptom.number);
+      return number ? `- ${statement} (${number})` : `- ${statement}`;
+    })
+    .filter(Boolean);
+  // Only the figures the client said out loud, each still carrying its quote; the
+  // symptom-derived numbers are advisor-recorded and already listed above.
+  const numbers = clientStatedNumbers(engagement, finding).filter((line) => line.includes("“"));
+  if (!symptoms.length && !numbers.length && !quoteCount) {
+    return `We are not going to tell you what we heard, because nothing has been recorded in your words yet. No client-stated evidence exists on this engagement.
+
+Before this can be a findings meeting, we need the call transcript and the quotes that came out of it. Until then, treat every line below as an open question rather than a conclusion.`;
+  }
+  const parts = [
+    `Here is what you told us on the call, in the order it came up. Nothing here is our opinion — it is a summary of what was actually said.`,
+  ];
+  if (symptoms.length) parts.push(symptoms.join("\n"));
+  if (numbers.length) parts.push(`Numbers you gave us:\n\n${numbers.join("\n")}`);
+  else parts.push(`You did not give us a firm number for this, so nothing on the following pages is quantified.`);
+  return parts.join("\n\n");
+}
+
+function agendaConstraintBody(engagement: Engagement, finding: ConstraintFinding): string {
+  const step = constraintStep(engagement, finding);
+  const where = step
+    ? `Where it happens: **${text(step.name)}** — ${text(step.actor) || "the person doing it is not named yet"}${text(step.system) ? `, working in ${text(step.system)}` : ""}. Until that step clears, everything behind it waits.`
+    : `We have not yet pinned this to one step of your process. That is the first thing to settle in this meeting.`;
+  return `One thing is limiting how much work gets through: ${plainConstraint(finding)}.
+
+${where}
+
+We are naming one constraint, not a list. The other things we noticed are written down, but fixing them would not change what you get out the door this month.`;
+}
+
+function agendaProposalBody(finding: ConstraintFinding): string {
+  const description = text(finding.prescription?.description);
+  if (!description) {
+    return `No intervention has been written down yet. We are not going to propose work we have not defined, so this page is deliberately empty until the diagnosis above is agreed.`;
+  }
+  const why = text(finding.prescription?.whySmallestIntervention);
+  return `${description}
+
+${why ? `Why this and nothing more: ${why}` : `We have not yet written down why this is the smallest change that would work. Ask us for that before you agree to it.`}
+
+This is the smallest change we think moves the number. We are not proposing a rebuild, a new system across the business, or a change to how your team is structured.`;
+}
+
+function agendaEffortBody(engagement: Engagement, finding: ConstraintFinding): string {
+  const owner = text(finding.humanOwner?.name);
+  const ownerLine = owner
+    ? `${ownerLabel(finding.humanOwner)} is the one person who approves the work. Nothing consequential happens without their yes.`
+    : `No accountable person has been named yet. Nothing starts until one is — that is a condition of the sprint, not a preference.`;
+  const instrument = finding.baselineInstrumentation?.required
+    ? ` The first task, before anything is built, is ${text(finding.baselineInstrumentation.firstSprintTask) || "putting the starting measurement in place"}.`
+    : "";
+  const roles = roleEntries(engagement).filter((role) => role.singlePointDependency);
+  const dependency = roles.length
+    ? `\n\nOne caution in your own structure: ${roles.map((role) => text(role.person)).join(", ")} already ${roles.length > 1 ? "carry" : "carries"} work that nothing else can move past. The sprint is scoped not to add to that.`
+    : "";
+  return `A fixed two-week sprint at **${PRICE_LABEL}**, as a fixed fee agreed before anything starts.${instrument}
+
+${ownerLine}
+
+The fee covers the scope on the previous page, the review time of the person who approves it, and the before-and-after measurement. It does not cover ongoing running costs, or a second sprint on whatever the next constraint turns out to be.
+
+We are not putting a return figure next to that price. Claiming one would mean inventing a starting number and a result, and we do not do that.${dependency}`;
+}
+
+function agendaMeasureBody(finding: ConstraintFinding): string {
+  const metricName = text(finding.baselineMetric?.name) || "the number this constraint moves";
+  if (!text(finding.baselineMetric?.value)) {
+    return `We would measure ${metricName}.
+
+You have not confirmed a starting number for it yet, so the first task of the sprint is to instrument it — to make it something you can look up and reproduce, not something either of us estimates.
+
+Until that reading exists we will not quote an improvement, a percentage, or a return. At the end of the sprint you get two readings, taken the same way, and the difference between them.`;
+  }
+  return `We would measure ${metricName}.
+
+- Starting reading: ${metricLabel(finding)}
+- Source you can check it against: ${text(finding.baselineMetric?.source) || "not yet recorded — we would agree this before starting"}
+- Measurement clock starts: ${text(finding.baselineInstrumentation?.measurementClockStartsWhen) || "when that reading is confirmed and reproducible"}
+
+At the end of the sprint we take the same reading, the same way, and show you both. We are not forecasting the second number today.`;
+}
+
+function agendaSectionMarkdown(section: FindingsAgendaSection): string {
+  const evidence = section.evidence
+    .map((item) => `> “${item.quote}”\n>\n> — ${item.speaker}, ${item.timestamp}`)
+    .join("\n\n");
+  return `## ${section.heading}\n\n${section.body}${evidence ? `\n\n${evidence}` : ""}`;
+}
+
+/**
+ * The Call 2 agenda. Returns the stored Markdown artifact and the same six sections
+ * structured for one-per-screen presentation. No projected result appears in either.
+ */
+export function generateFindingsAgenda(
+  engagement: Engagement,
+  finding: ConstraintFinding,
+): { markdown: string; sections: FindingsAgendaSection[] } {
+  const quotes = clientStatedQuotes(engagement, finding);
+  // The quotes attached to the finding itself — the ones that carry the diagnosis.
+  const findingQuotes = clientStatedQuotes({ ...engagement, data: { ...engagement.data, transcriptSynthesis: [] } }, finding);
+
+  const sections: FindingsAgendaSection[] = [
+    {
+      heading: "What we heard",
+      body: agendaHeardBody(engagement, finding, quotes.length),
+      evidence: [],
+    },
+    {
+      heading: "The constraint",
+      body: agendaConstraintBody(engagement, finding),
+      evidence: findingQuotes.slice(0, 1),
+    },
+    {
+      heading: "Your own words",
+      body: quotes.length
+        ? `Everything on the previous page came from these. They are yours, taken from the recording, not our summary of them. If any of it is wrong, this is the moment to say so.`
+        : `We have no quote from you on record. That means the diagnosis is not yet evidenced in your words, and we are telling you that rather than paraphrasing you. Nothing in this pack should be treated as confirmed until this page has something on it.`,
+      evidence: quotes,
+    },
+    {
+      heading: "What we propose",
+      body: agendaProposalBody(finding),
+      evidence: [],
+    },
+    {
+      heading: "What it would take",
+      body: agendaEffortBody(engagement, finding),
+      evidence: [],
+    },
+    {
+      heading: "What we would measure",
+      body: agendaMeasureBody(finding),
+      evidence: [],
+    },
+  ];
+
+  const markdown = `# ${engagement.client} — Findings
+
+${quotes.length
+  ? `Six pages, in order. Anything in quotation marks is your own words from the recorded call.`
+  : `Six pages, in order. No client-stated quote has been captured yet, so this agenda names what is missing rather than filling the gap.`}
+
+${sections.map(agendaSectionMarkdown).join("\n\n")}
+`;
+
+  return { markdown, sections };
 }
 
 /* ------------------------------------------------------------------ *

@@ -6,6 +6,7 @@ export const engagements = sqliteTable("engagements", {
   client: text("client").notNull(),
   website: text("website").notNull().default(""),
   primaryContact: text("primary_contact").notNull().default(""),
+  primaryContactRole: text("primary_contact_role").notNull().default(""),
   email: text("email").notNull().default(""),
   advisor: text("advisor").notNull().default(""),
   stage: text("stage").notNull(),

@@ -37,7 +37,8 @@ const TABLE_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS engagements (
     id TEXT PRIMARY KEY, owner_id TEXT NOT NULL DEFAULT '',
     client TEXT NOT NULL, website TEXT NOT NULL DEFAULT '',
-    primary_contact TEXT NOT NULL DEFAULT '', email TEXT NOT NULL DEFAULT '',
+    primary_contact TEXT NOT NULL DEFAULT '', primary_contact_role TEXT NOT NULL DEFAULT '',
+    email TEXT NOT NULL DEFAULT '',
     advisor TEXT NOT NULL DEFAULT '', stage TEXT NOT NULL, status TEXT NOT NULL,
     workflow_state TEXT NOT NULL, next_action TEXT NOT NULL, due_date TEXT,
     last_contact TEXT, call_1_at TEXT, call_2_at TEXT, readiness_brief_status TEXT NOT NULL,
@@ -77,7 +78,10 @@ const TABLE_STATEMENTS = [
  * first release has to be reconciled here as well. Keyed by table, then column name to type clause.
  */
 const REQUIRED_COLUMNS: Record<string, Record<string, string>> = {
-  engagements: { owner_id: "TEXT NOT NULL DEFAULT ''" },
+  engagements: {
+    owner_id: "TEXT NOT NULL DEFAULT ''",
+    primary_contact_role: "TEXT NOT NULL DEFAULT ''",
+  },
   artifacts: { owner_id: "TEXT NOT NULL DEFAULT ''" },
   transcripts: { owner_id: "TEXT NOT NULL DEFAULT ''" },
   activities: { owner_id: "TEXT NOT NULL DEFAULT ''" },
@@ -145,6 +149,7 @@ function mapEngagement(row: DbRow): Engagement {
     client: text(row, "client"),
     website: text(row, "website"),
     primaryContact: text(row, "primary_contact"),
+    primaryContactRole: text(row, "primary_contact_role"),
     email: text(row, "email"),
     advisor: text(row, "advisor"),
     stage: text(row, "stage") as CrmStage,
@@ -171,14 +176,14 @@ function mapEngagement(row: DbRow): Engagement {
 function engagementInsert(db: D1, engagement: Engagement) {
   return db.prepare(
     `INSERT OR IGNORE INTO engagements (
-      id, owner_id, client, website, primary_contact, email, advisor, stage, status,
+      id, owner_id, client, website, primary_contact, primary_contact_role, email, advisor, stage, status,
       workflow_state, next_action, due_date, last_contact, call_1_at, call_2_at,
       readiness_brief_status, readiness_brief_sent_at, baseline_status,
       engagement_folder, notes, finding_status, data_json, version, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).bind(
     engagement.id, engagement.ownerId, engagement.client, engagement.website,
-    engagement.primaryContact, engagement.email, engagement.advisor, engagement.stage,
+    engagement.primaryContact, engagement.primaryContactRole, engagement.email, engagement.advisor, engagement.stage,
     engagement.status, engagement.workflowState, engagement.nextAction, engagement.dueDate,
     engagement.lastContact, engagement.call1At, engagement.call2At,
     engagement.readinessBriefStatus, engagement.readinessBriefSentAt, engagement.baselineStatus,
@@ -260,6 +265,7 @@ export interface CreateEngagementInput {
   client: string;
   website?: string;
   primaryContact?: string;
+  primaryContactRole?: string;
   email?: string;
   advisor?: string;
   notes?: string;
@@ -279,6 +285,7 @@ export async function createEngagement(
     client,
     website: input.website?.trim() ?? "",
     primaryContact: input.primaryContact?.trim() ?? "",
+    primaryContactRole: input.primaryContactRole?.trim() ?? "",
     email: input.email?.trim() ?? "",
     advisor: input.advisor?.trim() || "Tier 4 Advisor",
     stage: "Client",
@@ -373,14 +380,14 @@ export async function updateEngagement(
   const updated = validatePatch(existing, patch);
   const result = await getD1().prepare(
     `UPDATE engagements SET
-      client = ?, website = ?, primary_contact = ?, email = ?, advisor = ?, stage = ?,
+      client = ?, website = ?, primary_contact = ?, primary_contact_role = ?, email = ?, advisor = ?, stage = ?,
       status = ?, workflow_state = ?, next_action = ?, due_date = ?, last_contact = ?,
       call_1_at = ?, call_2_at = ?, readiness_brief_status = ?, readiness_brief_sent_at = ?,
       baseline_status = ?, engagement_folder = ?, notes = ?, finding_status = ?,
       data_json = ?, version = ?, updated_at = ?
      WHERE id = ? AND owner_id = ? AND version = ?`
   ).bind(
-    updated.client, updated.website, updated.primaryContact, updated.email, updated.advisor,
+    updated.client, updated.website, updated.primaryContact, updated.primaryContactRole, updated.email, updated.advisor,
     updated.stage, updated.status, updated.workflowState, updated.nextAction, updated.dueDate,
     updated.lastContact, updated.call1At, updated.call2At, updated.readinessBriefStatus,
     updated.readinessBriefSentAt, updated.baselineStatus, updated.engagementFolder, updated.notes,

@@ -112,6 +112,8 @@ export interface Engagement {
   client: string;
   website: string;
   primaryContact: string;
+  /** Structured so diagnosis approval can reuse it as the named owner's role. */
+  primaryContactRole: string;
   email: string;
   advisor: string;
   stage: CrmStage;
@@ -608,6 +610,7 @@ export function createDemoEngagement(now = "2026-07-24T16:00:00.000Z"): Engageme
     id: "eng_demo_northstar",
     ownerId: "demo",
     client: "Northstar Fabrication",
+    primaryContactRole: "Owner",
     website: "https://example.com",
     primaryContact: "Morgan Lee",
     email: "morgan@example.com",

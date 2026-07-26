@@ -6,9 +6,11 @@ import {
   generateCatalogEntry,
   generateDeveloperSpec,
   generateDiagnosisPackage,
+  generateFindingsAgenda,
   generateOutcomeReport,
   generateProposal,
   generateReadinessBrief,
+  generateRolesMap,
   generateRoadmap,
   generateSprintPlan,
   renderMarkdownToHtml,
@@ -406,10 +408,18 @@ export async function updateFinding(
     baseline.name?.trim() && baseline.value?.trim() && baseline.unit?.trim() &&
     baseline.period?.trim() && baseline.source?.trim(),
   );
+  // The primary contact captured at intake is the obvious default owner. Falling back to
+  // it means the advisor does not retype what they already told us, but an explicit
+  // humanOwner on the request always wins.
+  const intakeOwner = engagement.primaryContact.trim()
+    ? { name: engagement.primaryContact.trim(), role: engagement.primaryContactRole.trim() }
+    : null;
+  const resolvedOwner = input.humanOwner
+    ?? (finding.humanOwner.name.trim() ? finding.humanOwner : intakeOwner ?? finding.humanOwner);
   const nextFinding = {
     ...finding,
     baselineMetric: baseline,
-    humanOwner: input.humanOwner ?? finding.humanOwner,
+    humanOwner: resolvedOwner,
     findingStatus: baselineConfirmed ? "client-verified" as const : "provisional" as const,
     baselineInstrumentation: {
       ...finding.baselineInstrumentation,
@@ -459,6 +469,7 @@ export async function generateDeliverables(id: string, principal: Principal) {
     ["proposal", "Fixed-Sprint Proposal", generateProposal(engagement, finding)],
     ["implementation_roadmap", "Implementation Roadmap", generateRoadmap(engagement, finding)],
     ["developer_spec", "Third-Party Developer Specification", generateDeveloperSpec(engagement, finding)],
+    ["roles_map", "Roles & Responsibility Map", generateRolesMap(engagement, finding)],
   ] as const;
   const documents = [];
   for (const [kind, label, content] of definitions) {
@@ -541,6 +552,80 @@ export async function createDocumentPublishIntent(
     outcome: "No document was published; intent is pending explicit approval",
   });
   return { engagement, intent };
+}
+
+/**
+ * Attach a document the advisor already had — a prior proposal, an email thread, notes —
+ * to the engagement's source register. The text is extracted and stored so it is real
+ * evidence with `doc` provenance, not a filename the UI merely claims to have kept.
+ */
+export async function ingestSourceDocument(
+  id: string,
+  principal: Principal,
+  input: { file: TranscriptFileInput; label?: string },
+) {
+  const engagement = await requireEngagement(id, principal.ownerId);
+  if (!input.file?.name || !input.file.content) throw new Error("A file with content is required.");
+  if (/\.pdf$/i.test(input.file.name) || input.file.mimeType === "application/pdf") {
+    throw new HttpError(400, "PDF text extraction is not supported yet. Convert to DOCX, TXT, or Markdown first.");
+  }
+  const decoded = await decodeTranscriptFile(input.file);
+  const label = input.label?.trim() || input.file.name;
+  const artifact = await createArtifact(engagement, {
+    kind: "source_document",
+    title: `${engagement.client} — ${label}`,
+    status: "captured",
+    // Advisor-supplied material is `doc`, never `client-stated`. It is not something the
+    // client said on a recorded call, and it must never be promoted as if it were.
+    provenance: "doc",
+    content: decoded.text,
+    data: { fileName: input.file.name, format: decoded.format, warnings: decoded.warnings },
+  });
+  const updated = await updateEngagement(id, {
+    data: {
+      sourceRegister: [
+        ...(engagement.data.sourceRegister ?? []),
+        {
+          id: makeId("src"),
+          label,
+          provenance: "doc" as const,
+          capturedAt: new Date().toISOString(),
+        },
+      ],
+    },
+    expectedVersion: engagement.version,
+  }, principal.ownerId);
+  await addActivity(updated, {
+    activityType: "Source",
+    summary: `Captured ${label}`,
+    outcome: `${decoded.format} decoded into the source register${decoded.warnings.length ? `; ${decoded.warnings.join("; ")}` : ""}`,
+  });
+  return { engagement: updated, document: artifact, warnings: decoded.warnings };
+}
+
+/**
+ * Build the Findings Call agenda. Call 2 is where the advisor presents the diagnosis, so
+ * this is the artifact that carries a non-expert through the most important conversation.
+ */
+export async function buildFindingsAgenda(id: string, principal: Principal) {
+  const engagement = await requireEngagement(id, principal.ownerId);
+  const finding = engagement.data.finding;
+  if (!finding) throw new Error("Synthesize call 1 before building the findings agenda.");
+  const agenda = generateFindingsAgenda(engagement, finding);
+  const document = await createArtifact(engagement, {
+    kind: "findings_agenda",
+    title: `${engagement.client} — Findings Call Agenda`,
+    status: "draft",
+    provenance: "advisor-note",
+    content: agenda.markdown,
+    data: { sections: agenda.sections },
+  });
+  await addActivity(engagement, {
+    activityType: "Findings",
+    summary: "Built the findings call agenda",
+    outcome: `${agenda.sections.length} sections; evidence is client-stated only`,
+  });
+  return { engagement, document };
 }
 
 /**
