@@ -1,12 +1,20 @@
+import type { Principal } from "./auth";
+import { applyCanvasUpdates, buildCanvasFromResearch, mergeCanvas } from "./canvas";
 import { fetchFirefliesTranscript } from "./fireflies";
 import {
   generateAuditReport,
+  generateCatalogEntry,
   generateDeveloperSpec,
   generateDiagnosisPackage,
+  generateOutcomeReport,
   generateProposal,
   generateReadinessBrief,
   generateRoadmap,
+  generateSprintPlan,
+  renderMarkdownToHtml,
 } from "./deliverables";
+import { HttpError } from "./http";
+import { createDocument, appendOrUpdateRow, sendEmail, type CellValue } from "./integrations";
 import { researchPublicWebsite } from "./research";
 import { enrichResearchWithOpenAI } from "./openai-research";
 import {
@@ -21,19 +29,28 @@ import {
   createTranscript,
   getArtifact,
   getEngagement,
+  getIntent,
   updateEngagement,
+  updateIntentStatus,
 } from "./store";
 import { synthesizeTranscript } from "./transcript";
+import { decodeTranscriptFile, type TranscriptFileInput } from "./transcript-files";
 import {
   makeId,
   WORKFLOW_STATES,
+  type BaselineMetric,
+  type CanvasBlock,
+  type CatalogEntry,
   type ConsentAttestation,
   type Engagement,
+  type EvidenceClaim,
+  type OutcomeMeasurement,
+  type SprintRecord,
   type WorkflowState,
 } from "./workflow";
 
-async function requireEngagement(id: string): Promise<Engagement> {
-  const engagement = await getEngagement(id);
+async function requireEngagement(id: string, ownerId: string): Promise<Engagement> {
+  const engagement = await getEngagement(id, ownerId);
   if (!engagement) throw new Error("Engagement not found");
   return engagement;
 }
@@ -41,6 +58,7 @@ async function requireEngagement(id: string): Promise<Engagement> {
 async function advanceWithinEvidence(
   engagement: Engagement,
   target: WorkflowState,
+  ownerId: string,
   patch: Parameters<typeof updateEngagement>[1] = {},
 ): Promise<Engagement> {
   let current = engagement;
@@ -51,13 +69,13 @@ async function advanceWithinEvidence(
       ...patch,
       workflowState: next,
       expectedVersion: current.version,
-    });
+    }, ownerId);
   }
   return current;
 }
 
-export async function runResearch(id: string, sourceUrl?: string) {
-  const engagement = await requireEngagement(id);
+export async function runResearch(id: string, principal: Principal, sourceUrl?: string) {
+  const engagement = await requireEngagement(id, principal.ownerId);
   const url = sourceUrl?.trim() || engagement.website;
   if (!url) throw new Error("website or sourceUrl is required");
   const websiteResearch = await researchPublicWebsite(url, engagement.client);
@@ -86,6 +104,12 @@ export async function runResearch(id: string, sourceUrl?: string) {
       provenance: "public-research" as const,
       capturedAt: synthesis.fetchedAt,
     }));
+  // The canonical Canvas is written here so every downstream document reads one Canvas.
+  // Existing client-stated claims survive the merge; research never overwrites them.
+  const canvas = mergeCanvas(
+    engagement.data.canvas as Record<CanvasBlock, EvidenceClaim[]> | undefined,
+    buildCanvasFromResearch(synthesis),
+  );
   const updated = await updateEngagement(id, {
     stage: "Research",
     status: "In progress",
@@ -93,17 +117,19 @@ export async function runResearch(id: string, sourceUrl?: string) {
     nextAction: "Review research gaps and draft the pre-call readiness brief",
     data: {
       research: synthesis,
+      canvas,
+      valueFlow: synthesis.valueFlow ?? engagement.data.valueFlow,
       sourceRegister: [...(engagement.data.sourceRegister ?? []), ...addedSources],
     },
     expectedVersion: engagement.version,
-  });
+  }, principal.ownerId);
   const artifact = await createArtifact(updated, {
     kind: "company_brief",
     title: `${updated.client} — Public Research Brief`,
     status: "draft",
     provenance: "public-research",
     sourceUrl: canonicalUrl,
-    content: `# ${synthesis.title}\n\n${synthesis.description}\n\n## Research mode\n\n${synthesis.researchMode === "openai-web-search" ? `OpenAI web search (${synthesis.providerModel}) with ${synthesis.sourceCount ?? 0} public source(s).` : "Deterministic website extraction."}\n\n## Known public facts\n\n${synthesis.facts.map((fact) => `- ${fact.statement}${fact.sourceUrl ? ` — ${fact.sourceUrl}` : ""}`).join("\n") || "- No public facts extracted."}\n\n## Missing\n\n${synthesis.gaps.map((gap) => `- ${gap}`).join("\n")}`,
+    content: `# ${synthesis.title}\n\n${synthesis.description}\n\n## Research mode\n\n${synthesis.researchMode === "openai-web-search" ? `OpenAI web search (${synthesis.providerModel}) with ${synthesis.sourceCount ?? 0} public source(s).` : "Deterministic website extraction."}\n\n## Known public facts\n\n${synthesis.facts.map((fact) => `- ${fact.statement}${fact.sourceUrl ? ` — ${fact.sourceUrl}` : ""}`).join("\n") || "- No public facts extracted."}\n\n## Proposed value flow (unconfirmed)\n\n${(synthesis.valueFlow ?? []).map((step) => `${step.order}. ${step.name} — ${step.actor || "actor unknown"} _(${step.evidenceStatus})_`).join("\n") || "- No flow proposed."}\n\n## Missing\n\n${synthesis.gaps.map((gap) => `- ${gap}`).join("\n")}`,
     data: synthesis,
   });
   await addActivity(updated, {
@@ -124,15 +150,16 @@ export async function runResearch(id: string, sourceUrl?: string) {
 
 export async function readinessBriefAction(
   id: string,
+  principal: Principal,
   input: { action?: "generate" | "approve" | "send_intent"; videoLink?: string; duration?: string },
 ) {
-  let engagement = await requireEngagement(id);
+  let engagement = await requireEngagement(id, principal.ownerId);
   if (input.action === "send_intent" && engagement.readinessBriefStatus !== "Approved") {
     throw new Error("Readiness brief must be Approved before creating a send intent.");
   }
   if (input.action === "send_intent") {
     const binding = engagement.data.approvedReadinessBrief;
-    const bound = binding?.documentId ? await getArtifact(binding.documentId) : null;
+    const bound = binding?.documentId ? await getArtifact(binding.documentId, principal.ownerId) : null;
     const artifact = requireApprovedReadinessArtifact(
       engagement,
       bound as Parameters<typeof requireApprovedReadinessArtifact>[1],
@@ -175,7 +202,7 @@ export async function readinessBriefAction(
       },
     } : {},
     expectedVersion: engagement.version,
-  });
+  }, principal.ownerId);
   await addActivity(engagement, {
     activityType: "Brief",
     summary: input.action === "approve" ? "Approved readiness brief" : "Generated readiness brief draft",
@@ -186,10 +213,12 @@ export async function readinessBriefAction(
 
 export async function processTranscript(
   id: string,
+  principal: Principal,
   input: {
     callNumber: 1 | 2;
-    rawText: string;
-    source?: "paste" | "fireflies";
+    rawText?: string;
+    file?: TranscriptFileInput;
+    source?: "paste" | "fireflies" | "upload";
     sourceId?: string;
     sourceUrl?: string;
     title?: string;
@@ -199,9 +228,21 @@ export async function processTranscript(
     sourceData?: unknown;
   },
 ) {
-  let engagement = await requireEngagement(id);
+  let engagement = await requireEngagement(id, principal.ownerId);
   if (input.callNumber !== 1 && input.callNumber !== 2) throw new Error("callNumber must be 1 or 2");
-  if (!input.rawText?.trim()) throw new Error("rawText is required");
+  // An uploaded file is decoded to real transcript text here. The old build submitted
+  // only the filename, which silently produced a transcript with no client evidence.
+  let rawText = input.rawText ?? "";
+  let fileWarnings: string[] = [];
+  let fileFormat = "";
+  if (input.file) {
+    if (rawText.trim()) throw new Error("Provide either rawText or file, not both.");
+    const decoded = await decodeTranscriptFile(input.file);
+    rawText = decoded.text;
+    fileWarnings = decoded.warnings;
+    fileFormat = decoded.format;
+  }
+  if (!rawText.trim()) throw new Error("rawText is required");
   const consentKey = input.callNumber === 1 ? "call1" : "call2";
   const consent = requireConsentAttestation(
     input.consentAttestation ?? engagement.data.recordingConsent?.[consentKey],
@@ -215,23 +256,33 @@ export async function processTranscript(
         },
       },
       expectedVersion: engagement.version,
-    });
+    }, principal.ownerId);
   }
-  const synthesis = synthesizeTranscript(input.rawText, {
+  const synthesis = synthesizeTranscript(rawText, {
     client: engagement.client,
     callNumber: input.callNumber,
     transcriptUrl: input.sourceUrl,
     humanOwner: input.humanOwner,
     speakerRoles: input.speakerRoles,
+    research: engagement.data.research,
+    canvas: engagement.data.canvas,
+    valueFlow: engagement.data.valueFlow ?? engagement.data.research?.valueFlow,
+    questions: engagement.data.research?.discoveryQuestions,
+    priorSynthesis: engagement.data.transcriptSynthesis,
   });
+  // Client words correct the canonical Canvas; research claims are superseded, never deleted.
+  const canvas = applyCanvasUpdates(
+    engagement.data.canvas as Record<CanvasBlock, EvidenceClaim[]> | undefined,
+    synthesis.canvasUpdates ?? [],
+  );
   const transcript = await createTranscript(engagement, {
     callNumber: input.callNumber,
-    source: input.source ?? "paste",
+    source: input.source ?? (input.file ? "upload" : "paste"),
     sourceId: input.sourceId,
     sourceUrl: input.sourceUrl,
     title: input.title || `Call ${input.callNumber} transcript`,
-    rawText: input.rawText,
-    data: { synthesis, source: input.sourceData ?? null, consent },
+    rawText,
+    data: { synthesis, source: input.sourceData ?? null, consent, fileFormat, fileWarnings },
   });
   const target =
     input.callNumber === 1
@@ -239,8 +290,16 @@ export async function processTranscript(
       : WORKFLOW_STATES.indexOf(engagement.workflowState) >= WORKFLOW_STATES.indexOf("CANVAS_COMMIT_APPROVED")
         ? "TRANSCRIPT_2_RECONCILED"
         : engagement.workflowState;
+  const sharedData = {
+    transcriptSynthesis: [...(engagement.data.transcriptSynthesis ?? []), synthesis],
+    baseline: synthesis.constraintCandidate?.baselineMetric,
+    finding: synthesis.constraintCandidate ?? undefined,
+    recordingConsent: engagement.data.recordingConsent,
+    canvas,
+    roles: synthesis.roles?.length ? synthesis.roles : engagement.data.roles,
+  };
   if (WORKFLOW_STATES.indexOf(target) > WORKFLOW_STATES.indexOf(engagement.workflowState)) {
-    engagement = await advanceWithinEvidence(engagement, target, {
+    engagement = await advanceWithinEvidence(engagement, target, principal.ownerId, {
       baselineStatus: synthesis.baselineStatus,
       findingStatus: synthesis.constraintCandidate?.findingStatus ?? "none",
       nextAction:
@@ -248,12 +307,7 @@ export async function processTranscript(
           ? "Review synthesis and explicitly approve the Canvas commit"
           : "Review reconciliation and explicitly approve the diagnosis",
       status: "Needs review",
-      data: {
-        transcriptSynthesis: [...(engagement.data.transcriptSynthesis ?? []), synthesis],
-        baseline: synthesis.constraintCandidate?.baselineMetric,
-        finding: synthesis.constraintCandidate ?? undefined,
-        recordingConsent: engagement.data.recordingConsent,
-      },
+      data: sharedData,
     });
   } else {
     engagement = await updateEngagement(id, {
@@ -261,14 +315,9 @@ export async function processTranscript(
       findingStatus: synthesis.constraintCandidate?.findingStatus ?? "none",
       nextAction: "Review imported evidence; required approval checkpoints were not advanced automatically",
       status: "Needs review",
-      data: {
-        transcriptSynthesis: [...(engagement.data.transcriptSynthesis ?? []), synthesis],
-        baseline: synthesis.constraintCandidate?.baselineMetric,
-        finding: synthesis.constraintCandidate ?? undefined,
-        recordingConsent: engagement.data.recordingConsent,
-      },
+      data: sharedData,
       expectedVersion: engagement.version,
-    });
+    }, principal.ownerId);
   }
   const artifact = await createArtifact(engagement, {
     kind: input.callNumber === 1 ? "synthesis_diff" : "transcript_reconciliation",
@@ -276,20 +325,21 @@ export async function processTranscript(
     status: "needs_review",
     provenance: "advisor-note",
     sourceUrl: input.sourceUrl,
-    content: `# Call ${input.callNumber} Synthesis\n\n## Evidence quotes\n\n${synthesis.quotes.map((quote) => `- [${quote.timestamp}] ${quote.speaker}: "${quote.text}"`).join("\n") || "- No client-stated constraint evidence detected."}\n\n## Baseline\n\n${synthesis.baselineStatus}\n\n## Gaps\n\n${synthesis.gaps.map((gap) => `- ${gap}`).join("\n") || "- None detected."}`,
+    content: `# Call ${input.callNumber} Synthesis\n\n## Evidence quotes\n\n${synthesis.quotes.map((quote) => `- [${quote.timestamp}] ${quote.speaker}: "${quote.text}"`).join("\n") || "- No client-stated constraint evidence detected."}\n\n## Contradictions with public research\n\n${(synthesis.contradictions ?? []).map((item) => `- ${item.resolution}: research said "${item.researchStatement}"; client said "${item.clientQuote}" (${item.speaker}, ${item.timestamp})`).join("\n") || "- None detected."}\n\n## Decisions\n\n${(synthesis.decisions ?? []).map((item) => `- ${item.decision} — ${item.owner || item.speaker}`).join("\n") || "- None recorded."}\n\n## Baseline\n\n${synthesis.baselineStatus}\n\n## Gaps\n\n${synthesis.gaps.map((gap) => `- ${gap}`).join("\n") || "- None detected."}`,
     data: synthesis,
   });
   await addActivity(engagement, {
     activityType: "Transcript",
-    summary: `Processed Call ${input.callNumber} ${input.source ?? "paste"} transcript`,
+    summary: `Processed Call ${input.callNumber} ${input.source ?? (input.file ? "upload" : "paste")} transcript`,
     outcome: `${synthesis.lineCount} lines; baseline ${synthesis.baselineStatus}; finding ${synthesis.constraintCandidate?.findingStatus ?? "none"}`,
     sourceLink: input.sourceUrl,
   });
-  return { engagement, transcript, synthesis, document: artifact };
+  return { engagement, transcript, synthesis, document: artifact, fileWarnings };
 }
 
 export async function importFireflies(
   id: string,
+  principal: Principal,
   input: {
     transcriptId: string;
     callNumber: 1 | 2;
@@ -298,7 +348,7 @@ export async function importFireflies(
   },
 ) {
   const fetched = await fetchFirefliesTranscript(input.transcriptId);
-  return processTranscript(id, {
+  return processTranscript(id, principal, {
     callNumber: input.callNumber,
     rawText: fetched.rawText,
     source: "fireflies",
@@ -317,13 +367,14 @@ export async function importFireflies(
 
 export async function updateFinding(
   id: string,
+  principal: Principal,
   input: {
     humanOwner?: { name: string; role: string };
     baseline?: { name: string; value: string; unit: string; period: string; source: string };
     action?: "save" | "approve_diagnosis";
   },
 ) {
-  const engagement = await requireEngagement(id);
+  const engagement = await requireEngagement(id, principal.ownerId);
   const finding = engagement.data.finding;
   if (!finding) throw new Error("Synthesize a transcript before updating the finding.");
   if (
@@ -357,7 +408,7 @@ export async function updateFinding(
     status: "Needs review",
     nextAction: input.action === "approve_diagnosis" ? "Approve diagnosis release" : "Review finding",
     expectedVersion: engagement.version,
-  });
+  }, principal.ownerId);
   if (input.action === "approve_diagnosis") {
     updated = await updateEngagement(id, {
       workflowState: "DIAGNOSIS_APPROVED",
@@ -367,7 +418,7 @@ export async function updateFinding(
         ? "Generate the approved deliverable suite"
         : "Begin Sprint 1 with baseline instrumentation; numeric claims remain blocked",
       expectedVersion: updated.version,
-    });
+    }, principal.ownerId);
   }
   await addActivity(updated, {
     activityType: "Synthesis",
@@ -377,8 +428,8 @@ export async function updateFinding(
   return { engagement: updated, finding: nextFinding };
 }
 
-export async function generateDeliverables(id: string) {
-  const engagement = await requireEngagement(id);
+export async function generateDeliverables(id: string, principal: Principal) {
+  const engagement = await requireEngagement(id, principal.ownerId);
   if (WORKFLOW_STATES.indexOf(engagement.workflowState) < WORKFLOW_STATES.indexOf("DIAGNOSIS_APPROVED")) {
     throw new Error("Deliverables are blocked until the diagnosis approval checkpoint.");
   }
@@ -410,8 +461,8 @@ export async function generateDeliverables(id: string) {
   return { engagement, documents };
 }
 
-export async function createCrmWriteBackIntent(id: string) {
-  const engagement = await requireEngagement(id);
+export async function createCrmWriteBackIntent(id: string, principal: Principal) {
+  const engagement = await requireEngagement(id, principal.ownerId);
   const intent = await createIntent(engagement, "crm_write_back", {
     workbook: "Tier 4 Engagement CRM",
     sheet: "Engagements",
@@ -443,4 +494,364 @@ export async function createCrmWriteBackIntent(id: string) {
     outcome: "No external write performed; intent is pending explicit approval",
   });
   return { engagement, intent };
+}
+
+export async function createDocumentPublishIntent(
+  id: string,
+  principal: Principal,
+  input: { documentId: string },
+) {
+  const engagement = await requireEngagement(id, principal.ownerId);
+  const artifact = await getArtifact(input.documentId, principal.ownerId);
+  if (!artifact || String(artifact.engagement_id) !== engagement.id) {
+    throw new Error("Document not found");
+  }
+  if (!["approved", "provisional"].includes(String(artifact.status))) {
+    throw new Error("Only an approved or provisional artifact may be proposed for publication.");
+  }
+  const intent = await createIntent(engagement, "document_publish", {
+    documentId: String(artifact.id),
+    title: String(artifact.title),
+    status: String(artifact.status),
+    markdown: String(artifact.content),
+    folderId: engagement.engagementFolder || undefined,
+    requiresExplicitApproval: true,
+  });
+  await addActivity(engagement, {
+    activityType: "Deliverables",
+    summary: `Created publication intent for ${artifact.title}`,
+    outcome: "No document was published; intent is pending explicit approval",
+  });
+  return { engagement, intent };
+}
+
+/**
+ * Approve, reject, or execute a reviewed external action. Execution is the only place in
+ * the app that writes outside this system, and it is reachable only from an already
+ * approved intent — approval and execution are deliberately two separate decisions.
+ */
+export async function reviewIntent(
+  intentId: string,
+  principal: Principal,
+  action: "approve" | "reject" | "execute",
+) {
+  const intent = await getIntent(intentId, principal.ownerId);
+  if (!intent) throw new Error("Intent not found");
+  const status = String(intent.status);
+  const type = String(intent.type);
+  const payload = (intent.payload ?? {}) as Record<string, unknown>;
+  const engagement = await requireEngagement(String(intent.engagement_id), principal.ownerId);
+
+  if (action === "approve") {
+    if (status !== "pending_review") throw new Error(`Only a pending intent may be approved (current: ${status}).`);
+    const updated = await updateIntentStatus(intentId, principal.ownerId, "approved", {
+      approvedBy: principal.email,
+    });
+    await addActivity(engagement, {
+      activityType: "Approval",
+      summary: `Approved ${type} intent`,
+      outcome: "Approved for execution; no external write has happened yet",
+    });
+    return { intent: updated };
+  }
+
+  if (action === "reject") {
+    if (!["pending_review", "approved"].includes(status)) {
+      throw new Error(`Only a pending or approved intent may be rejected (current: ${status}).`);
+    }
+    const updated = await updateIntentStatus(intentId, principal.ownerId, "rejected", {
+      rejectedBy: principal.email,
+    });
+    await addActivity(engagement, {
+      activityType: "Approval",
+      summary: `Rejected ${type} intent`,
+      outcome: "No external write performed",
+    });
+    return { intent: updated };
+  }
+
+  if (status !== "approved") {
+    throw new Error(`Execution requires an approved intent (current: ${status}).`);
+  }
+
+  const result = await executeIntent(type, intentId, payload);
+  const updated = await updateIntentStatus(
+    intentId,
+    principal.ownerId,
+    result.ok ? "executed" : "failed",
+    result,
+  );
+  await addActivity(engagement, {
+    activityType: "Integration",
+    summary: `Executed ${type} intent`,
+    outcome: `${result.provider}: ${result.status} — ${result.detail}`,
+    sourceLink: result.externalUrl ?? null,
+  });
+  return { intent: updated, result };
+}
+
+async function executeIntent(
+  type: string,
+  intentId: string,
+  payload: Record<string, unknown>,
+) {
+  const str = (key: string): string => typeof payload[key] === "string" ? payload[key] as string : "";
+  if (type === "readiness_brief_send") {
+    return sendEmail({
+      to: str("to"),
+      subject: str("subject"),
+      markdownBody: str("body"),
+      idempotencyKey: intentId,
+    });
+  }
+  if (type === "crm_write_back") {
+    return appendOrUpdateRow({
+      sheet: str("sheet") || "Engagements",
+      matchKey: str("matchKey") || "Engagement ID",
+      row: (payload.row ?? {}) as Record<string, CellValue>,
+      idempotencyKey: intentId,
+    });
+  }
+  if (type === "document_publish") {
+    const title = str("title");
+    const markdown = str("markdown");
+    // Hand Drive real HTML so headings, lists, and tables survive the conversion.
+    return createDocument({
+      title,
+      markdown,
+      html: renderMarkdownToHtml(markdown, title),
+      folderId: str("folderId") || undefined,
+    });
+  }
+  throw new HttpError(400, `Unsupported intent type: ${type}`);
+}
+
+/**
+ * Activate the fixed sprint that follows an approved diagnosis. A missing baseline does
+ * not block the sprint — instrumenting it becomes the first task, which is the documented
+ * behavior for a provisional finding.
+ */
+export async function activateSprint(
+  id: string,
+  principal: Principal,
+  input: { action?: "activate" | "update_task"; taskId?: string; status?: "todo" | "in_progress" | "done" },
+) {
+  const engagement = await requireEngagement(id, principal.ownerId);
+  const finding = engagement.data.finding;
+  if (!finding) throw new Error("An approved constraint finding is required before sprint activation.");
+
+  if (input.action === "update_task") {
+    const sprint = engagement.data.sprint;
+    if (!sprint) throw new Error("No sprint is active for this engagement.");
+    if (!input.taskId || !input.status) throw new Error("taskId and status are required.");
+    const tasks = sprint.tasks.map((task) =>
+      task.id === input.taskId ? { ...task, status: input.status ?? task.status } : task,
+    );
+    if (!tasks.some((task) => task.id === input.taskId)) throw new Error("Sprint task not found");
+    const updated = await updateEngagement(id, {
+      data: { sprint: { ...sprint, tasks } },
+      expectedVersion: engagement.version,
+    }, principal.ownerId);
+    return { engagement: updated, sprint: updated.data.sprint };
+  }
+
+  if (WORKFLOW_STATES.indexOf(engagement.workflowState) < WORKFLOW_STATES.indexOf("DIAGNOSIS_APPROVED")) {
+    throw new Error("Sprint activation is blocked until the diagnosis approval checkpoint.");
+  }
+  if (engagement.data.sprint) throw new Error("A sprint is already active for this engagement.");
+  if (!finding.humanOwner.name.trim()) {
+    throw new Error("Sprint activation requires a named human owner.");
+  }
+  const now = new Date().toISOString();
+  const baselineConfirmed = engagement.baselineStatus === "Confirmed";
+  const sprint: SprintRecord = {
+    sprintId: makeId("spr"),
+    constraintId: finding.constraintId,
+    activatedAt: now,
+    activatedBy: principal.email,
+    prescription: finding.prescription.description,
+    humanOwner: finding.humanOwner,
+    startingMetric: finding.baselineMetric,
+    measurementClockStartedAt: baselineConfirmed ? now : "",
+    tasks: [
+      ...(baselineConfirmed ? [] : [{
+        id: makeId("tsk"),
+        task: finding.baselineInstrumentation.firstSprintTask ||
+          "Capture the starting metric in the live workflow before intervention.",
+        owner: finding.humanOwner.name,
+        status: "todo" as const,
+      }]),
+      {
+        id: makeId("tsk"),
+        task: finding.prescription.description,
+        owner: finding.humanOwner.name,
+        status: "todo" as const,
+      },
+      {
+        id: makeId("tsk"),
+        task: `Record where the bottleneck moves after the intervention. Kill condition: ${finding.killCondition}`,
+        owner: finding.humanOwner.name,
+        status: "todo" as const,
+      },
+    ],
+  };
+  const updated = await advanceWithinEvidence(engagement, "SPRINT_ACTIVE", principal.ownerId, {
+    status: "In progress",
+    nextAction: baselineConfirmed
+      ? "Run the sprint, then measure the ending metric"
+      : "Instrument the baseline first; numeric claims stay blocked until it is confirmed",
+    data: { sprint },
+  });
+  const document = await createArtifact(updated, {
+    kind: "sprint_plan",
+    title: `${updated.client} — Sprint 1 Plan`,
+    status: "approved",
+    provenance: "advisor-note",
+    content: generateSprintPlan(updated, finding, sprint),
+    data: sprint,
+  });
+  await addActivity(updated, {
+    activityType: "Sprint",
+    summary: "Activated Sprint 1",
+    outcome: baselineConfirmed
+      ? "Measurement clock started against the confirmed baseline"
+      : "Baseline instrumentation is the first task; measurement clock not started",
+  });
+  return { engagement: updated, sprint, document };
+}
+
+function parseMeasure(value: string): number | null {
+  const match = value.replace(/,/g, "").match(/-?\d+(?:\.\d+)?/);
+  if (!match) return null;
+  const parsed = Number(match[0]);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+/**
+ * Record the before/after result. A delta is computed only from two client-confirmed
+ * readings in the same unit; anything else records an explicit blocked reason instead
+ * of an invented number.
+ */
+export async function measureOutcome(
+  id: string,
+  principal: Principal,
+  input: {
+    endingMetric: BaselineMetric;
+    constraintMoved?: boolean;
+    nextConstraintObserved?: string;
+    evidence?: Array<{ quote: string; source: string }>;
+  },
+) {
+  const engagement = await requireEngagement(id, principal.ownerId);
+  const sprint = engagement.data.sprint;
+  if (!sprint) throw new Error("Activate a sprint before measuring an outcome.");
+  const finding = engagement.data.finding;
+  if (!finding) throw new Error("A constraint finding is required.");
+  const ending = input.endingMetric;
+  if (!ending?.name?.trim() || !ending.value?.trim() || !ending.unit?.trim() ||
+      !ending.period?.trim() || !ending.source?.trim()) {
+    throw new Error("The ending metric requires name, value, unit, period, and source.");
+  }
+  const starting = engagement.data.baseline ?? sprint.startingMetric;
+  const startValue = parseMeasure(starting?.value ?? "");
+  const endValue = parseMeasure(ending.value);
+  const sameUnit = (starting?.unit ?? "").trim().toLowerCase() === ending.unit.trim().toLowerCase();
+  const samePeriod = (starting?.period ?? "").trim().toLowerCase() === ending.period.trim().toLowerCase();
+
+  let delta: OutcomeMeasurement["delta"] = null;
+  let deltaBlockedReason: string | undefined;
+  if (engagement.baselineStatus !== "Confirmed") {
+    deltaBlockedReason = "The starting metric was never confirmed, so no before/after delta may be claimed.";
+  } else if (startValue === null || endValue === null) {
+    deltaBlockedReason = "One of the readings is not numeric, so no delta may be computed.";
+  } else if (!sameUnit || !samePeriod) {
+    deltaBlockedReason = `Readings are not comparable (${starting?.unit} per ${starting?.period} vs ${ending.unit} per ${ending.period}).`;
+  } else {
+    const absolute = endValue - startValue;
+    delta = {
+      absolute: `${absolute > 0 ? "+" : ""}${Number(absolute.toFixed(4))} ${ending.unit}`,
+      percent: startValue === 0
+        ? "not computable from a zero baseline"
+        : `${absolute > 0 ? "+" : ""}${Number(((absolute / Math.abs(startValue)) * 100).toFixed(1))}%`,
+      direction: absolute === 0 ? "unchanged" : absolute > 0 ? "improved" : "worsened",
+    };
+  }
+
+  const outcome: OutcomeMeasurement = {
+    measuredAt: new Date().toISOString(),
+    measuredBy: principal.email,
+    startingMetric: starting ?? { name: "", value: "", unit: "", period: "", source: "Missing" },
+    endingMetric: ending,
+    delta,
+    deltaBlockedReason,
+    constraintMoved: input.constraintMoved ?? false,
+    nextConstraintObserved: input.nextConstraintObserved?.trim() ?? "",
+    evidence: (input.evidence ?? []).filter((item) => item.quote?.trim() && item.source?.trim()),
+  };
+  const updated = await advanceWithinEvidence(engagement, "OUTCOME_MEASURED", principal.ownerId, {
+    status: "Needs review",
+    nextAction: outcome.constraintMoved
+      ? "Write the reusable pattern to the catalog, then diagnose the next constraint"
+      : "Write the reusable pattern to the catalog",
+    data: { outcome },
+  });
+  const document = await createArtifact(updated, {
+    kind: "outcome_report",
+    title: `${updated.client} — Measured Outcome`,
+    status: "approved",
+    provenance: "advisor-note",
+    content: generateOutcomeReport(updated, finding, outcome),
+    data: outcome,
+  });
+  await addActivity(updated, {
+    activityType: "Measurement",
+    summary: "Recorded the measured outcome",
+    outcome: delta ? `Delta ${delta.absolute} (${delta.direction})` : `No delta claimed: ${deltaBlockedReason}`,
+  });
+  return { engagement: updated, outcome, document };
+}
+
+/** Write the measured pattern back to the reusable catalog. Requires a real measurement. */
+export async function writeCatalogEntry(
+  id: string,
+  principal: Principal,
+  input: { industryContext?: string; reusableFor?: string },
+) {
+  const engagement = await requireEngagement(id, principal.ownerId);
+  const finding = engagement.data.finding;
+  const outcome = engagement.data.outcome;
+  if (!finding) throw new Error("A constraint finding is required.");
+  if (!outcome) throw new Error("Catalog write-back requires a measured outcome.");
+  const entry: CatalogEntry = {
+    entryId: makeId("cat"),
+    constraintType: finding.constraintType,
+    canvasBlock: finding.canvasBlock,
+    pattern: `${finding.constraintType} constraint in ${finding.canvasBlock}`,
+    prescription: finding.prescription.description,
+    measuredResult: outcome.delta
+      ? `${outcome.delta.absolute} (${outcome.delta.direction}) on ${outcome.endingMetric.name}`
+      : `Not claimed — ${outcome.deltaBlockedReason ?? "no comparable measurement"}`,
+    industryContext: input.industryContext?.trim() ?? "",
+    reusableFor: input.reusableFor?.trim() ?? "",
+    writtenAt: new Date().toISOString(),
+  };
+  const updated = await advanceWithinEvidence(engagement, "CATALOG_WRITTEN", principal.ownerId, {
+    status: "Closed",
+    nextAction: "Diagnose the next constraint when the client is ready",
+    data: { catalogEntry: entry },
+  });
+  const document = await createArtifact(updated, {
+    kind: "catalog_entry",
+    title: `${updated.client} — Catalog Entry`,
+    status: "approved",
+    provenance: "advisor-note",
+    content: generateCatalogEntry(updated, finding, entry),
+    data: entry,
+  });
+  await addActivity(updated, {
+    activityType: "Catalog",
+    summary: "Wrote the reusable pattern to the catalog",
+    outcome: entry.measuredResult,
+  });
+  return { engagement: updated, catalogEntry: entry, document };
 }

@@ -1,7 +1,6 @@
-import { importFireflies } from "@/lib/actions";
+import { activateSprint } from "@/lib/actions";
 import { requirePrincipal } from "@/lib/auth";
 import { engagementId, readJson, route } from "@/lib/http";
-import type { ConsentAttestation } from "@/lib/workflow";
 
 type Context = { params: Promise<{ id: string }> };
 
@@ -10,11 +9,10 @@ export async function POST(request: Request, context: Context) {
     const principal = requirePrincipal(request);
     const id = await engagementId(context);
     const input = await readJson<{
-      transcriptId: string;
-      callNumber: 1 | 2;
-      consentAttestation?: ConsentAttestation;
-      speakerRoles?: Record<string, "client" | "advisor" | "unknown">;
+      action?: "activate" | "update_task";
+      taskId?: string;
+      status?: "todo" | "in_progress" | "done";
     }>(request);
-    return importFireflies(id, principal, input);
+    return activateSprint(id, principal, input);
   }, { status: 201 });
 }

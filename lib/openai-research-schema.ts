@@ -1,7 +1,12 @@
-import type {
-  ConstraintHypothesis,
-  ConstraintType,
-  EvidenceClaim,
+import {
+  DISCOVERY_SECTIONS,
+  canonicalCanvasBlock,
+  type ConstraintHypothesis,
+  type ConstraintType,
+  type DiscoveryQuestion,
+  type DiscoverySection,
+  type EvidenceClaim,
+  type ValueFlowStep,
 } from "./workflow";
 
 const CANVAS_BLOCKS = new Set([
@@ -24,11 +29,23 @@ const CONSTRAINT_TYPES = new Set<ConstraintType>([
   "policy",
 ]);
 
+/** Research can only ever produce non-client evidence; "client-stated" and "doc" are unreachable here. */
+type ResearchEvidenceStatus = ValueFlowStep["evidenceStatus"];
+
+const RESEARCH_EVIDENCE_STATUSES = new Set<string>(["public-research", "advisor-note", "gap"]);
+const ANSWER_TYPES = new Set<string>(["narrative", "number", "person", "choice"]);
+const SECTIONS = new Set<string>(DISCOVERY_SECTIONS);
+
+const MAX_FLOW_STEPS = 12;
+const MAX_DISCOVERY_QUESTIONS = 24;
+
 type ParsedOpenAIResearch = {
   summary: string;
   facts: EvidenceClaim[];
   gaps: string[];
   constraintHypotheses: ConstraintHypothesis[];
+  valueFlow: ValueFlowStep[];
+  discoveryQuestions: DiscoveryQuestion[];
 };
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -61,6 +78,23 @@ function canonicalSource(value: string): string {
   }
 }
 
+/** Returns the original URL only when its canonical form was actually cited by web search. */
+function allowedSourceUrl(value: unknown, acceptedSources: Set<string>): string {
+  const raw = text(value, 2_000);
+  const canonical = raw ? canonicalSource(raw) : "";
+  return canonical && acceptedSources.has(canonical) ? raw : "";
+}
+
+function researchEvidenceStatus(value: unknown): ResearchEvidenceStatus {
+  const status = text(value, 40);
+  return RESEARCH_EVIDENCE_STATUSES.has(status) ? status as ResearchEvidenceStatus : "gap";
+}
+
+function clamped(value: unknown, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.min(1, Math.max(0, parsed)) : fallback;
+}
+
 export function collectOpenAIWebSources(value: unknown): Set<string> {
   const sources = new Set<string>();
   const visit = (node: unknown) => {
@@ -82,6 +116,97 @@ export function collectOpenAIWebSources(value: unknown): Set<string> {
   };
   visit(value);
   return sources;
+}
+
+/**
+ * A proposed flow is a question to confirm, not a claim of fact: an unverifiable URL
+ * downgrades the step to `gap` instead of dropping it. Ids and order are derived from
+ * position so re-parsing the same payload yields the same identifiers.
+ */
+export function parseValueFlow(value: unknown, acceptedSources: Set<string>): ValueFlowStep[] {
+  return (Array.isArray(value) ? value : [])
+    .map((item, index) => {
+      const step = record(item);
+      if (!step) return null;
+      const order = Number(step.order);
+      return { step, index, order: Number.isFinite(order) ? order : Number.MAX_SAFE_INTEGER };
+    })
+    .filter((entry): entry is { step: Record<string, unknown>; index: number; order: number } =>
+      Boolean(entry))
+    .sort((a, b) => a.order - b.order || a.index - b.index)
+    .map(({ step }) => {
+      const name = text(step.name, 120);
+      const description = text(step.description, 500);
+      const input = text(step.input, 240);
+      const output = text(step.output, 240);
+      const actor = text(step.actor, 160);
+      const system = text(step.system, 160);
+      const confirmationQuestion = text(step.confirmation_question, 400);
+      if (!name || !description || !input || !output || !actor || !system || !confirmationQuestion) {
+        return null;
+      }
+      const sourceUrl = allowedSourceUrl(step.source_url, acceptedSources);
+      return {
+        name,
+        description,
+        input,
+        output,
+        actor,
+        system,
+        evidenceStatus: sourceUrl ? researchEvidenceStatus(step.evidence_status) : "gap",
+        sourceUrls: sourceUrl ? [sourceUrl] : [],
+        confidence: clamped(step.confidence, 0.4),
+        confirmationQuestion,
+      };
+    })
+    .filter((step): step is Omit<ValueFlowStep, "id" | "order"> => Boolean(step))
+    .slice(0, MAX_FLOW_STEPS)
+    .map((step, index) => ({ ...step, id: `flow_${index + 1}`, order: index + 1 }));
+}
+
+export function parseDiscoveryQuestions(
+  value: unknown,
+  acceptedSources: Set<string>,
+): DiscoveryQuestion[] {
+  const counters = new Map<DiscoverySection, number>();
+  return (Array.isArray(value) ? value : [])
+    .map((item): Omit<DiscoveryQuestion, "id"> | null => {
+      const entry = record(item);
+      if (!entry) return null;
+      const section = text(entry.section, 30);
+      const question = text(entry.question, 500);
+      const whyItMatters = text(entry.why_it_matters, 400);
+      const publicAssumption = text(entry.public_assumption, 400);
+      if (!SECTIONS.has(section) || !question || !whyItMatters || !publicAssumption) return null;
+      const sourceUrl = allowedSourceUrl(entry.source_url, acceptedSources);
+      const answerType = text(entry.expected_answer_type, 30);
+      const canvasBlock = canonicalCanvasBlock(entry.canvas_block);
+      const followUps = (Array.isArray(entry.follow_ups) ? entry.follow_ups : [])
+        .map((followUp) => text(followUp, 300))
+        .filter(Boolean)
+        .slice(0, 5);
+      return {
+        section: section as DiscoverySection,
+        question,
+        whyItMatters,
+        publicAssumption,
+        sourceUrls: sourceUrl ? [sourceUrl] : [],
+        evidenceStatus: sourceUrl ? researchEvidenceStatus(entry.evidence_status) : "gap",
+        ...(canvasBlock ? { canvasBlock } : {}),
+        expectedAnswerType: ANSWER_TYPES.has(answerType)
+          ? answerType as DiscoveryQuestion["expectedAnswerType"]
+          : "narrative",
+        required: entry.required === true,
+        followUps,
+      };
+    })
+    .filter((entry): entry is Omit<DiscoveryQuestion, "id"> => Boolean(entry))
+    .slice(0, MAX_DISCOVERY_QUESTIONS)
+    .map((entry) => {
+      const next = (counters.get(entry.section) ?? 0) + 1;
+      counters.set(entry.section, next);
+      return { ...entry, id: `q_${entry.section}_${next}` };
+    });
 }
 
 export function parseOpenAIResearchPayload(
@@ -155,5 +280,7 @@ export function parseOpenAIResearchPayload(
     facts,
     gaps,
     constraintHypotheses,
+    valueFlow: parseValueFlow(payload.value_flow, acceptedSources),
+    discoveryQuestions: parseDiscoveryQuestions(payload.discovery_questions, acceptedSources),
   };
 }

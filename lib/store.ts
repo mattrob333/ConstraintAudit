@@ -1,4 +1,5 @@
 import { getD1 } from "@/db";
+import { legacyOwnerEmail, ownerIdForEmail } from "./auth";
 import {
   BASELINE_STATUSES,
   CRM_STAGES,
@@ -20,11 +21,22 @@ import {
 } from "./workflow";
 
 type D1 = ReturnType<typeof getD1>;
-type DbRow = Record<string, unknown>;
+export type DbRow = Record<string, unknown>;
 
-const SCHEMA_STATEMENTS = [
+export const INTENT_STATUSES = [
+  "pending_review",
+  "approved",
+  "rejected",
+  "executed",
+  "failed",
+] as const;
+
+export type IntentStatus = (typeof INTENT_STATUSES)[number];
+
+const TABLE_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS engagements (
-    id TEXT PRIMARY KEY, client TEXT NOT NULL, website TEXT NOT NULL DEFAULT '',
+    id TEXT PRIMARY KEY, owner_id TEXT NOT NULL DEFAULT '',
+    client TEXT NOT NULL, website TEXT NOT NULL DEFAULT '',
     primary_contact TEXT NOT NULL DEFAULT '', email TEXT NOT NULL DEFAULT '',
     advisor TEXT NOT NULL DEFAULT '', stage TEXT NOT NULL, status TEXT NOT NULL,
     workflow_state TEXT NOT NULL, next_action TEXT NOT NULL, due_date TEXT,
@@ -35,29 +47,61 @@ const SCHEMA_STATEMENTS = [
     version INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
   )`,
   `CREATE TABLE IF NOT EXISTS artifacts (
-    id TEXT PRIMARY KEY, engagement_id TEXT NOT NULL, kind TEXT NOT NULL,
-    title TEXT NOT NULL, status TEXT NOT NULL, provenance TEXT NOT NULL,
+    id TEXT PRIMARY KEY, engagement_id TEXT NOT NULL, owner_id TEXT NOT NULL DEFAULT '',
+    kind TEXT NOT NULL, title TEXT NOT NULL, status TEXT NOT NULL, provenance TEXT NOT NULL,
     source_url TEXT, content TEXT NOT NULL, data_json TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL, updated_at TEXT NOT NULL
   )`,
   `CREATE TABLE IF NOT EXISTS transcripts (
-    id TEXT PRIMARY KEY, engagement_id TEXT NOT NULL, call_number INTEGER NOT NULL,
-    source TEXT NOT NULL, source_id TEXT, source_url TEXT, title TEXT NOT NULL,
-    raw_text TEXT NOT NULL, data_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL
+    id TEXT PRIMARY KEY, engagement_id TEXT NOT NULL, owner_id TEXT NOT NULL DEFAULT '',
+    call_number INTEGER NOT NULL, source TEXT NOT NULL, source_id TEXT, source_url TEXT,
+    title TEXT NOT NULL, raw_text TEXT NOT NULL, data_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
   )`,
   `CREATE TABLE IF NOT EXISTS activities (
-    id TEXT PRIMARY KEY, engagement_id TEXT NOT NULL, client TEXT NOT NULL,
-    activity_type TEXT NOT NULL, summary TEXT NOT NULL, outcome TEXT NOT NULL,
-    next_action TEXT NOT NULL, owner TEXT NOT NULL, source_link TEXT, created_at TEXT NOT NULL
+    id TEXT PRIMARY KEY, engagement_id TEXT NOT NULL, owner_id TEXT NOT NULL DEFAULT '',
+    client TEXT NOT NULL, activity_type TEXT NOT NULL, summary TEXT NOT NULL,
+    outcome TEXT NOT NULL, next_action TEXT NOT NULL, owner TEXT NOT NULL,
+    source_link TEXT, created_at TEXT NOT NULL
   )`,
   `CREATE TABLE IF NOT EXISTS intents (
-    id TEXT PRIMARY KEY, engagement_id TEXT NOT NULL, type TEXT NOT NULL,
-    status TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL
+    id TEXT PRIMARY KEY, engagement_id TEXT NOT NULL, owner_id TEXT NOT NULL DEFAULT '',
+    type TEXT NOT NULL, status TEXT NOT NULL, payload_json TEXT NOT NULL,
+    result_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL,
+    updated_at TEXT, executed_at TEXT
   )`,
+] as const;
+
+/**
+ * `CREATE TABLE IF NOT EXISTS` is a no-op on a deployed database, so every column added after the
+ * first release has to be reconciled here as well. Keyed by table, then column name to type clause.
+ */
+const REQUIRED_COLUMNS: Record<string, Record<string, string>> = {
+  engagements: { owner_id: "TEXT NOT NULL DEFAULT ''" },
+  artifacts: { owner_id: "TEXT NOT NULL DEFAULT ''" },
+  transcripts: { owner_id: "TEXT NOT NULL DEFAULT ''" },
+  activities: { owner_id: "TEXT NOT NULL DEFAULT ''" },
+  intents: {
+    owner_id: "TEXT NOT NULL DEFAULT ''",
+    result_json: "TEXT NOT NULL DEFAULT '{}'",
+    updated_at: "TEXT",
+    executed_at: "TEXT",
+  },
+};
+
+const INDEX_STATEMENTS = [
   "CREATE INDEX IF NOT EXISTS idx_artifacts_engagement ON artifacts (engagement_id, created_at DESC)",
   "CREATE INDEX IF NOT EXISTS idx_transcripts_engagement ON transcripts (engagement_id, created_at DESC)",
   "CREATE INDEX IF NOT EXISTS idx_activities_engagement ON activities (engagement_id, created_at DESC)",
   "CREATE INDEX IF NOT EXISTS idx_intents_engagement ON intents (engagement_id, created_at DESC)",
+  "CREATE INDEX IF NOT EXISTS idx_engagements_owner ON engagements (owner_id, updated_at DESC)",
+  "CREATE INDEX IF NOT EXISTS idx_artifacts_owner ON artifacts (owner_id, created_at DESC)",
+  "CREATE INDEX IF NOT EXISTS idx_transcripts_owner ON transcripts (owner_id, created_at DESC)",
+  "CREATE INDEX IF NOT EXISTS idx_activities_owner ON activities (owner_id, created_at DESC)",
+  "CREATE INDEX IF NOT EXISTS idx_intents_owner ON intents (owner_id, created_at DESC)",
+] as const;
+
+const CLEANUP_STATEMENTS = [
   "DELETE FROM artifacts WHERE engagement_id = 'eng_demo_northstar'",
   "DELETE FROM transcripts WHERE engagement_id = 'eng_demo_northstar'",
   "DELETE FROM activities WHERE engagement_id = 'eng_demo_northstar'",
@@ -84,9 +128,20 @@ function parseJson<T>(value: unknown, fallback: T): T {
   }
 }
 
+/**
+ * Every scoped query binds this value. A blank owner is rejected rather than matched, otherwise the
+ * `DEFAULT ''` backfill column would act as a wildcard for callers that forgot to pass a principal.
+ */
+function requireOwner(ownerId: string): string {
+  const owner = typeof ownerId === "string" ? ownerId.trim() : "";
+  if (!owner) throw new Error("ownerId is required");
+  return owner;
+}
+
 function mapEngagement(row: DbRow): Engagement {
   return {
     id: text(row, "id"),
+    ownerId: text(row, "owner_id"),
     client: text(row, "client"),
     website: text(row, "website"),
     primaryContact: text(row, "primary_contact"),
@@ -116,19 +171,55 @@ function mapEngagement(row: DbRow): Engagement {
 function engagementInsert(db: D1, engagement: Engagement) {
   return db.prepare(
     `INSERT OR IGNORE INTO engagements (
-      id, client, website, primary_contact, email, advisor, stage, status,
+      id, owner_id, client, website, primary_contact, email, advisor, stage, status,
       workflow_state, next_action, due_date, last_contact, call_1_at, call_2_at,
       readiness_brief_status, readiness_brief_sent_at, baseline_status,
       engagement_folder, notes, finding_status, data_json, version, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).bind(
-    engagement.id, engagement.client, engagement.website, engagement.primaryContact,
-    engagement.email, engagement.advisor, engagement.stage, engagement.status,
-    engagement.workflowState, engagement.nextAction, engagement.dueDate, engagement.lastContact,
-    engagement.call1At, engagement.call2At, engagement.readinessBriefStatus,
-    engagement.readinessBriefSentAt, engagement.baselineStatus, engagement.engagementFolder,
-    engagement.notes, engagement.findingStatus, JSON.stringify(engagement.data),
-    engagement.version, engagement.createdAt, engagement.updatedAt,
+    engagement.id, engagement.ownerId, engagement.client, engagement.website,
+    engagement.primaryContact, engagement.email, engagement.advisor, engagement.stage,
+    engagement.status, engagement.workflowState, engagement.nextAction, engagement.dueDate,
+    engagement.lastContact, engagement.call1At, engagement.call2At,
+    engagement.readinessBriefStatus, engagement.readinessBriefSentAt, engagement.baselineStatus,
+    engagement.engagementFolder, engagement.notes, engagement.findingStatus,
+    JSON.stringify(engagement.data), engagement.version, engagement.createdAt, engagement.updatedAt,
+  );
+}
+
+/**
+ * Adds columns that predate the current schema on an already-deployed database. Table and column
+ * names come from module constants only — SQLite cannot parameterise DDL identifiers.
+ */
+async function reconcileColumns(db: D1): Promise<string[]> {
+  const altered: string[] = [];
+  for (const [table, columns] of Object.entries(REQUIRED_COLUMNS)) {
+    const info = await db.prepare(`PRAGMA table_info(${table})`).all<DbRow>();
+    const rows = info.results ?? [];
+    // No pragma support or no such table: the CREATE batch above is already authoritative.
+    if (!rows.length) continue;
+    const present = new Set(rows.map((row) => text(row, "name")));
+    const missing = Object.entries(columns).filter(([name]) => !present.has(name));
+    if (!missing.length) continue;
+    await db.batch(
+      missing.map(([name, type]) => db.prepare(`ALTER TABLE ${table} ADD COLUMN ${name} ${type}`)),
+    );
+    if (missing.some(([name]) => name === "owner_id")) altered.push(table);
+  }
+  return altered;
+}
+
+/**
+ * Rows written before tenancy existed belong to the single advisor who created them. Claim them for
+ * `LEGACY_OWNER_EMAIL` (falling back to the local advisor) so the migration orphans nothing; set
+ * that binding to the real advisor address before enabling REQUIRE_ADVISOR_AUTH.
+ */
+async function backfillOwners(db: D1, tables: string[]): Promise<void> {
+  if (!tables.length) return;
+  const ownerId = ownerIdForEmail(legacyOwnerEmail());
+  await db.batch(
+    tables.map((table) =>
+      db.prepare(`UPDATE ${table} SET owner_id = ? WHERE owner_id = ''`).bind(ownerId)),
   );
 }
 
@@ -136,7 +227,9 @@ export async function ensureDatabase(): Promise<void> {
   if (initialization) return initialization;
   initialization = (async () => {
     const db = getD1();
-    await db.batch(SCHEMA_STATEMENTS.map((sql) => db.prepare(sql)));
+    await db.batch(TABLE_STATEMENTS.map((sql) => db.prepare(sql)));
+    await backfillOwners(db, await reconcileColumns(db));
+    await db.batch([...INDEX_STATEMENTS, ...CLEANUP_STATEMENTS].map((sql) => db.prepare(sql)));
   })().catch((error) => {
     initialization = null;
     throw error;
@@ -144,17 +237,22 @@ export async function ensureDatabase(): Promise<void> {
   return initialization;
 }
 
-export async function listEngagements(): Promise<Engagement[]> {
+export async function listEngagements(ownerId: string): Promise<Engagement[]> {
   await ensureDatabase();
+  const owner = requireOwner(ownerId);
   const result = await getD1().prepare(
-    "SELECT * FROM engagements ORDER BY updated_at DESC, id ASC"
-  ).all<DbRow>();
+    "SELECT * FROM engagements WHERE owner_id = ? ORDER BY updated_at DESC, id ASC"
+  ).bind(owner).all<DbRow>();
   return (result.results ?? []).map(mapEngagement);
 }
 
-export async function getEngagement(id: string): Promise<Engagement | null> {
+/** Another owner's engagement is indistinguishable from a missing one. */
+export async function getEngagement(id: string, ownerId: string): Promise<Engagement | null> {
   await ensureDatabase();
-  const row = await getD1().prepare("SELECT * FROM engagements WHERE id = ? LIMIT 1").bind(id).first<DbRow>();
+  const owner = requireOwner(ownerId);
+  const row = await getD1().prepare(
+    "SELECT * FROM engagements WHERE id = ? AND owner_id = ? LIMIT 1"
+  ).bind(id, owner).first<DbRow>();
   return row ? mapEngagement(row) : null;
 }
 
@@ -167,13 +265,17 @@ export interface CreateEngagementInput {
   notes?: string;
 }
 
-export async function createEngagement(input: CreateEngagementInput): Promise<Engagement> {
+export async function createEngagement(
+  input: CreateEngagementInput & { ownerId: string },
+): Promise<Engagement> {
   await ensureDatabase();
+  const owner = requireOwner(input.ownerId);
   const client = input.client?.trim();
   if (!client) throw new Error("client is required");
   const now = new Date().toISOString();
   const engagement: Engagement = {
     id: makeId("eng"),
+    ownerId: owner,
     client,
     website: input.website?.trim() ?? "",
     primaryContact: input.primaryContact?.trim() ?? "",
@@ -212,9 +314,9 @@ export async function createEngagement(input: CreateEngagementInput): Promise<En
   return engagement;
 }
 
-export type EngagementPatch = Partial<Omit<Engagement, "id" | "createdAt" | "updatedAt" | "version">> & {
-  expectedVersion?: number;
-};
+export type EngagementPatch =
+  & Partial<Omit<Engagement, "id" | "ownerId" | "createdAt" | "updatedAt" | "version">>
+  & { expectedVersion?: number };
 
 function validatePatch(existing: Engagement, patch: EngagementPatch): Engagement {
   const changes = { ...patch };
@@ -241,6 +343,8 @@ function validatePatch(existing: Engagement, patch: EngagementPatch): Engagement
     ...existing,
     ...changes,
     id: existing.id,
+    // Ownership is never patchable; engagements cannot be handed between advisors through the API.
+    ownerId: existing.ownerId,
     client: patch.client?.trim() || existing.client,
     stage,
     status,
@@ -255,8 +359,13 @@ function validatePatch(existing: Engagement, patch: EngagementPatch): Engagement
   };
 }
 
-export async function updateEngagement(id: string, patch: EngagementPatch): Promise<Engagement> {
-  const existing = await getEngagement(id);
+export async function updateEngagement(
+  id: string,
+  patch: EngagementPatch,
+  ownerId: string,
+): Promise<Engagement> {
+  const owner = requireOwner(ownerId);
+  const existing = await getEngagement(id, owner);
   if (!existing) throw new Error("Engagement not found");
   if (patch.expectedVersion !== undefined && patch.expectedVersion !== existing.version) {
     throw new Error(`Version conflict: expected ${patch.expectedVersion}, current ${existing.version}`);
@@ -269,14 +378,14 @@ export async function updateEngagement(id: string, patch: EngagementPatch): Prom
       call_1_at = ?, call_2_at = ?, readiness_brief_status = ?, readiness_brief_sent_at = ?,
       baseline_status = ?, engagement_folder = ?, notes = ?, finding_status = ?,
       data_json = ?, version = ?, updated_at = ?
-     WHERE id = ? AND version = ?`
+     WHERE id = ? AND owner_id = ? AND version = ?`
   ).bind(
     updated.client, updated.website, updated.primaryContact, updated.email, updated.advisor,
     updated.stage, updated.status, updated.workflowState, updated.nextAction, updated.dueDate,
     updated.lastContact, updated.call1At, updated.call2At, updated.readinessBriefStatus,
     updated.readinessBriefSentAt, updated.baselineStatus, updated.engagementFolder, updated.notes,
     updated.findingStatus, JSON.stringify(updated.data), updated.version, updated.updatedAt,
-    updated.id, existing.version,
+    updated.id, owner, existing.version,
   ).run();
   if (!result.meta.changes) throw new Error("Concurrent update conflict");
   return updated;
@@ -294,11 +403,12 @@ interface ActivityInput {
 function activityStatement(db: D1, engagement: Engagement, input: ActivityInput) {
   return db.prepare(
     `INSERT INTO activities
-     (id, engagement_id, client, activity_type, summary, outcome, next_action, owner, source_link, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+     (id, engagement_id, owner_id, client, activity_type, summary, outcome, next_action, owner, source_link, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).bind(
-    makeId("act"), engagement.id, engagement.client, input.activityType, input.summary,
-    input.outcome ?? "", input.nextAction ?? engagement.nextAction,
+    makeId("act"), engagement.id, requireOwner(engagement.ownerId), engagement.client,
+    input.activityType, input.summary, input.outcome ?? "",
+    input.nextAction ?? engagement.nextAction,
     input.owner ?? engagement.advisor, input.sourceLink ?? null, new Date().toISOString(),
   );
 }
@@ -308,13 +418,22 @@ export async function addActivity(engagement: Engagement, input: ActivityInput):
   await activityStatement(getD1(), engagement, input).run();
 }
 
-export async function listActivities(engagementId?: string, limit = 100): Promise<DbRow[]> {
+export async function listActivities(
+  ownerId: string,
+  engagementId?: string,
+  limit = 100,
+): Promise<DbRow[]> {
   await ensureDatabase();
+  const owner = requireOwner(ownerId);
   const safeLimit = Math.max(1, Math.min(250, Math.floor(limit)));
   const db = getD1();
   const statement = engagementId
-    ? db.prepare("SELECT * FROM activities WHERE engagement_id = ? ORDER BY created_at DESC LIMIT ?").bind(engagementId, safeLimit)
-    : db.prepare("SELECT * FROM activities ORDER BY created_at DESC LIMIT ?").bind(safeLimit);
+    ? db.prepare(
+      "SELECT * FROM activities WHERE owner_id = ? AND engagement_id = ? ORDER BY created_at DESC LIMIT ?"
+    ).bind(owner, engagementId, safeLimit)
+    : db.prepare(
+      "SELECT * FROM activities WHERE owner_id = ? ORDER BY created_at DESC LIMIT ?"
+    ).bind(owner, safeLimit);
   const result = await statement.all<DbRow>();
   return result.results ?? [];
 }
@@ -335,6 +454,7 @@ export async function createArtifact(engagement: Engagement, input: ArtifactInpu
   const artifact = {
     id: makeId("doc"),
     engagement_id: engagement.id,
+    owner_id: requireOwner(engagement.ownerId),
     kind: input.kind,
     title: input.title,
     status: input.status,
@@ -347,25 +467,33 @@ export async function createArtifact(engagement: Engagement, input: ArtifactInpu
   };
   await getD1().prepare(
     `INSERT INTO artifacts
-     (id, engagement_id, kind, title, status, provenance, source_url, content, data_json, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+     (id, engagement_id, owner_id, kind, title, status, provenance, source_url, content, data_json, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).bind(...Object.values(artifact)).run();
   return { ...artifact, data: input.data ?? {} };
 }
 
-export async function listArtifacts(engagementId?: string): Promise<DbRow[]> {
+export async function listArtifacts(ownerId: string, engagementId?: string): Promise<DbRow[]> {
   await ensureDatabase();
+  const owner = requireOwner(ownerId);
   const db = getD1();
   const statement = engagementId
-    ? db.prepare("SELECT * FROM artifacts WHERE engagement_id = ? ORDER BY created_at DESC").bind(engagementId)
-    : db.prepare("SELECT * FROM artifacts ORDER BY created_at DESC");
+    ? db.prepare(
+      "SELECT * FROM artifacts WHERE owner_id = ? AND engagement_id = ? ORDER BY created_at DESC"
+    ).bind(owner, engagementId)
+    : db.prepare(
+      "SELECT * FROM artifacts WHERE owner_id = ? ORDER BY created_at DESC"
+    ).bind(owner);
   const result = await statement.all<DbRow>();
   return (result.results ?? []).map((row) => ({ ...row, data: parseJson(row.data_json, {}) }));
 }
 
-export async function getArtifact(id: string): Promise<DbRow | null> {
+export async function getArtifact(id: string, ownerId: string): Promise<DbRow | null> {
   await ensureDatabase();
-  const row = await getD1().prepare("SELECT * FROM artifacts WHERE id = ? LIMIT 1").bind(id).first<DbRow>();
+  const owner = requireOwner(ownerId);
+  const row = await getD1().prepare(
+    "SELECT * FROM artifacts WHERE id = ? AND owner_id = ? LIMIT 1"
+  ).bind(id, owner).first<DbRow>();
   return row ? { ...row, data: parseJson(row.data_json, {}) } : null;
 }
 
@@ -373,7 +501,7 @@ export async function createTranscript(
   engagement: Engagement,
   input: {
     callNumber: 1 | 2;
-    source: "paste" | "fireflies";
+    source: "paste" | "fireflies" | "upload";
     sourceId?: string;
     sourceUrl?: string;
     title: string;
@@ -385,6 +513,7 @@ export async function createTranscript(
   const transcript = {
     id: makeId("tx"),
     engagement_id: engagement.id,
+    owner_id: requireOwner(engagement.ownerId),
     call_number: input.callNumber,
     source: input.source,
     source_id: input.sourceId ?? null,
@@ -396,28 +525,95 @@ export async function createTranscript(
   };
   await getD1().prepare(
     `INSERT INTO transcripts
-     (id, engagement_id, call_number, source, source_id, source_url, title, raw_text, data_json, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+     (id, engagement_id, owner_id, call_number, source, source_id, source_url, title, raw_text, data_json, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).bind(...Object.values(transcript)).run();
   return { ...transcript, data: input.data };
 }
 
+function mapIntent(row: DbRow): DbRow {
+  return {
+    ...row,
+    payload: parseJson(row.payload_json, {}),
+    result: parseJson(row.result_json, {}),
+  };
+}
+
 export async function createIntent(
   engagement: Engagement,
-  type: "readiness_brief_send" | "crm_write_back",
+  type: string,
   payload: unknown,
 ): Promise<DbRow> {
   await ensureDatabase();
+  const now = new Date().toISOString();
   const intent = {
     id: makeId("intent"),
     engagement_id: engagement.id,
+    owner_id: requireOwner(engagement.ownerId),
     type,
-    status: "pending_review",
+    status: "pending_review" satisfies IntentStatus,
     payload_json: JSON.stringify(payload),
-    created_at: new Date().toISOString(),
+    result_json: "{}",
+    created_at: now,
+    updated_at: now,
+    executed_at: null,
   };
   await getD1().prepare(
-    "INSERT INTO intents (id, engagement_id, type, status, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?)"
+    `INSERT INTO intents
+     (id, engagement_id, owner_id, type, status, payload_json, result_json, created_at, updated_at, executed_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).bind(...Object.values(intent)).run();
-  return { ...intent, payload };
+  return { ...intent, payload, result: {} };
+}
+
+export async function getIntent(id: string, ownerId: string): Promise<DbRow | null> {
+  await ensureDatabase();
+  const owner = requireOwner(ownerId);
+  const row = await getD1().prepare(
+    "SELECT * FROM intents WHERE id = ? AND owner_id = ? LIMIT 1"
+  ).bind(id, owner).first<DbRow>();
+  return row ? mapIntent(row) : null;
+}
+
+export async function listIntents(ownerId: string, engagementId?: string): Promise<DbRow[]> {
+  await ensureDatabase();
+  const owner = requireOwner(ownerId);
+  const db = getD1();
+  const statement = engagementId
+    ? db.prepare(
+      "SELECT * FROM intents WHERE owner_id = ? AND engagement_id = ? ORDER BY created_at DESC"
+    ).bind(owner, engagementId)
+    : db.prepare(
+      "SELECT * FROM intents WHERE owner_id = ? ORDER BY created_at DESC"
+    ).bind(owner);
+  const result = await statement.all<DbRow>();
+  return (result.results ?? []).map(mapIntent);
+}
+
+export async function updateIntentStatus(
+  id: string,
+  ownerId: string,
+  status: string,
+  result?: unknown,
+): Promise<DbRow> {
+  await ensureDatabase();
+  const owner = requireOwner(ownerId);
+  if (!(INTENT_STATUSES as readonly string[]).includes(status)) {
+    throw new Error(`Invalid intent status: ${status}`);
+  }
+  const now = new Date().toISOString();
+  const terminal = status === "executed" || status === "failed";
+  const outcome = await getD1().prepare(
+    `UPDATE intents SET status = ?, updated_at = ?,
+       executed_at = COALESCE(?, executed_at),
+       result_json = COALESCE(?, result_json)
+     WHERE id = ? AND owner_id = ?`
+  ).bind(
+    status, now, terminal ? now : null,
+    result === undefined ? null : JSON.stringify(result), id, owner,
+  ).run();
+  if (!outcome.meta.changes) throw new Error("Intent not found");
+  const updated = await getIntent(id, owner);
+  if (!updated) throw new Error("Intent not found");
+  return updated;
 }

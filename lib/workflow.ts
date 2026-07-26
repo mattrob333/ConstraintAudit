@@ -30,11 +30,72 @@ export const CRM_STATUSES = [
   "Closed",
 ] as const;
 
+export const CANVAS_BLOCKS = [
+  "Customer Segments",
+  "Value Propositions",
+  "Channels",
+  "Customer Relationships",
+  "Revenue Streams",
+  "Key Resources",
+  "Key Activities",
+  "Key Partners",
+  "Cost Structure",
+] as const;
+
+/**
+ * Historic documents and older records used "Key Partnerships" for the block the
+ * research schema calls "Key Partners". Normalize so one canonical Canvas exists.
+ */
+const CANVAS_BLOCK_ALIASES: Record<string, CanvasBlock> = {
+  "key partnerships": "Key Partners",
+  "key partner": "Key Partners",
+  "customer segment": "Customer Segments",
+  "value proposition": "Value Propositions",
+  "channel": "Channels",
+  "customer relationship": "Customer Relationships",
+  "revenue stream": "Revenue Streams",
+  "key resource": "Key Resources",
+  "key activity": "Key Activities",
+  "key activities": "Key Activities",
+};
+
+export const DISCOVERY_SECTIONS = [
+  "demand",
+  "promise",
+  "flow",
+  "constraint",
+  "baseline",
+  "roles",
+  "feasibility",
+] as const;
+
+/**
+ * Every externally-visible action the app can propose. An intent is always created in
+ * `pending_review` and requires a separate explicit approval before it may be executed.
+ */
+export const INTENT_TYPES = [
+  "readiness_brief_send",
+  "crm_write_back",
+  "document_publish",
+] as const;
+
+export const INTENT_STATUSES = [
+  "pending_review",
+  "approved",
+  "rejected",
+  "executed",
+  "failed",
+] as const;
+
 export const BASELINE_STATUSES = ["Missing", "Partial", "Confirmed"] as const;
 export const READINESS_STATUSES = ["Not drafted", "Drafted", "Approved", "Sent"] as const;
 export const CONSTRAINT_TYPES = ["capacity", "latency", "quality", "knowledge", "policy"] as const;
 export const PROVENANCE = ["client-stated", "doc", "public-research", "advisor-note", "gap"] as const;
 
+export type IntentType = (typeof INTENT_TYPES)[number];
+export type IntentStatus = (typeof INTENT_STATUSES)[number];
+export type CanvasBlock = (typeof CANVAS_BLOCKS)[number];
+export type DiscoverySection = (typeof DISCOVERY_SECTIONS)[number];
 export type WorkflowState = (typeof WORKFLOW_STATES)[number];
 export type CrmStage = (typeof CRM_STAGES)[number];
 export type CrmStatus = (typeof CRM_STATUSES)[number];
@@ -46,6 +107,8 @@ export type FindingStatus = "none" | "provisional" | "client-verified" | "approv
 
 export interface Engagement {
   id: string;
+  /** Owning advisor principal. Every read and write is scoped to this value. */
+  ownerId: string;
   client: string;
   website: string;
   primaryContact: string;
@@ -76,12 +139,60 @@ export interface EngagementData {
   research?: ResearchSynthesis;
   baseline?: BaselineMetric;
   finding?: ConstraintFinding;
-  canvas?: Record<string, EvidenceClaim[]>;
+  /** The single canonical Business Model Canvas. Written by research, corrected by transcripts. */
+  canvas?: Record<CanvasBlock, EvidenceClaim[]> | Record<string, EvidenceClaim[]>;
+  /** The traced value flow, seeded by research and confirmed or corrected on the call. */
+  valueFlow?: ValueFlowStep[];
   roles?: RoleMapEntry[];
   transcriptSynthesis?: TranscriptSynthesis[];
   approvedReadinessBrief?: ApprovedReadinessBrief;
   recordingConsent?: Partial<Record<"call1" | "call2", ConsentAttestation>>;
+  sprint?: SprintRecord;
+  outcome?: OutcomeMeasurement;
+  catalogEntry?: CatalogEntry;
   [key: string]: unknown;
+}
+
+/** A fixed-scope sprint activated after diagnosis approval. */
+export interface SprintRecord {
+  sprintId: string;
+  constraintId: string;
+  activatedAt: string;
+  activatedBy: string;
+  prescription: string;
+  humanOwner: { name: string; role: string };
+  startingMetric: BaselineMetric;
+  measurementClockStartedAt: string;
+  tasks: Array<{ id: string; task: string; owner: string; status: "todo" | "in_progress" | "done" }>;
+}
+
+/**
+ * A before/after measurement. `delta` is only ever computed from two client-confirmed
+ * numeric readings; it is never estimated, projected, or inferred.
+ */
+export interface OutcomeMeasurement {
+  measuredAt: string;
+  measuredBy: string;
+  startingMetric: BaselineMetric;
+  endingMetric: BaselineMetric;
+  delta: { absolute: string; percent: string; direction: "improved" | "worsened" | "unchanged" } | null;
+  deltaBlockedReason?: string;
+  constraintMoved: boolean;
+  nextConstraintObserved: string;
+  evidence: Array<{ quote: string; source: string }>;
+}
+
+/** A reusable pattern written back to the catalog after a measured outcome. */
+export interface CatalogEntry {
+  entryId: string;
+  constraintType: ConstraintType;
+  canvasBlock: CanvasBlock | string;
+  pattern: string;
+  prescription: string;
+  measuredResult: string;
+  industryContext: string;
+  reusableFor: string;
+  writtenAt: string;
 }
 
 export interface ApprovedReadinessBrief {
@@ -122,6 +233,46 @@ export interface ConstraintHypothesis {
   killCondition: string;
 }
 
+/**
+ * One step in the company's traced value flow. Public research may only propose a
+ * step; the client confirms or corrects it live. `evidenceStatus` never becomes
+ * `client-stated` from research alone.
+ */
+export interface ValueFlowStep {
+  id: string;
+  order: number;
+  name: string;
+  description: string;
+  input: string;
+  output: string;
+  actor: string;
+  system: string;
+  evidenceStatus: Extract<Provenance, "public-research" | "advisor-note" | "gap">;
+  sourceUrls: string[];
+  confidence: number;
+  confirmationQuestion: string;
+}
+
+/**
+ * A client-specific discovery question. Every question is anchored to a fact, gap,
+ * Canvas block, flow step, or constraint hypothesis so the live call is not generic.
+ */
+export interface DiscoveryQuestion {
+  id: string;
+  section: DiscoverySection;
+  question: string;
+  whyItMatters: string;
+  publicAssumption: string;
+  sourceUrls: string[];
+  evidenceStatus: Extract<Provenance, "public-research" | "advisor-note" | "gap">;
+  canvasBlock?: CanvasBlock;
+  flowStepId?: string;
+  hypothesisId?: string;
+  expectedAnswerType: "narrative" | "number" | "person" | "choice";
+  required: boolean;
+  followUps: string[];
+}
+
 export interface ResearchSynthesis {
   sourceUrl: string;
   fetchedAt: string;
@@ -131,6 +282,8 @@ export interface ResearchSynthesis {
   facts: EvidenceClaim[];
   gaps: string[];
   constraintHypotheses: ConstraintHypothesis[];
+  valueFlow?: ValueFlowStep[];
+  discoveryQuestions?: DiscoveryQuestion[];
   researchMode?: "deterministic" | "openai-web-search";
   providerStatus?: "used" | "not-configured" | "failed";
   providerModel?: string;
@@ -145,6 +298,48 @@ export interface TranscriptLine {
   provenance: "client-stated" | "advisor-note" | "gap";
 }
 
+/**
+ * A research claim the client contradicted, corrected, or confirmed on the call.
+ * The client's words always win; research is downgraded, never promoted silently.
+ */
+export interface TranscriptContradiction {
+  researchStatement: string;
+  researchSourceUrl?: string;
+  clientQuote: string;
+  speaker: string;
+  timestamp: string;
+  canvasBlock?: CanvasBlock;
+  resolution: "client-corrected" | "client-confirmed" | "unresolved";
+}
+
+export interface TranscriptDecision {
+  decision: string;
+  quote: string;
+  speaker: string;
+  timestamp: string;
+  owner: string;
+}
+
+export interface TranscriptTask {
+  task: string;
+  quote: string;
+  speaker: string;
+  timestamp: string;
+  owner: string;
+  flowStepId?: string;
+}
+
+/** A Canvas block update proposed from client-stated transcript evidence. */
+export interface CanvasUpdate {
+  canvasBlock: CanvasBlock;
+  statement: string;
+  quote: string;
+  speaker: string;
+  timestamp: string;
+  provenance: Extract<Provenance, "client-stated">;
+  replacesResearchStatement?: string;
+}
+
 export interface TranscriptSynthesis {
   callNumber: 1 | 2;
   lineCount: number;
@@ -153,6 +348,20 @@ export interface TranscriptSynthesis {
   baselineStatus: BaselineStatus;
   gaps: string[];
   constraintCandidate: ConstraintFinding | null;
+  contradictions?: TranscriptContradiction[];
+  decisions?: TranscriptDecision[];
+  tasks?: TranscriptTask[];
+  canvasUpdates?: CanvasUpdate[];
+  flowConfirmations?: Array<{
+    flowStepId: string;
+    status: "confirmed" | "corrected" | "unconfirmed";
+    quote: string;
+    speaker: string;
+    timestamp: string;
+  }>;
+  roles?: RoleMapEntry[];
+  analysisMode?: "deterministic" | "model-assisted";
+  speakerSummary?: Array<{ speaker: string; lines: number; provenance: TranscriptLine["provenance"] }>;
 }
 
 export interface ExtractedMetric {
@@ -241,6 +450,25 @@ export function isOneOf<T extends readonly string[]>(values: T, value: unknown):
   return typeof value === "string" && values.includes(value as T[number]);
 }
 
+/**
+ * Resolve any spelling of a Business Model Canvas block to the single canonical name,
+ * or null when the value is not a Canvas block at all.
+ */
+export function canonicalCanvasBlock(value: unknown): CanvasBlock | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const exact = CANVAS_BLOCKS.find((block) => block.toLowerCase() === trimmed.toLowerCase());
+  if (exact) return exact;
+  return CANVAS_BLOCK_ALIASES[trimmed.toLowerCase()] ?? null;
+}
+
+export function emptyCanvas(): Record<CanvasBlock, EvidenceClaim[]> {
+  return Object.fromEntries(
+    CANVAS_BLOCKS.map((block) => [block, [] as EvidenceClaim[]]),
+  ) as unknown as Record<CanvasBlock, EvidenceClaim[]>;
+}
+
 export function stageForState(state: WorkflowState): CrmStage {
   return STATE_TO_STAGE[state];
 }
@@ -275,6 +503,7 @@ export function makeId(prefix: string, seed = crypto.randomUUID()): string {
 export function createDemoEngagement(now = "2026-07-24T16:00:00.000Z"): Engagement {
   return {
     id: "eng_demo_northstar",
+    ownerId: "demo",
     client: "Northstar Fabrication",
     website: "https://example.com",
     primaryContact: "Morgan Lee",

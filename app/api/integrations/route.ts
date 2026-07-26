@@ -51,6 +51,15 @@ export async function GET() {
           storesSecrets: false,
         },
         {
+          id: "advisor_auth",
+          name: "Advisor authentication",
+          status: hasAll("REQUIRE_ADVISOR_AUTH") ? "enforced" : "single_advisor",
+          mode: "sites_identity_headers_with_owner_scoping",
+          setup: "Every record is scoped to the signed-in advisor. Set REQUIRE_ADVISOR_AUTH=1 to refuse unauthenticated requests before exposing the app to more than one advisor.",
+          environmentVariables: ["REQUIRE_ADVISOR_AUTH", "LOCAL_ADVISOR_EMAIL"],
+          storesSecrets: false,
+        },
+        {
           id: "pandadoc",
           name: "PandaDoc",
           status: hasAll("PANDADOC_API_KEY") ? "configured_not_implemented" : "connector_first",
@@ -63,10 +72,10 @@ export async function GET() {
           id: "google_sheets",
           name: "Google Sheets CRM",
           status: hasAll("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REFRESH_TOKEN", "GOOGLE_SHEETS_ID")
-            ? "configured_not_implemented"
+            ? "configured"
             : "intent_only",
           mode: "reviewed_write_back_intent",
-          setup: "Approve the generated intent in Codex before an external connector writes it.",
+          setup: "The app writes the row itself once the intent is explicitly approved and then executed. Without credentials it stops at the reviewed intent.",
           environmentVariables: [
             "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REDIRECT_URI",
             "GOOGLE_REFRESH_TOKEN", "GOOGLE_SHEETS_ID",
@@ -78,10 +87,10 @@ export async function GET() {
           id: "google_drive_docs",
           name: "Google Drive / Docs",
           status: hasAll("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REFRESH_TOKEN")
-            ? "configured_not_implemented"
+            ? "configured"
             : "connector_first",
           mode: "approved_artifact_intent",
-          setup: "Use the Codex connector for approved artifacts. A direct adapter should request the narrow drive.file scope.",
+          setup: "An approved publication intent creates the Google Doc directly using the narrow drive.file scope.",
           environmentVariables: [
             "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REDIRECT_URI",
             "GOOGLE_REFRESH_TOKEN", "GOOGLE_DRIVE_ROOT_FOLDER_ID",
@@ -102,9 +111,9 @@ export async function GET() {
         {
           id: "resend",
           name: "Resend",
-          status: hasAll("RESEND_API_KEY", "EMAIL_FROM") ? "configured_not_implemented" : "not_configured",
-          mode: "future_backend_send_adapter",
-          setup: "Use only when Gmail is intentionally not the sender. Sending requires an approved, idempotent intent.",
+          status: hasAll("RESEND_API_KEY", "EMAIL_FROM") ? "configured" : "not_configured",
+          mode: "approved_intent_send_adapter",
+          setup: "Sends the approved readiness brief. Sending requires an approved, idempotent intent and never happens automatically.",
           environmentVariables: ["RESEND_API_KEY", "EMAIL_FROM", "EMAIL_REPLY_TO"],
           storesSecrets: false,
         },

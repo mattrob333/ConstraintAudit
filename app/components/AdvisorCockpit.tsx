@@ -3,11 +3,12 @@
 import { type FormEvent, useEffect, useRef, useState } from "react";
 import { Icon, type IconName } from "./Icons";
 
-const stages = ["Client", "Research", "Prepare", "Call", "Synthesize", "Deliver"] as const;
+const stages = ["Client", "Research", "Prepare", "Call", "Synthesize", "Deliver", "Operate"] as const;
 type Stage = (typeof stages)[number];
 type Screen =
   | "home" | "intake" | "migration" | "engagements" | "research" | "prepare"
-  | "call" | "transcript" | "synthesis" | "findings" | "deliver" | "integrations";
+  | "call" | "transcript" | "synthesis" | "findings" | "deliver" | "sprint"
+  | "measure" | "catalog" | "actions" | "integrations";
 type Tone = "neutral" | "known" | "inferred" | "assumed" | "missing" | "success";
 type Engagement = {
   id: string; companyName: string; website: string; stage: Stage; status: string;
@@ -20,14 +21,58 @@ type DocumentItem = {
 type BackendEngagement = {
   id: string; client: string; website: string; stage: string; status: string;
   nextAction: string; updatedAt: string; version: number;
-  data?: { research?: ResearchPayload; transcriptSynthesis?: TranscriptSynthesis[] };
+  data?: {
+    research?: ResearchPayload; transcriptSynthesis?: TranscriptSynthesis[]; canvas?: CanvasRecord;
+    sprint?: SprintRecord; outcome?: OutcomeMeasurement; catalogEntry?: CatalogEntry;
+  };
 };
+
+type EvidenceStatus = "public-research" | "advisor-note" | "gap";
+type DiscoverySection = "demand" | "promise" | "flow" | "constraint" | "baseline" | "roles" | "feasibility";
+type EvidenceClaim = { statement: string; provenance: string; confidence?: number; sourceLabel?: string; sourceUrl?: string; canvasBlock?: string };
+type CanvasRecord = Record<string, EvidenceClaim[]>;
+type ValueFlowStep = {
+  id: string; order: number; name: string; description: string; input: string; output: string;
+  actor: string; system: string; evidenceStatus: EvidenceStatus; sourceUrls: string[];
+  confidence: number; confirmationQuestion: string;
+};
+type DiscoveryQuestion = {
+  id: string; section: DiscoverySection; question: string; whyItMatters: string; publicAssumption: string;
+  sourceUrls: string[]; evidenceStatus: EvidenceStatus; canvasBlock?: string; flowStepId?: string;
+  expectedAnswerType: "narrative" | "number" | "person" | "choice"; required: boolean; followUps: string[];
+};
+type SprintTask = { id: string; task: string; owner: string; status: "todo" | "in_progress" | "done" };
+type Metric = { name: string; value: string; unit: string; period: string; source: string };
+type SprintRecord = {
+  sprintId: string; constraintId: string; activatedAt: string; activatedBy: string; prescription: string;
+  humanOwner: { name: string; role: string }; startingMetric: Metric; measurementClockStartedAt: string; tasks: SprintTask[];
+};
+type OutcomeMeasurement = {
+  measuredAt: string; measuredBy: string; startingMetric: Metric; endingMetric: Metric;
+  delta: { absolute: string; percent: string; direction: "improved" | "worsened" | "unchanged" } | null;
+  deltaBlockedReason?: string; constraintMoved: boolean; nextConstraintObserved: string;
+};
+type CatalogEntry = {
+  entryId: string; constraintType: string; canvasBlock: string; pattern: string; prescription: string;
+  measuredResult: string; industryContext: string; reusableFor: string; writtenAt: string;
+};
+type IntentItem = {
+  id: string; engagement_id: string; type: string; status: string;
+  payload: unknown; created_at: string; executed_at?: string | null;
+};
+type IntegrationItem = {
+  id: string; name: string; status: string; mode: string; setup?: string;
+  environmentVariables?: string[]; model?: string; resource?: { name: string; url: string };
+};
+type TranscriptFile = { name: string; mimeType: string; content: string; encoding: "utf8" | "base64" };
 
 type ResearchPayload = {
   title: string; description: string; sourceUrl: string; fetchStatus: string;
-  facts: Array<{ statement: string; provenance: string; sourceUrl?: string; canvasBlock?: string }>;
+  facts: EvidenceClaim[];
   gaps: string[];
   constraintHypotheses: Array<{ canvasBlock: string; type: string; evidenceHint: string; confirmationCondition: string; killCondition: string }>;
+  valueFlow?: ValueFlowStep[];
+  discoveryQuestions?: DiscoveryQuestion[];
   researchMode?: "deterministic" | "openai-web-search";
   providerStatus?: "used" | "not-configured" | "failed";
   providerModel?: string;
@@ -57,14 +102,87 @@ const canvasBlocks = [
   { title: "Revenue streams", area: "revenue" },
 ] as const;
 
-const callTopics = [
-  ["How customers find and choose you", "When a good-fit customer first reaches out, what happens before they decide to buy?", "This shows where demand enters the system and where it can be delayed or lost.", "No client-verified channel claim yet. Start with what the public research captured, then correct it live."],
-  ["What you promise and sell", "What result does the customer believe they are buying—and what must be true for you to deliver it?", "A clear promise lets us trace the work that must happen behind it.", "No client-verified promise yet. Ask the client to state it in their own words."],
-  ["How work moves", "Walk us through one request from the moment it arrives to the moment the customer calls it complete.", "We are mapping the actual flow, including every handoff and approval.", "The end-to-end flow is intentionally unconfirmed until the client traces a real case."],
-  ["Where work waits or loops", "Where is work piling up right now, and what usually has to happen before it can move?", "The constraint often appears as a queue, rework loop, or single approval.", "No bottleneck is presumed. Look for a queue, delay, rework loop, or concentrated decision."],
-  ["Numbers that anchor the diagnosis", "In a normal month, how many requests enter, finish, wait, or get turned away?", "A baseline keeps the finding measurable. Approximate is fine; missing stays missing.", "No trustworthy public baseline exists for volume, cycle time, queue, rework, or missed demand."],
-  ["Who touches the constrained flow", "Who performs each step, who owns the outcome, and where does only one person hold the judgment?", "The accountable person becomes the human owner of any intervention.", "Map tasks only for roles inside the traced flow; record other roles at name, title, and reporting-line depth."],
-] as const;
+const discoverySections = ["demand", "promise", "flow", "constraint", "baseline", "roles", "feasibility"] as const;
+
+const sectionLabels: Record<DiscoverySection, string> = {
+  demand: "How demand enters",
+  promise: "What you promise and sell",
+  flow: "How work moves",
+  constraint: "Where work waits or loops",
+  baseline: "Numbers that anchor the diagnosis",
+  roles: "Who touches the constrained flow",
+  feasibility: "What can actually change",
+};
+
+/** Used only when research produced no client-specific questions. Labelled generic everywhere it appears. */
+const genericScript: DiscoveryQuestion[] = [
+  { id: "generic-flow", section: "flow", question: "Walk us through one request from the moment it arrives to the moment the customer calls it complete.", whyItMatters: "We are mapping the actual flow, including every handoff and approval.", publicAssumption: "No client-specific question set was produced, so nothing public is being asserted here.", sourceUrls: [], evidenceStatus: "gap", expectedAnswerType: "narrative", required: true, followUps: [] },
+  { id: "generic-constraint", section: "constraint", question: "Where is work piling up right now, and what usually has to happen before it can move?", whyItMatters: "The constraint often appears as a queue, rework loop, or single approval.", publicAssumption: "No bottleneck is presumed. Look for a queue, delay, rework loop, or concentrated decision.", sourceUrls: [], evidenceStatus: "gap", expectedAnswerType: "narrative", required: true, followUps: [] },
+  { id: "generic-baseline", section: "baseline", question: "In a normal month, how many requests enter, finish, wait, or get turned away?", whyItMatters: "A baseline keeps the finding measurable. Approximate is fine; missing stays missing.", publicAssumption: "No trustworthy public baseline exists for volume, cycle time, queue, rework, or missed demand.", sourceUrls: [], evidenceStatus: "gap", expectedAnswerType: "number", required: true, followUps: [] },
+  { id: "generic-roles", section: "roles", question: "Who performs each step, who owns the outcome, and where does only one person hold the judgment?", whyItMatters: "The accountable person becomes the human owner of any intervention.", publicAssumption: "No named owner has been established for this engagement yet.", sourceUrls: [], evidenceStatus: "gap", expectedAnswerType: "person", required: true, followUps: [] },
+];
+
+function sectionRank(section: DiscoverySection): number {
+  const index = discoverySections.indexOf(section);
+  return index < 0 ? discoverySections.length : index;
+}
+
+function callScriptFor(research: ResearchPayload | null): { questions: DiscoveryQuestion[]; generic: boolean } {
+  const questions = research?.discoveryQuestions ?? [];
+  if (!questions.length) return { questions: genericScript, generic: true };
+  return { questions: [...questions].sort((a, b) => sectionRank(a.section) - sectionRank(b.section)), generic: false };
+}
+
+const evidenceTone: Record<string, Tone> = {
+  "client-stated": "known", doc: "inferred", "public-research": "inferred", "advisor-note": "assumed", gap: "missing",
+};
+
+const evidenceLabel: Record<string, string> = {
+  "client-stated": "Client stated", doc: "Document", "public-research": "Public research", "advisor-note": "Advisor note", gap: "Gap",
+};
+
+const statusTone: Record<string, Tone> = {
+  connected: "success", ready: "success", configured: "success",
+  configured_not_implemented: "assumed", intent_only: "assumed", connector_first: "assumed",
+  not_configured: "neutral", unavailable: "missing",
+};
+
+const statusLegend: Array<[string, string]> = [
+  ["connected", "Live and in use by the server right now."],
+  ["ready", "Works with no credential; this is the deterministic default."],
+  ["configured", "A server-side credential is present and the adapter runs."],
+  ["configured_not_implemented", "A credential is present, but no direct adapter writes yet."],
+  ["intent_only", "The app only records a reviewed intent; a human executes the write."],
+  ["connector_first", "Use the reviewed external connector; no direct adapter exists."],
+  ["not_configured", "No credential is present. The local default stays available."],
+];
+
+const transcriptMimeTypes: Record<string, string> = {
+  txt: "text/plain", vtt: "text/vtt", srt: "application/x-subrip", json: "application/json",
+  doc: "application/msword", docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+};
+
+const MAX_TRANSCRIPT_BYTES = 2 * 1024 * 1024;
+
+function base64FromBytes(bytes: Uint8Array): string {
+  let binary = "";
+  for (let index = 0; index < bytes.length; index += 8192) binary += String.fromCharCode(...bytes.subarray(index, index + 8192));
+  return btoa(binary);
+}
+
+function formatBytes(size: number): string {
+  return size < 1024 ? `${size} B` : size < 1048576 ? `${(size / 1024).toFixed(1)} KB` : `${(size / 1048576).toFixed(2)} MB`;
+}
+
+async function readTranscriptFile(file: File): Promise<TranscriptFile> {
+  const extension = file.name.split(".").pop()?.toLowerCase() ?? "";
+  const mimeType = transcriptMimeTypes[extension] ?? (file.type || "application/octet-stream");
+  if (extension === "docx" || extension === "doc") {
+    const buffer = await file.arrayBuffer();
+    return { content: base64FromBytes(new Uint8Array(buffer)), encoding: "base64", mimeType, name: file.name };
+  }
+  return { content: await file.text(), encoding: "utf8", mimeType, name: file.name };
+}
 
 const deliverables = [
   ["Diagnosis package", "Canvas v1, constraint card, evidence, baseline, prescription, owner, and predicted next constraint."],
@@ -82,6 +200,7 @@ function stageFor(screen: Screen): Stage | null {
   if (["call", "transcript"].includes(screen)) return "Call";
   if (["synthesis", "findings"].includes(screen)) return "Synthesize";
   if (screen === "deliver") return "Deliver";
+  if (["sprint", "measure", "catalog", "actions"].includes(screen)) return "Operate";
   return null;
 }
 
@@ -105,7 +224,8 @@ function uiStage(value: string): Stage {
   if (stage.includes("RECON")) return "Research";
   if (stage.includes("GUIDED") || stage.includes("CALL")) return "Call";
   if (stage.includes("TRANSCRIPT") || stage.includes("CANVAS_COMMIT")) return "Synthesize";
-  if (stage.includes("DIAGNOSIS") || stage.includes("SPRINT") || stage.includes("OUTCOME") || stage.includes("CATALOG")) return "Deliver";
+  if (stage.includes("SPRINT") || stage.includes("OUTCOME") || stage.includes("CATALOG")) return "Operate";
+  if (stage.includes("DIAGNOSIS") || stage.includes("DELIVER")) return "Deliver";
   return "Client";
 }
 
@@ -236,14 +356,25 @@ export default function AdvisorCockpit() {
   const [callIndex, setCallIndex] = useState(0);
   const [consent, setConsent] = useState<"pending" | "recorded" | "not-recorded">("pending");
   const [call2Consent, setCall2Consent] = useState<"pending" | "recorded" | "not-recorded">("pending");
-  const [answers, setAnswers] = useState<Record<number, string>>({});
-  const [notes, setNotes] = useState<Record<number, string>>({});
+  const [answers, setAnswers] = useState<Record<string, string>>({});
+  const [notes, setNotes] = useState<Record<string, string>>({});
+  const [values, setValues] = useState<Record<string, string>>({});
   const [researchResult, setResearchResult] = useState<ResearchPayload | null>(null);
+  const [canvas, setCanvas] = useState<CanvasRecord | null>(null);
+  const [sprint, setSprint] = useState<SprintRecord | null>(null);
+  const [outcome, setOutcome] = useState<OutcomeMeasurement | null>(null);
+  const [catalogEntry, setCatalogEntry] = useState<CatalogEntry | null>(null);
+  const [opsBusy, setOpsBusy] = useState("");
+  const [opsError, setOpsError] = useState("");
   const [synthesisResult, setSynthesisResult] = useState<TranscriptSynthesis | null>(null);
   const [transcriptMethod, setTranscriptMethod] = useState<"fireflies" | "paste" | "upload">("fireflies");
   const [transcript, setTranscript] = useState("");
   const [meetingDate, setMeetingDate] = useState("2026-07-23");
   const [fileName, setFileName] = useState("");
+  const [transcriptFile, setTranscriptFile] = useState<TranscriptFile | null>(null);
+  const [fileSummary, setFileSummary] = useState("");
+  const [fileError, setFileError] = useState("");
+  const [fileReading, setFileReading] = useState(false);
   const [transcriptCallNumber, setTranscriptCallNumber] = useState<1 | 2>(1);
   const [call2Processed, setCall2Processed] = useState(false);
   const [diagnosisApproved, setDiagnosisApproved] = useState(false);
@@ -252,6 +383,8 @@ export default function AdvisorCockpit() {
   const modalRef = useRef<HTMLDivElement>(null);
   const currentStage = stageFor(screen);
   const displayCompany = company || "Untitled engagement";
+  const script = callScriptFor(researchResult);
+  const callQuestion = script.questions[Math.min(callIndex, script.questions.length - 1)];
 
   useEffect(() => {
     api<{ engagements: BackendEngagement[] }>("/api/engagements")
@@ -318,27 +451,126 @@ export default function AdvisorCockpit() {
       const id = response.engagement.id;
       setActiveId(id);
       setEngagements((items) => [toEngagement(response.engagement), ...items.filter((item) => item.id !== id)]);
-      const researchResponse = await save<{ research: ResearchPayload }>(`/api/engagements/${id}/research`, { sourceUrl: normalizedWebsite });
+      const researchResponse = await save<{ engagement?: BackendEngagement; research: ResearchPayload }>(`/api/engagements/${id}/research`, { sourceUrl: normalizedWebsite });
       setResearchResult(researchResponse.research);
+      setCanvas(researchResponse.engagement?.data?.canvas ?? null);
+      setCallIndex(0);
       go("research");
     } catch {
       // save() leaves the advisor on intake with a visible error.
     }
   }
 
-  async function resume(item: Engagement) {
-    setCompany(item.companyName); setWebsite(item.website); setActiveId(item.id);
+  async function loadEngagement(id: string): Promise<boolean> {
     try {
-      const response = await api<{ engagement: BackendEngagement }>(`/api/engagements/${item.id}`);
-      setResearchResult(response.engagement.data?.research ?? null);
-      const syntheses = response.engagement.data?.transcriptSynthesis ?? [];
-      setSynthesisResult(syntheses.at(-1) ?? null);
+      const response = await api<{ engagement: BackendEngagement }>(`/api/engagements/${id}`);
+      const data = response.engagement.data;
+      setResearchResult(data?.research ?? null);
+      setCanvas(data?.canvas ?? null);
+      setSprint(data?.sprint ?? null);
+      setOutcome(data?.outcome ?? null);
+      setCatalogEntry(data?.catalogEntry ?? null);
+      setSynthesisResult((data?.transcriptSynthesis ?? []).at(-1) ?? null);
+      return true;
     } catch (reason) {
       const message = reason instanceof Error ? reason.message : "Unknown request failure";
-      setNotice(`The engagement could not be resumed: ${message}`);
+      setNotice(`The engagement could not be read: ${message}`);
+      return false;
+    }
+  }
+
+  async function resume(item: Engagement) {
+    setCompany(item.companyName); setWebsite(item.website); setActiveId(item.id); setCallIndex(0);
+    if (!await loadEngagement(item.id)) return;
+    go(item.stage === "Research" ? "research" : item.stage === "Synthesize" ? "synthesis" : item.stage === "Operate" ? "sprint" : "deliver");
+  }
+
+  async function openOperations(next: Screen) {
+    setOpsError("");
+    if (!activeId) return setNotice("Action not completed: select or create an engagement first.");
+    go(next);
+    await loadEngagement(activeId);
+  }
+
+  async function activateSprint() {
+    if (!activeId) return setNotice("Action not completed: select or create an engagement first.");
+    setOpsBusy("sprint"); setOpsError("");
+    try {
+      const response = await save<{ sprint: SprintRecord }>(`/api/engagements/${activeId}/sprint`, { action: "activate" });
+      setSprint(response.sprint);
+      setNotice("Sprint activated. The measurement clock started at the recorded starting metric.");
+    } catch (reason) {
+      setOpsError(`The sprint could not be activated: ${reason instanceof Error ? reason.message : "unknown request failure"}`);
+    } finally {
+      setOpsBusy("");
+    }
+  }
+
+  async function updateSprintTask(taskId: string, status: SprintTask["status"]) {
+    if (!activeId) return setNotice("Action not completed: select or create an engagement first.");
+    setOpsBusy(`task:${taskId}`); setOpsError("");
+    try {
+      const response = await save<{ sprint: SprintRecord }>(`/api/engagements/${activeId}/sprint`, { action: "update_task", status, taskId });
+      setSprint(response.sprint);
+    } catch (reason) {
+      setOpsError(`The task could not be updated: ${reason instanceof Error ? reason.message : "unknown request failure"}`);
+    } finally {
+      setOpsBusy("");
+    }
+  }
+
+  async function recordOutcome(body: { endingMetric: Metric; constraintMoved: boolean; nextConstraintObserved: string }) {
+    if (!activeId) return setNotice("Action not completed: select or create an engagement first.");
+    setOpsBusy("outcome"); setOpsError("");
+    try {
+      const response = await save<{ outcome: OutcomeMeasurement }>(`/api/engagements/${activeId}/outcome`, body);
+      setOutcome(response.outcome);
+      setNotice("Ending metric recorded. Only the server-returned delta is displayed.");
+    } catch (reason) {
+      setOpsError(`The outcome could not be recorded: ${reason instanceof Error ? reason.message : "unknown request failure"}`);
+    } finally {
+      setOpsBusy("");
+    }
+  }
+
+  async function writeCatalog(body: { industryContext: string; reusableFor: string }) {
+    if (!activeId) return setNotice("Action not completed: select or create an engagement first.");
+    setOpsBusy("catalog"); setOpsError("");
+    try {
+      const response = await save<{ catalogEntry: CatalogEntry }>(`/api/engagements/${activeId}/catalog`, body);
+      setCatalogEntry(response.catalogEntry);
+      setNotice("The reusable pattern was written back to the catalog.");
+    } catch (reason) {
+      setOpsError(`The catalog entry could not be written: ${reason instanceof Error ? reason.message : "unknown request failure"}`);
+    } finally {
+      setOpsBusy("");
+    }
+  }
+
+  async function selectTranscriptFile(file: File | null) {
+    setTranscriptFile(null); setFileSummary(""); setFileError("");
+    if (!file) return setFileName("");
+    setFileName(file.name);
+    if (file.size > MAX_TRANSCRIPT_BYTES) {
+      setFileError(`${file.name} is ${formatBytes(file.size)}. The upload limit is ${formatBytes(MAX_TRANSCRIPT_BYTES)} — paste the transcript text instead.`);
       return;
     }
-    go(item.stage === "Research" ? "research" : item.stage === "Synthesize" ? "synthesis" : "deliver");
+    setFileReading(true);
+    try {
+      const payload = await readTranscriptFile(file);
+      if (!payload.content.length) {
+        setFileError(`${file.name} contained no readable content. Choose another file or paste the transcript text.`);
+        return;
+      }
+      setTranscriptFile(payload);
+      setFileSummary(payload.encoding === "utf8"
+        ? `${formatBytes(file.size)} read · ${payload.content.length.toLocaleString()} characters parsed as text`
+        : `${formatBytes(file.size)} read · sent base64-encoded for server-side extraction`);
+    } catch (reason) {
+      setFileError(`The file could not be read: ${reason instanceof Error ? reason.message : "unknown error"}`);
+    } finally {
+      setFileReading(false);
+    }
   }
 
   async function sendBrief() {
@@ -390,21 +622,46 @@ export default function AdvisorCockpit() {
       } catch {
         return;
       }
-    } else {
+    } else if (transcriptMethod === "upload") {
+      if (!transcriptFile) {
+        setNotice("Choose a transcript file and let it finish reading before analysis.");
+        return;
+      }
       try {
         response = await save<{ synthesis: TranscriptSynthesis }>(`/api/engagements/${activeId}/transcripts`, {
           callNumber: transcriptCallNumber,
-          rawText: transcript || `[00:00] Advisor: Transcript file selected: ${fileName}`,
-          sourceUrl: fileName || undefined,
           consentAttestation,
-          speakerRoles,
+          file: transcriptFile,
           humanOwner,
+          speakerRoles,
+        });
+      } catch {
+        return;
+      }
+    } else {
+      if (!transcript.trim()) {
+        setNotice("Paste the transcript text before analysis.");
+        return;
+      }
+      try {
+        response = await save<{ synthesis: TranscriptSynthesis }>(`/api/engagements/${activeId}/transcripts`, {
+          callNumber: transcriptCallNumber,
+          consentAttestation,
+          humanOwner,
+          rawText: transcript,
+          speakerRoles,
         });
       } catch {
         return;
       }
     }
     setSynthesisResult(response.synthesis);
+    try {
+      const refreshed = await api<{ engagement: BackendEngagement }>(`/api/engagements/${activeId}`);
+      setCanvas(refreshed.engagement.data?.canvas ?? null);
+    } catch {
+      // The synthesis is already on screen; a canvas refresh failure must not hide it.
+    }
     if (transcriptCallNumber === 2) {
       setCall2Processed(true);
       setNotice("Call 2 transcript reconciled. Review the finding once more before diagnosis approval.");
@@ -437,7 +694,7 @@ export default function AdvisorCockpit() {
     if (!call2Processed) {
       setTranscriptCallNumber(2);
       setTranscript("");
-      setFileName("");
+      setFileName(""); setTranscriptFile(null); setFileSummary(""); setFileError("");
       setNotice("After the Findings Call, add the Call 2 transcript so clarifications can be reconciled.");
       go("transcript");
       return;
@@ -499,14 +756,19 @@ export default function AdvisorCockpit() {
       {screen === "intake" ? <Intake apiState={apiState} company={company} contact={contact} context={context} onBack={() => go("home")} onCompany={setCompany} onContact={setContact} onContext={setContext} onRole={setRole} onSubmit={createEngagement} onWebsite={setWebsite} role={role} website={website} /> : null}
       {screen === "migration" ? <Migration onBack={() => go("home")} onContinue={() => { setNotice("Source material staged locally. Add the client anchor before research begins."); go("intake"); }} /> : null}
       {screen === "engagements" ? <Engagements engagements={engagements} loading={registryLoading} onBack={() => go("home")} onFresh={() => go("intake")} onResume={resume} /> : null}
-      {screen === "research" ? <Research company={displayCompany} onBack={() => go("intake")} onPrepare={() => go("prepare")} research={researchResult} /> : null}
-      {screen === "prepare" ? <Prepare briefSent={briefSent} contact={contact || "Primary contact"} onBack={() => go("research")} onCall={() => go("call")} onSend={() => { setConfirmed(false); setConfirmSend(true); }} /> : null}
-      {screen === "call" ? <Call answer={answers[callIndex] ?? ""} company={displayCompany} consent={consent} index={callIndex} notes={notes[callIndex] ?? ""} onAnswer={(value) => setAnswers((all) => ({ ...all, [callIndex]: value }))} onConsent={setConsent} onExit={() => go("prepare")} onNext={() => callIndex < callTopics.length - 1 ? setCallIndex(callIndex + 1) : go("transcript")} onNotes={(value) => setNotes((all) => ({ ...all, [callIndex]: value }))} onPrevious={() => setCallIndex(Math.max(0, callIndex - 1))} /> : null}
-      {screen === "transcript" ? <Transcript callNumber={transcriptCallNumber} company={displayCompany} date={meetingDate} fileName={fileName} method={transcriptMethod} onAnalyze={analyze} onBack={() => transcriptCallNumber === 2 ? go("findings") : go("call")} onDate={setMeetingDate} onFile={setFileName} onMethod={setTranscriptMethod} onText={setTranscript} text={transcript} /> : null}
+      {screen === "research" ? <Research canvas={canvas} company={displayCompany} onBack={() => go("intake")} onPrepare={() => go("prepare")} research={researchResult} script={script} /> : null}
+      {screen === "prepare" ? <Prepare briefSent={briefSent} contact={contact || "Primary contact"} onBack={() => go("research")} onCall={() => { setCallIndex(0); go("call"); }} onSend={() => { setConfirmed(false); setConfirmSend(true); }} /> : null}
+      {screen === "call" && callQuestion ? <Call answer={answers[callQuestion.id] ?? ""} company={displayCompany} consent={consent} generic={script.generic} index={Math.min(callIndex, script.questions.length - 1)} notes={notes[callQuestion.id] ?? ""} onAnswer={(value) => setAnswers((all) => ({ ...all, [callQuestion.id]: value }))} onConsent={setConsent} onExit={() => go("prepare")} onNext={() => callIndex < script.questions.length - 1 ? setCallIndex(callIndex + 1) : go("transcript")} onNotes={(value) => setNotes((all) => ({ ...all, [callQuestion.id]: value }))} onPrevious={() => setCallIndex(Math.max(0, callIndex - 1))} onValue={(value) => setValues((all) => ({ ...all, [callQuestion.id]: value }))} question={callQuestion} total={script.questions.length} value={values[callQuestion.id] ?? ""} /> : null}
+      {screen === "transcript" ? <Transcript callNumber={transcriptCallNumber} company={displayCompany} date={meetingDate} fileError={fileError} fileName={fileName} fileReading={fileReading} fileSummary={fileSummary} method={transcriptMethod} onAnalyze={analyze} onBack={() => transcriptCallNumber === 2 ? go("findings") : go("call")} onDate={setMeetingDate} onFile={selectTranscriptFile} onMethod={setTranscriptMethod} onText={setTranscript} ready={Boolean(transcriptFile)} text={transcript} /> : null}
       {screen === "synthesis" ? <Synthesis onApprove={() => approve("canvas")} onBack={() => go("transcript")} synthesis={synthesisResult} /> : null}
       {screen === "findings" ? <Findings consent={call2Consent} onApprove={() => approve("diagnosis")} onBack={() => go("synthesis")} onConsent={setCall2Consent} owner={contact && role ? `${contact}, ${role}` : ""} synthesis={synthesisResult} /> : null}
-      {screen === "deliver" ? <Deliver approved={diagnosisApproved} generated={generated} onBack={() => go("findings")} onGenerate={generateAllDeliverables} onSync={prepareCrmWriteBack} /> : null}
+      {screen === "deliver" ? <Deliver approved={diagnosisApproved} generated={generated} onActions={() => openOperations("actions")} onBack={() => go("findings")} onGenerate={generateAllDeliverables} onOperate={openOperations} onSync={prepareCrmWriteBack} /> : null}
+      {screen === "sprint" ? <SprintScreen busy={opsBusy} error={opsError} onActivate={activateSprint} onBack={() => go("deliver")} onNavigate={openOperations} onTask={updateSprintTask} sprint={sprint} /> : null}
+      {screen === "measure" ? <Measure busy={opsBusy === "outcome"} error={opsError} onBack={() => openOperations("sprint")} onNavigate={openOperations} onSubmit={recordOutcome} outcome={outcome} sprint={sprint} /> : null}
+      {screen === "catalog" ? <Catalog busy={opsBusy === "catalog"} entry={catalogEntry} error={opsError} onBack={() => openOperations("measure")} onNavigate={openOperations} onSubmit={writeCatalog} outcome={outcome} /> : null}
+      {screen === "actions" ? <ReviewedActions engagementId={activeId} onBack={() => openOperations("sprint")} onNavigate={openOperations} /> : null}
       {screen === "integrations" ? <IntegrationCenter onBack={() => go("home")} /> : null}
+      {screen === "call" && !callQuestion ? <section className="guided narrow"><PageHead eyebrow="Call · guided script" title="No call question is available.">Run research for this engagement so the guided call can be driven by client-specific discovery questions.</PageHead><Button icon="back" onClick={() => go("research")}>Back to research</Button></section> : null}
     </main>
     {screen !== "home" && screen !== "call" ? <div aria-live="polite" className="save-state"><i className={apiState} />{apiState === "saving" ? "Saving…" : apiState === "saved" ? "Saved" : apiState === "error" ? "Action failed" : "Ready"}</div> : null}
     {confirmSend ? <div className="modal-layer"><div aria-describedby="send-description" aria-labelledby="send-title" aria-modal="true" className="modal" ref={modalRef} role="dialog">
@@ -578,21 +840,35 @@ function Engagements({ engagements, loading, onBack, onFresh, onResume }: { enga
   </section>;
 }
 
-function Research({ company, onBack, onPrepare, research }: { company: string; onBack: () => void; onPrepare: () => void; research: ResearchPayload | null }) {
+/** The canonical Canvas wins when the server has written one; research facts are the fallback only. */
+function claimsForBlock(canvas: CanvasRecord | null, facts: EvidenceClaim[], title: string): EvidenceClaim[] {
+  const key = canvas ? Object.keys(canvas).find((name) => name.toLowerCase() === title.toLowerCase()) : undefined;
+  const claims = key && canvas ? canvas[key] ?? [] : facts.filter((fact) => fact.canvasBlock?.toLowerCase() === title.toLowerCase());
+  return [...claims].sort((a, b) => Number(b.provenance === "client-stated") - Number(a.provenance === "client-stated")).slice(0, 3);
+}
+
+function Research({ canvas, company, onBack, onPrepare, research, script }: {
+  canvas: CanvasRecord | null; company: string; onBack: () => void; onPrepare: () => void;
+  research: ResearchPayload | null; script: { questions: DiscoveryQuestion[]; generic: boolean };
+}) {
   const [tab, setTab] = useState<"canvas" | "flow" | "questions">("canvas");
   const publicSummary = research?.facts[0]?.statement || research?.description || "No public company fact was extracted. Treat every canvas block as a discovery gap.";
   const gaps = research?.gaps?.length ? research.gaps : ["Customer and demand profile", "End-to-end workflow", "Monthly volume", "Cycle time", "Queue size", "Rework", "Missed demand", "Cost of delay"];
-  const questions = research?.constraintHypotheses?.length ? research.constraintHypotheses.map((item) => [
-    `Could ${item.type} be limiting ${item.canvasBlock}?`,
-    `${item.confirmationCondition} Kill this hypothesis if: ${item.killCondition}`,
-    "assumed",
-  ]) : gaps.slice(0, 4).map((gap) => [`What would make ${gap.toLowerCase()} measurable?`, `Ask for the current fact, its source, and the person who owns it.`, "missing"]);
+  const flow = [...(research?.valueFlow ?? [])].sort((a, b) => a.order - b.order);
   const openAIUsed = research?.researchMode === "openai-web-search";
   return <section className="guided wide"><Back onClick={onBack}>Client intake</Back><PageHead eyebrow="Research · Canvas v0" side={<div className="research-progress"><span><Icon name="check" size={13} />Website read</span><span><Icon name={openAIUsed ? "check" : "info"} size={13} />{openAIUsed ? "Web search" : "Local research"}</span><span><Icon name="check" size={13} />Canvas drafted</span><span><Icon name="check" size={13} />Gaps found</span></div>} title="Here’s what we understand so far.">This first pass separates public evidence from interpretation. The gaps—not a generic script—guide the call with {company}.</PageHead>
     <div className="tabs">{(["canvas", "flow", "questions"] as const).map((item) => <button aria-selected={tab === item} className={tab === item ? "active" : ""} key={item} onClick={() => setTab(item)} role="tab" type="button">{item === "canvas" ? "Business model" : item === "flow" ? "Flow of work" : "Call questions"}</button>)}</div>
-    {tab === "canvas" ? <><div className="legend"><Pill tone="inferred">Public research</Pill><span>source-linked, not client-verified</span><Pill tone="assumed">Assumed</Pill><span>advisor hypothesis</span><Pill tone="missing">Missing</Pill><span>required gap</span></div>{openAIUsed ? <div className="research-source-note"><Icon name="spark" size={17} /><span><strong>OpenAI web search used</strong>{research?.providerModel} · {research?.sourceCount ?? 0} public source(s) retained</span></div> : research?.providerStatus === "failed" ? <div className="research-source-note warning"><Icon name="info" size={17} /><span><strong>Web search was unavailable</strong>Deterministic website research was retained; no claims were invented.</span></div> : null}<div aria-label="Business Model Canvas" className="canvas">{canvasBlocks.map(({ title, area }) => { const blockFacts = (research?.facts ?? []).filter((fact) => fact.canvasBlock?.toLowerCase() === title.toLowerCase()).slice(0, 2); return <article className={`canvas-block canvas-${area}`} key={area}><h3>{title}</h3><ul>{blockFacts.length ? blockFacts.map((fact) => <li key={`${fact.statement}${fact.sourceUrl ?? ""}`}><span>{fact.statement}</span><Pill tone="inferred">Public</Pill></li>) : <li><span>Client confirmation needed for {title.toLowerCase()}.</span><Pill tone="missing">Missing</Pill></li>}</ul></article>; })}</div></> : null}
-    {tab === "flow" ? <div className="flow-panel"><p className="eyebrow">Flow to trace live</p><div className="flow">{["Demand enters", "Work is qualified", "Work is committed", "Work is scheduled", "Work is delivered", "Outcome is closed"].map((item, index) => <div key={item}><span>{index + 1}</span><strong>{item}</strong><small>Confirm live</small></div>)}</div><div className="two-columns"><article><h3>What the public source supports</h3><p>{publicSummary}</p></article><article><h3>What remains unknown</h3><p>{gaps.join(", ")}.</p></article></div></div> : null}
-    {tab === "questions" ? <div className="question-list">{questions.map(([title, text, tone], index) => <article key={title}><b>0{index + 1}</b><div><Pill tone={tone as Tone}>{tone === "missing" ? "Baseline gap" : "Internal · unconfirmed"}</Pill><h3>{title}</h3><p>{text}</p></div></article>)}</div> : null}
+    {tab === "canvas" ? <><div className="legend"><Pill tone="known">Client stated</Pill><span>the client’s own words</span><Pill tone="inferred">Public research</Pill><span>source-linked, not client-verified</span><Pill tone="assumed">Advisor note</Pill><span>hypothesis</span><Pill tone="missing">Missing</Pill><span>required gap</span></div>{openAIUsed ? <div className="research-source-note"><Icon name="spark" size={17} /><span><strong>OpenAI web search used</strong>{research?.providerModel} · {research?.sourceCount ?? 0} public source(s) retained</span></div> : research?.providerStatus === "failed" ? <div className="research-source-note warning"><Icon name="info" size={17} /><span><strong>Web search was unavailable</strong>Deterministic website research was retained; no claims were invented.</span></div> : null}<p className="canvas-origin"><Icon name={canvas ? "check" : "info"} size={15} />{canvas ? "Showing the canonical Canvas, including client-stated corrections captured on the call." : "No committed Canvas yet — showing first-pass public research facts only."}</p><div aria-label="Business Model Canvas" className="canvas">{canvasBlocks.map(({ title, area }) => { const blockClaims = claimsForBlock(canvas, research?.facts ?? [], title); return <article className={`canvas-block canvas-${area}`} key={area}><h3>{title}</h3><ul>{blockClaims.length ? blockClaims.map((claim) => <li className={claim.provenance === "client-stated" ? "client-stated" : ""} key={`${claim.statement}${claim.sourceUrl ?? ""}`}><span>{claim.statement}</span><Pill tone={evidenceTone[claim.provenance] ?? "neutral"}>{evidenceLabel[claim.provenance] ?? claim.provenance}</Pill></li>) : <li><span>Client confirmation needed for {title.toLowerCase()}.</span><Pill tone="missing">Missing</Pill></li>}</ul></article>; })}</div></> : null}
+    {tab === "flow" ? <div className="flow-panel"><div className="legend"><p className="eyebrow">Flow to trace live</p><Pill tone="inferred">Public research</Pill><Pill tone="assumed">Advisor note</Pill><Pill tone="missing">Gap</Pill><span>no step is client-confirmed until the client traces a real case</span></div>
+      {flow.length ? <ol className="value-flow">{flow.map((step) => <li key={step.id}><header><span>{step.order}</span><div><strong>{step.name}</strong><small>{step.description}</small></div><Pill tone={evidenceTone[step.evidenceStatus] ?? "neutral"}>{evidenceLabel[step.evidenceStatus] ?? step.evidenceStatus}</Pill></header>
+        <dl><div><dt>Actor</dt><dd>{step.actor || "Not established"}</dd></div><div><dt>System</dt><dd>{step.system || "Not established"}</dd></div><div><dt>Input</dt><dd>{step.input || "Not established"}</dd></div><div><dt>Output</dt><dd>{step.output || "Not established"}</dd></div></dl>
+        {step.confirmationQuestion ? <p className="flow-confirm"><Icon name="mic" size={15} /><span><b>Confirm live</b>{step.confirmationQuestion}</span></p> : null}
+        {step.sourceUrls.length ? <p className="flow-sources">{step.sourceUrls.map((url) => <a href={url} key={url} rel="noopener noreferrer" target="_blank">{url}<Icon name="external" size={12} /></a>)}</p> : null}
+      </li>)}</ol> : <p className="registry-empty">No flow has been proposed yet — run research for this engagement. No default six-step flow is substituted.</p>}
+      <div className="two-columns"><article><h3>What the public source supports</h3><p>{publicSummary}</p></article><article><h3>What remains unknown</h3><p>{gaps.join(", ")}.</p></article></div></div> : null}
+    {tab === "questions" ? <div className="discovery">{script.generic ? <div className="research-source-note warning"><Icon name="info" size={17} /><span><strong>Generic fallback script</strong>Research produced no client-specific discovery questions. These four prompts are generic and assert nothing about {company}.</span></div> : null}
+      {discoverySections.map((section) => { const items = script.questions.filter((item) => item.section === section); return items.length ? <section className="discovery-section" key={section}><header><p className="eyebrow">{section}</p><h3>{sectionLabels[section]}</h3></header><div className="question-list">{items.map((item, index) => <article key={item.id}><b>{String(index + 1).padStart(2, "0")}</b><div><div className="question-meta"><Pill tone={evidenceTone[item.evidenceStatus] ?? "neutral"}>{evidenceLabel[item.evidenceStatus] ?? item.evidenceStatus}</Pill>{item.required ? <Pill tone="missing">Required</Pill> : null}<Pill>{item.expectedAnswerType}</Pill>{item.canvasBlock ? <Pill tone="inferred">{item.canvasBlock}</Pill> : null}</div><h3>{item.question}</h3><p>{item.whyItMatters}</p><div className="assumption"><span>What we found publicly</span><p>{item.publicAssumption}</p></div>{item.followUps.length ? <ul className="follow-ups">{item.followUps.map((follow) => <li key={follow}>{follow}</li>)}</ul> : null}</div></article>)}</div></section> : null; })}
+      {research?.constraintHypotheses?.length ? <section className="discovery-section"><header><p className="eyebrow">internal only</p><h3>Constraint hypotheses to test — never read aloud as fact</h3></header><ul className="hypothesis-list">{research.constraintHypotheses.map((item) => <li key={`${item.canvasBlock}${item.type}`}><Pill tone="assumed">{item.type} · {item.canvasBlock}</Pill><strong>{item.confirmationCondition}</strong><small>Kill this hypothesis if: {item.killCondition}</small></li>)}</ul></section> : null}</div> : null}
     <div className="page-actions"><div><Button variant="quiet">Correct research</Button><Button variant="quiet">Add a source</Button><Button variant="quiet">Research a gap</Button></div><Button icon="arrow" onClick={onPrepare}>Prepare the client</Button></div>
     <div className="apollo"><Icon name="spark" size={15} />Apollo remains off. Paid enrichment appears only beside a named gap, with credit cost shown before approval.</div>
   </section>;
@@ -612,34 +888,41 @@ function Prepare({ briefSent, contact, onBack, onCall, onSend }: { briefSent: bo
 }
 
 function Call(props: {
-  company: string; consent: "pending" | "recorded" | "not-recorded"; index: number; answer: string; notes: string;
+  company: string; consent: "pending" | "recorded" | "not-recorded"; generic: boolean; index: number; total: number;
+  question: DiscoveryQuestion; answer: string; notes: string; value: string;
   onConsent: (v: "pending" | "recorded" | "not-recorded") => void; onAnswer: (v: string) => void; onNotes: (v: string) => void;
-  onPrevious: () => void; onNext: () => void; onExit: () => void;
+  onValue: (v: string) => void; onPrevious: () => void; onNext: () => void; onExit: () => void;
 }) {
-  const topic = callTopics[props.index];
+  const question = props.question;
+  const needsValue = question.expectedAnswerType === "number" || question.expectedAnswerType === "person";
   return <section className="call-mode"><header><div><i />Client call view · {props.company}</div><button onClick={props.onExit} type="button">Exit call view</button></header>
     {props.consent === "pending" ? <div className="consent-gate"><span><Icon name="mic" size={29} /></span><p className="eyebrow">Before the conversation begins</p><h1>Confirm recording consent.</h1><blockquote>“With your permission, we’ll record and transcribe this session so we quote you accurately rather than paraphrasing you.”</blockquote><p>Do not begin transcript capture until the disclosure and applicable consent requirements are satisfied.</p><Button icon="check" onClick={() => props.onConsent("recorded")}>Consent confirmed</Button><button className="call-link" onClick={() => props.onConsent("not-recorded")} type="button">Continue without recording</button></div> :
-      <div className="call-content"><div className="call-progress"><span>Conversation {props.index + 1} of {callTopics.length}</span><div><i style={{ width: `${((props.index + 1) / callTopics.length) * 100}%` }} /></div><span>{topic[0]}</span></div>
-        <div className="question"><p className="call-opening">Let’s make sure we understand how your business actually works.</p><h1>{topic[1]}</h1><p className="why">{topic[2]}</p><div className="assumption"><span>What we found publicly</span><p>{topic[3]}</p></div>
-          <div className="answer-buttons">{["That’s right", "Correct it", "We don’t know yet"].map((choice) => <button className={props.answer === choice ? "selected" : ""} key={choice} onClick={() => props.onAnswer(choice)} type="button">{props.answer === choice ? <Icon name="check" size={17} /> : null}{choice}</button>)}</div>
+      <div className="call-content"><div className="call-progress"><span>Conversation {props.index + 1} of {props.total}</span><div><i style={{ width: `${((props.index + 1) / props.total) * 100}%` }} /></div><span>{sectionLabels[question.section] ?? question.section}</span></div>
+        <div className="question"><p className="call-opening">Let’s make sure we understand how your business actually works.</p>{props.generic ? <p className="call-generic"><Icon name="info" size={14} />Generic fallback question — research produced no client-specific script.</p> : null}<h1>{question.question}</h1><p className="why">{question.whyItMatters}</p><div className="call-tags"><Pill tone={evidenceTone[question.evidenceStatus] ?? "neutral"}>{evidenceLabel[question.evidenceStatus] ?? question.evidenceStatus}</Pill>{question.required ? <Pill tone="missing">Required answer</Pill> : null}{question.canvasBlock ? <Pill tone="inferred">{question.canvasBlock}</Pill> : null}</div><div className="assumption"><span>What we found publicly</span><p>{question.publicAssumption}</p></div>
+          <div className="answer-buttons">{["That’s right", "Correct it", "We don’t know yet"].map((choice) => <button className={props.answer === choice ? "selected" : ""} key={choice} onClick={() => props.onAnswer(choice)} type="button">{props.answer === choice ? <Icon name="check" size={17} /> : null}{choice}</button>)}{needsValue ? <label className="answer-value"><span>{question.expectedAnswerType === "number" ? "Stated number" : "Named person"}</span><input onChange={(e) => props.onValue(e.target.value)} placeholder={question.expectedAnswerType === "number" ? "e.g. 42 bids per month" : "e.g. Maya Chen, COO"} value={props.value} /></label> : null}</div>
+          {question.followUps.length ? <ul className="follow-ups">{question.followUps.map((follow) => <li key={follow}>{follow}</li>)}</ul> : null}
           <label className="call-notes"><span>Conversation notes</span><textarea onChange={(e) => props.onNotes(e.target.value)} placeholder="Capture the client’s words, numbers, corrections, and named owners…" rows={5} value={props.notes} /></label>
-        </div><div className="call-actions"><Button disabled={props.index === 0} onClick={props.onPrevious} variant="secondary"><Icon name="back" size={16} />Back</Button><Button icon="arrow" onClick={props.onNext}>{props.index === callTopics.length - 1 ? "Finish guided call" : "Next question"}</Button></div><div className={`consent-status ${props.consent}`}><Icon name={props.consent === "recorded" ? "mic" : "shield"} size={14} />{props.consent === "recorded" ? "Recording consent confirmed" : "Continuing without recording"}</div>
+        </div><div className="call-actions"><Button disabled={props.index === 0} onClick={props.onPrevious} variant="secondary"><Icon name="back" size={16} />Back</Button><Button icon="arrow" onClick={props.onNext}>{props.index === props.total - 1 ? "Finish guided call" : "Next question"}</Button></div><div className={`consent-status ${props.consent}`}><Icon name={props.consent === "recorded" ? "mic" : "shield"} size={14} />{props.consent === "recorded" ? "Recording consent confirmed" : "Continuing without recording"}</div>
       </div>}
   </section>;
 }
 
 function Transcript(props: {
   callNumber: 1 | 2; company: string; date: string; method: "fireflies" | "paste" | "upload"; text: string; fileName: string;
+  fileError: string; fileReading: boolean; fileSummary: string; ready: boolean;
   onBack: () => void; onDate: (v: string) => void; onMethod: (v: "fireflies" | "paste" | "upload") => void;
-  onText: (v: string) => void; onFile: (v: string) => void; onAnalyze: () => void;
+  onText: (v: string) => void; onFile: (file: File | null) => void; onAnalyze: () => void;
 }) {
   return <section className="guided narrow"><Back onClick={props.onBack}>Guided call</Back><PageHead eyebrow="Call · Transcript evidence" title="Let’s turn the conversation into evidence.">Use the full transcript—not only a generated summary—so every correction and finding can point back to the client’s words.</PageHead>
     <div className="meeting-anchor"><div><span>Client</span><strong>{props.company}</strong></div><label><span>Meeting date</span><input onChange={(e) => props.onDate(e.target.value)} type="date" value={props.date} /></label></div>
     <div className="method-cards">{[["fireflies", "mic", "Import from Fireflies", "Choose a connected meeting"], ["paste", "document", "Paste transcript text", "Keep the original wording"], ["upload", "upload", "Upload a transcript", "TXT, VTT, SRT, or DOCX"]].map(([method, icon, title, sub]) => <button className={props.method === method ? "selected" : ""} key={method} onClick={() => props.onMethod(method as typeof props.method)} type="button"><span><Icon name={icon as IconName} size={19} /></span><strong>{title}</strong><small>{sub}</small></button>)}</div>
     <div className="method-panel">{props.method === "fireflies" ? <div className="connector-empty"><Icon name="mic" size={24} /><div><strong>Fireflies transcript ID</strong><p>Enter a processed meeting ID after connecting Fireflies, or paste/upload now.</p><input onChange={(event) => props.onText(event.target.value)} placeholder="Transcript ID" value={props.text} /></div><Button onClick={() => props.onMethod("paste")} variant="secondary">Paste instead</Button></div> : null}
       {props.method === "paste" ? <label><span>Full transcript</span><textarea onChange={(e) => props.onText(e.target.value)} placeholder="[00:00] Speaker: …" rows={12} value={props.text} /></label> : null}
-      {props.method === "upload" ? <label className="upload large"><input accept=".txt,.vtt,.srt,.doc,.docx" onChange={(e) => props.onFile(e.target.files?.[0]?.name ?? "")} type="file" /><span><Icon name="upload" size={23} /></span><span><strong>{props.fileName || "Choose transcript file"}</strong><small>Speaker labels and timestamps will be preserved when available.</small></span></label> : null}
-    </div><div className="action-row"><p><Icon name="spark" size={17} />We’ll compare this with original research, surface contradictions, and keep gaps explicit.</p><Button disabled={(props.method === "paste" && !props.text.trim()) || (props.method === "upload" && !props.fileName)} icon="arrow" onClick={props.onAnalyze}>Analyze transcript</Button></div>
+      {props.method === "upload" ? <><label className="upload large"><input accept=".txt,.vtt,.srt,.json,.doc,.docx" onChange={(e) => props.onFile(e.target.files?.[0] ?? null)} type="file" /><span><Icon name="upload" size={23} /></span><span><strong>{props.fileName || "Choose transcript file"}</strong><small>{props.fileReading ? "Reading the file…" : props.fileSummary || "TXT, VTT, SRT, or JSON is read as text; DOCX is uploaded for server-side extraction. 2 MB limit."}</small></span></label>
+        {props.fileReading ? <p className="upload-state" role="status"><Icon name="refresh" size={15} />Reading {props.fileName}…</p> : null}
+        {props.fileError ? <p className="upload-state error" role="alert"><Icon name="info" size={15} />{props.fileError}</p> : null}
+        {props.ready && !props.fileReading && !props.fileError ? <p className="upload-state ready"><Icon name="check" size={15} />{props.fileName} is parsed and ready to upload. The file content itself is sent — not just its name.</p> : null}</> : null}
+    </div><div className="action-row"><p><Icon name="spark" size={17} />We’ll compare this with original research, surface contradictions, and keep gaps explicit.</p><Button disabled={(props.method === "paste" && !props.text.trim()) || (props.method === "upload" && (!props.ready || props.fileReading))} icon="arrow" onClick={props.onAnalyze}>Analyze transcript</Button></div>
   </section>;
 }
 
@@ -675,12 +958,15 @@ function Findings({ consent, onApprove, onBack, onConsent, owner, synthesis }: {
   </section>;
 }
 
-function Deliver({ approved, generated, onBack, onGenerate, onSync }: { approved: boolean; generated: string[]; onBack: () => void; onGenerate: () => void; onSync: () => void }) {
+function Deliver({ approved, generated, onActions, onBack, onGenerate, onOperate, onSync }: {
+  approved: boolean; generated: string[]; onActions: () => void; onBack: () => void;
+  onGenerate: () => void; onOperate: (screen: Screen) => void; onSync: () => void;
+}) {
   return <section className="guided wide deliver"><Back onClick={onBack}>Findings</Back><PageHead eyebrow="Deliver · Approved release" side={<Pill tone={approved ? "success" : "assumed"}>{approved ? "Release approved" : "Provisional release"}</Pill>} title="Turn the finding into usable work.">Every deliverable carries the evidence label, named owner, scope, guardrails, and measurement plan forward.</PageHead>
     <div className="deliver-banner"><div><span>Primary deliverable</span><strong>One constraint → one prescription → one metric → one named human owner</strong></div><div><span>Evidence label</span><strong>Provisional · baseline instrumentation required</strong></div></div>
     <div className="deliver-grid">{deliverables.map(([title, text]) => { const done = generated.includes(title); return <article key={title}><div className="deliver-card-meta"><span className="deliver-icon"><Icon name="document" size={20} /></span><Pill tone={done ? "success" : "neutral"}>{done ? "Generated" : "Ready to draft"}</Pill></div><h3>{title}</h3><p>{text}</p><button onClick={onGenerate} type="button">{done ? "Regenerate suite" : "Generate suite"}<Icon name={done ? "refresh" : "arrow"} size={14} /></button></article>; })}</div>
-    <div className="page-actions"><p><Icon name="lock" size={16} />The CRM action creates a reviewed write-back intent. It does not change Google Sheets automatically.</p><Button icon="arrow" onClick={onSync} variant="secondary">Prepare CRM write-back</Button></div>
-    <div className="sprint-path"><div className="sprint-path-heading"><p className="eyebrow">Implementation roadmap</p><span>After diagnosis approval</span></div>{[["1", "Remove & measure", "Instrument, intervene, measure before and after."], ["2", "Constraint migration note", "Record where the bottleneck moved."], ["3", "Catalog write-back", "Compound the reusable evidence pattern."]].map(([number, title, text], index) => <div className="sprint-step" key={title}>{index ? <Icon className="sprint-arrow" name="arrow" /> : null}<span className="sprint-number">{number}</span><section><strong>{title}</strong><small>{text}</small></section></div>)}</div>
+    <div className="page-actions"><p><Icon name="lock" size={16} />The CRM action creates a reviewed write-back intent. It does not change Google Sheets automatically.</p><div><Button onClick={onActions} variant="secondary">Reviewed actions <Icon name="lock" size={14} /></Button><Button icon="arrow" onClick={onSync} variant="secondary">Prepare CRM write-back</Button></div></div>
+    <div className="sprint-path"><div className="sprint-path-heading"><p className="eyebrow">Implementation roadmap</p><span>After diagnosis approval</span></div>{([["1", "Activate the sprint", "Fixed scope, named owner, measurement clock started.", "sprint"], ["2", "Remove & measure", "Capture the ending metric; the server decides whether a delta is claimable.", "measure"], ["3", "Catalog write-back", "Compound the reusable evidence pattern.", "catalog"]] as Array<[string, string, string, Screen]>).map(([number, title, text, target], index) => <button className="sprint-step" key={title} onClick={() => onOperate(target)} type="button">{index ? <Icon className="sprint-arrow" name="arrow" /> : null}<span className="sprint-number">{number}</span><section><strong>{title}</strong><small>{text}</small></section><Icon name="chevron" size={15} /></button>)}</div>
   </section>;
 }
 

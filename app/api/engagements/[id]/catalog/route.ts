@@ -1,4 +1,4 @@
-import { runResearch } from "@/lib/actions";
+import { writeCatalogEntry } from "@/lib/actions";
 import { requirePrincipal } from "@/lib/auth";
 import { engagementId, readJson, route } from "@/lib/http";
 
@@ -8,7 +8,7 @@ export async function POST(request: Request, context: Context) {
   return route(async () => {
     const principal = requirePrincipal(request);
     const id = await engagementId(context);
-    const input = await readJson<{ sourceUrl?: string }>(request);
-    return runResearch(id, principal, input.sourceUrl);
-  });
+    const input = await readJson<{ industryContext?: string; reusableFor?: string }>(request);
+    return writeCatalogEntry(id, principal, input);
+  }, { status: 201 });
 }

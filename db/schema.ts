@@ -2,6 +2,7 @@ import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
 export const engagements = sqliteTable("engagements", {
   id: text("id").primaryKey(),
+  ownerId: text("owner_id").notNull().default(""),
   client: text("client").notNull(),
   website: text("website").notNull().default(""),
   primaryContact: text("primary_contact").notNull().default(""),
@@ -30,6 +31,7 @@ export const engagements = sqliteTable("engagements", {
 export const artifacts = sqliteTable("artifacts", {
   id: text("id").primaryKey(),
   engagementId: text("engagement_id").notNull(),
+  ownerId: text("owner_id").notNull().default(""),
   kind: text("kind").notNull(),
   title: text("title").notNull(),
   status: text("status").notNull(),
@@ -44,6 +46,7 @@ export const artifacts = sqliteTable("artifacts", {
 export const transcripts = sqliteTable("transcripts", {
   id: text("id").primaryKey(),
   engagementId: text("engagement_id").notNull(),
+  ownerId: text("owner_id").notNull().default(""),
   callNumber: integer("call_number").notNull(),
   source: text("source").notNull(),
   sourceId: text("source_id"),
@@ -57,6 +60,7 @@ export const transcripts = sqliteTable("transcripts", {
 export const activities = sqliteTable("activities", {
   id: text("id").primaryKey(),
   engagementId: text("engagement_id").notNull(),
+  ownerId: text("owner_id").notNull().default(""),
   client: text("client").notNull(),
   activityType: text("activity_type").notNull(),
   summary: text("summary").notNull(),
@@ -70,8 +74,12 @@ export const activities = sqliteTable("activities", {
 export const intents = sqliteTable("intents", {
   id: text("id").primaryKey(),
   engagementId: text("engagement_id").notNull(),
+  ownerId: text("owner_id").notNull().default(""),
   type: text("type").notNull(),
   status: text("status").notNull(),
   payloadJson: text("payload_json").notNull(),
+  resultJson: text("result_json").notNull().default("{}"),
   createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at"),
+  executedAt: text("executed_at"),
 });

@@ -1,19 +1,31 @@
+import { requirePrincipal } from "@/lib/auth";
 import { readJson, route } from "@/lib/http";
 import { validatePublicUrl } from "@/lib/research";
 import { createEngagement, listEngagements, type CreateEngagementInput } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
 
-export async function GET() {
-  return route(async () => ({ engagements: await listEngagements() }));
+export async function GET(request: Request) {
+  return route(async () => {
+    const principal = requirePrincipal(request);
+    return { engagements: await listEngagements(principal.ownerId) };
+  });
 }
 
 export async function POST(request: Request) {
   return route(async () => {
+    const principal = requirePrincipal(request);
     const input = await readJson<CreateEngagementInput>(request);
     const website = input.website?.trim()
       ? validatePublicUrl(input.website).toString()
       : "";
-    return { engagement: await createEngagement({ ...input, website }) };
+    return {
+      engagement: await createEngagement({
+        ...input,
+        website,
+        advisor: input.advisor?.trim() || principal.displayName,
+        ownerId: principal.ownerId,
+      }),
+    };
   }, { status: 201 });
 }
