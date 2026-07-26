@@ -8,37 +8,51 @@ The governing outcome is:
 
 ## Current status
 
-**Snapshot:** 2026-07-25  
+**Snapshot:** 2026-07-26  
 **Application version:** `0.1.0`  
-**Current branch:** `main`  
-**Implementation baseline commit:** `11c0fd34c796dd09ae31e11fb70cec5f23c045bc`  
+**Current branch:** `claude/repo-overview-b7tlrs`  
 **Production:** [Tier 4 Advisor Cockpit](https://tier4-advisor-cockpit.mattrob333.chatgpt.site)  
-**Production access:** OpenAI Sites owner-only
+**Production access:** OpenAI Sites owner-only, plus app-layer advisor scoping
 
-This is a working single-advisor prototype, not yet a production-ready multi-advisor system. The research Canvas is real and source-backed. Several downstream surfaces still use templates or fixed demo scaffolds, and most external integrations currently stop at reviewed action intents.
+The workflow now runs end to end, from intake to a catalog write-back, and every screen downstream of research is driven by that engagement's own research rather than a fixed demo scaffold. Records are scoped to the owning advisor in SQL. External writes are implemented and reachable only through an explicitly approved intent.
+
+Transcript synthesis is deterministic rather than model-assisted, and formal documents are Markdown plus printable HTML rather than native DOCX or PDF. Those are the two most significant remaining limits; both are listed in the table below.
 
 ### Capability truth table
 
 | Capability | Current truth |
 | --- | --- |
 | Engagement intake and resume | Working; persisted in Cloudflare D1 |
+| App authentication and tenancy | Working; every row carries `owner_id` and every query is scoped in SQL. `REQUIRE_ADVISOR_AUTH=1` refuses unauthenticated requests |
 | Public website extraction | Working deterministic fallback |
 | OpenAI web research | Working when `OPENAI_API_KEY` is configured |
-| Business Model Canvas screen | Dynamic and populated from source-backed research facts |
-| Flow of Work screen | Fixed six-step scaffold; not yet generated from company research |
-| Research-tab questions | Partly dynamic; hypotheses come from research but visible phrasing is generic |
-| Guided client call | Fixed six-question demo script; not yet bound to research |
-| Pre-Call Readiness Brief | Working draft, approval, and send-intent workflow; no email is sent |
+| Business Model Canvas screen | Dynamic, and read from the one canonical Canvas that research writes and client evidence corrects |
+| Flow of Work screen | Generated per company from `research.valueFlow`; unsupported steps are explicit gaps with confirmation questions |
+| Research-tab questions | Generated per company from `research.discoveryQuestions`, each anchored to a fact, gap, Canvas block, flow step, or hypothesis |
+| Guided client call | Driven by the same discovery questions; number and person answers capture the value, which is how a baseline stops being Missing |
+| Pre-Call Readiness Brief | Working draft, approval, and send-intent workflow |
 | Transcript paste | Working |
-| Transcript file upload | UI only; currently submits a filename rather than file contents |
+| Transcript file upload | Working; TXT, VTT, SRT, JSON and DOCX are decoded to real speaker- and timestamp-attributed lines |
 | Fireflies import | Backend adapter exists; requires `FIREFLIES_API_KEY` |
-| Transcript synthesis | Deterministic keyword and metric extraction, not model-driven analysis |
+| Transcript synthesis | Deterministic. Reconciles against research, and extracts contradictions, Canvas corrections, flow confirmations, decisions, tasks, roles and metrics. Not model-driven analysis |
 | Findings and approval gates | Working; missing baselines remain provisional |
-| Deliverable generation | Internal Markdown artifacts; not Google Docs, DOCX/PDF, or PandaDoc |
-| Audit Report Canvas | Known defect: generator reads a canonical Canvas field that research does not populate |
-| Google Sheets CRM | Reviewed write-back intent only; no external write |
-| Google Docs, Gmail, PandaDoc | Contracts/documentation only; no direct runtime adapter |
-| App authentication and tenancy | Not implemented; Sites currently supplies the outer owner-only access boundary |
+| Deliverable generation | Markdown artifacts plus a self-contained printable HTML rendering. No native DOCX or PDF generator; Google Docs conversion is the route to a formal document |
+| Audit Report Canvas | Working; reads the canonical Canvas that research now populates |
+| Sprint, measurement, catalog | Working. A before/after delta is computed only from two client-confirmed readings in the same unit and period |
+| Resend email | Implemented; sends only an explicitly approved intent |
+| Google Sheets CRM | Implemented; appends or updates the matched row only from an explicitly approved intent |
+| Google Docs / Drive | Implemented; creates the document only from an explicitly approved publication intent |
+| Gmail | No adapter. Resend is the implemented sender |
+| Apollo, PandaDoc | Contracts only; connector-first, no direct adapter |
+| Exa, Firecrawl | Not implemented |
+
+### Where a number can and cannot appear
+
+The product's governing claim is a measured one, so the rules that stop it becoming a guess are worth stating plainly:
+
+- A baseline is `Confirmed` only with a value, unit, period, source, speaker and timestamp from a client-stated line.
+- A before/after delta is computed only from two client-confirmed readings in the same unit and period. Otherwise the app records an explicit blocked reason and claims no number.
+- Whether a change is an *improvement* is never inferred. The arithmetic direction is reported as `increased` or `decreased`; calling it improved or worsened requires the advisor to declare which way is better for that metric, because a shorter turnaround is a win while a smaller throughput is not.
 
 For the detailed evidence and implementation sequence, start with [DEVELOPER_HANDOFF.md](./DEVELOPER_HANDOFF.md).
 
@@ -92,10 +106,10 @@ npm test
 The current validation suite contains:
 
 - two rendered-frontend checks;
-- fifteen backend workflow, evidence, consent, approval, URL-safety, and failure-mode checks;
+- twenty-six backend checks covering workflow, evidence, consent, approval, URL safety, failure modes, Canvas construction, research-driven flow and questions, transcript file decoding, delta computation, and document rendering;
 - a complete vinext production build.
 
-These tests do not yet verify that company research changes the value flow, live-call script, transcript interpretation, and final document content end to end.
+One of those checks runs research for two dissimilar companies and asserts the resulting value flows and question sets differ materially while both still cover every required discovery section — the regression guard for the defect where every engagement received the same six steps and six questions.
 
 ## Configuration
 
@@ -103,22 +117,25 @@ Secrets belong in `.env.local` for local development and in the hosting provider
 
 | Variable | Current use |
 | --- | --- |
+| `REQUIRE_ADVISOR_AUTH` | Set to `1` to refuse unauthenticated requests. Required before exposing the app to more than one advisor |
+| `LOCAL_ADVISOR_EMAIL` | Local development identity used when no Sites identity header is present |
+| `LEGACY_OWNER_EMAIL` | Advisor that claims pre-tenancy rows the first time `owner_id` is added |
 | `OPENAI_API_KEY` | Active OpenAI Responses API web research |
 | `OPENAI_RESEARCH_MODEL` | Optional model override; defaults to `gpt-5.6-sol` |
 | `FIREFLIES_API_KEY` | Active backend transcript import when configured |
 | `APOLLO_API_KEY` | Reserved; direct adapter not implemented |
 | `PANDADOC_API_KEY` | Reserved; direct adapter not implemented |
 | `PANDADOC_TEMPLATE_UUID` | Reserved for an approved PandaDoc template |
-| `GOOGLE_CLIENT_ID` | Reserved for Google OAuth adapters |
-| `GOOGLE_CLIENT_SECRET` | Reserved for Google OAuth adapters |
+| `GOOGLE_CLIENT_ID` | Google OAuth for the Sheets and Docs adapters |
+| `GOOGLE_CLIENT_SECRET` | Google OAuth for the Sheets and Docs adapters |
 | `GOOGLE_REDIRECT_URI` | Reserved for Google OAuth adapters |
-| `GOOGLE_REFRESH_TOKEN` | Reserved for server-side Google access |
-| `GOOGLE_SHEETS_ID` | Identifies the intended lightweight CRM workbook |
-| `GOOGLE_DRIVE_ROOT_FOLDER_ID` | Reserved for approved Drive/Docs artifacts |
-| `RESEND_API_KEY` | Reserved; delivery adapter not implemented |
-| `EMAIL_FROM` / `EMAIL_REPLY_TO` | Reserved email identities |
+| `GOOGLE_REFRESH_TOKEN` | Server-side Google access for approved writes |
+| `GOOGLE_SHEETS_ID` | The lightweight CRM workbook written by an approved intent |
+| `GOOGLE_DRIVE_ROOT_FOLDER_ID` | Destination folder for approved Drive/Docs artifacts |
+| `RESEND_API_KEY` | Active send adapter for an approved readiness-brief intent |
+| `EMAIL_FROM` / `EMAIL_REPLY_TO` | Sender identities used by the Resend adapter |
 
-The intended CRM workbook is [Tier 4 Throughput Audit CRM](https://docs.google.com/spreadsheets/d/1ANLc7vhkhkJBtkvoeLDeuXJw4yIlCJcyz3j6B_69GX8). The application does not currently write to it.
+The CRM workbook is [Tier 4 Throughput Audit CRM](https://docs.google.com/spreadsheets/d/1ANLc7vhkhkJBtkvoeLDeuXJw4yIlCJcyz3j6B_69GX8). The application writes to it only when the Google credentials above are configured and a CRM write-back intent has been explicitly approved and then executed.
 
 See [INTEGRATIONS.md](./INTEGRATIONS.md) for provider boundaries and setup details.
 
@@ -154,9 +171,13 @@ Exa and Firecrawl are not implemented in this repository.
 | Advisor workflow UI | `app/components/AdvisorCockpit.tsx` |
 | API routes | `app/api/` |
 | Workflow types and states | `lib/workflow.ts` |
-| Research safety and deterministic extraction | `lib/research.ts` |
+| Research safety, deterministic extraction, value flow, discovery questions | `lib/research.ts` |
+| Canonical Business Model Canvas | `lib/canvas.ts` |
+| Advisor identity and tenancy | `lib/auth.ts` |
 | OpenAI research | `lib/openai-research.ts`, `lib/openai-research-schema.ts` |
 | Transcript parsing and synthesis | `lib/transcript.ts` |
+| Transcript file decoding (TXT/VTT/SRT/JSON/DOCX) | `lib/transcript-files.ts` |
+| External write adapters | `lib/integrations/` |
 | Fireflies import | `lib/fireflies.ts` |
 | Approval and workflow actions | `lib/actions.ts`, `lib/guards.ts` |
 | Deliverable templates | `lib/deliverables.ts` |
@@ -176,26 +197,37 @@ Cloudflare D1 stores:
 - activity history;
 - reviewed external-action intents.
 
-The current schema has no advisor-user ID, tenant ID, organization ID, or row-level ownership field. Do not expose the app to multiple unrelated advisors until tenancy is added and enforced in every API route.
+Every table carries `owner_id`, and every read and write is scoped to the owning advisor inside the SQL itself. A row belonging to another advisor is indistinguishable from a row that does not exist.
+
+Identity comes from the OpenAI Sites headers. In local development the app falls back to a single local advisor so it runs with no auth infrastructure. **Set `REQUIRE_ADVISOR_AUTH=1` in any deployment reachable by more than one person** — it disables that fallback and refuses unauthenticated requests. Set `LEGACY_OWNER_EMAIL` before the first deploy that adds the column, so rows created before tenancy are claimed by the real advisor rather than the local fallback identity.
 
 ### API surface
 
 | Route | Purpose |
 | --- | --- |
-| `/api/engagements` | Create and list engagements |
-| `/api/engagements/:id` | Read or update an engagement |
-| `/api/engagements/:id/research` | Run deterministic and optional OpenAI research |
+| `/api/me` | Return the authenticated advisor principal |
+| `/api/engagements` | Create and list engagements (scoped to the advisor) |
+| `/api/engagements/:id` | Read or update an engagement, with its documents, activity and intents |
+| `/api/engagements/:id/research` | Run deterministic and optional OpenAI research; write the canonical Canvas |
 | `/api/engagements/:id/readiness-brief` | Generate, approve, or create a send intent |
-| `/api/engagements/:id/transcripts` | Process pasted transcript text |
+| `/api/engagements/:id/transcripts` | Process pasted text or an uploaded transcript file |
 | `/api/engagements/:id/fireflies` | Import a completed Fireflies transcript |
-| `/api/engagements/:id/synthesis` | Approve the Canvas-commit checkpoint |
+| `/api/engagements/:id/synthesis` | Process a transcript at the Canvas-commit checkpoint |
 | `/api/engagements/:id/finding` | Save or approve a diagnosis |
 | `/api/engagements/:id/deliverables` | Generate the internal deliverable suite |
+| `/api/engagements/:id/sprint` | Activate the sprint or update a sprint task |
+| `/api/engagements/:id/outcome` | Record the ending metric and the measured result |
+| `/api/engagements/:id/catalog` | Write the reusable pattern to the catalog |
 | `/api/engagements/:id/crm` | Create a reviewed CRM write-back intent |
+| `/api/engagements/:id/publish` | Create a reviewed document publication intent |
+| `/api/intents` | List reviewed external-action intents |
+| `/api/intents/:id` | Approve, reject, or execute an intent |
 | `/api/documents` | List artifacts |
-| `/api/documents/:id` | Read an artifact |
+| `/api/documents/:id` | Read an artifact; `?format=html` returns printable HTML |
 | `/api/activity` | Read activity history |
 | `/api/integrations` | Return server-side integration status |
+
+Every route requires an advisor principal and returns only that advisor's records.
 
 ## Governance invariants
 
@@ -209,6 +241,9 @@ The current schema has no advisor-user ID, tenant ID, organization ID, or row-le
 - Diagnosis approval requires client evidence and a named human owner.
 - External sends, document publication, paid enrichment, and CRM writes require separate approval.
 - Task-level role decomposition is limited to people inside the traced value flow.
+- A before/after delta requires two client-confirmed readings in the same unit and period; otherwise the app records why it is blocked and claims no number.
+- Whether a measured change is an improvement is declared by the advisor, never inferred from the arithmetic.
+- An external write executes only from an intent that was explicitly approved in a separate step.
 
 ## Hosting outside OpenAI Sites
 
@@ -250,4 +285,4 @@ openwiki code --update --print
 
 OpenWiki stores its own credentials outside this repository under `~/.openwiki/.env`. Do not copy the application's `.env.local` into the wiki or commit credentials. The repo-local `openwiki/INSTRUCTIONS.md` is the human-authored scope brief and should not be overwritten by normal wiki regeneration.
 
-No scheduled OpenWiki workflow has been enabled because this checkout has no configured Git remote and no CI secret policy yet.
+No scheduled OpenWiki workflow has been enabled because there is no CI secret policy for it yet.

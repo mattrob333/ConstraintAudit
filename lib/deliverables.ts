@@ -476,7 +476,7 @@ export function generateRoadmap(engagement: Engagement, finding: ConstraintFindi
   const tasks = sprintTaskLines(sprint);
   const measured = outcome
     ? outcome.delta
-      ? `Measured: ${outcome.delta.absolute} (${outcome.delta.percent}, ${outcome.delta.direction}), measured ${text(outcome.measuredAt)} by ${text(outcome.measuredBy) || "an unrecorded party"}.`
+      ? `Measured: ${outcome.delta.absolute} (${outcome.delta.percent}; the metric ${outcome.delta.direction}${outcome.delta.interpretation === "not-interpreted" ? ", interpretation not stated" : `, ${outcome.delta.interpretation}`}), measured ${text(outcome.measuredAt)} by ${text(outcome.measuredBy) || "an unrecorded party"}.`
       : `Measured on ${text(outcome.measuredAt) || "an unrecorded date"}: no delta is stated — ${text(outcome.deltaBlockedReason) || "the required confirmed readings are missing."}`
     : "Not yet measured.";
   return `# ${engagement.client} — Implementation Roadmap
@@ -575,7 +575,9 @@ export function generateOutcomeReport(
 ## Result
 
 ${outcome?.delta
-  ? `- Change: ${text(outcome.delta.absolute) || "unrecorded"} (${text(outcome.delta.percent) || "unrecorded"})\n- Direction: ${outcome.delta.direction}\n\nBoth readings above are client-confirmed. Nothing here is projected.`
+  ? `- Change: ${text(outcome.delta.absolute) || "unrecorded"} (${text(outcome.delta.percent) || "unrecorded"})\n- Direction: the metric ${outcome.delta.direction}\n- Interpretation: ${outcome.delta.interpretation === "not-interpreted"
+      ? "not stated. Whether this metric is better higher or lower was never declared, so this document does not call the change an improvement or a regression."
+      : outcome.delta.interpretation}\n\nBoth readings above are client-confirmed. Nothing here is projected.`
   : `No result is claimed. ${text(outcome?.deltaBlockedReason) || "The two client-confirmed readings required to compute a change are not both present."}
 
 No number, percentage, or direction of change may be reported, quoted, or reused until that is resolved.`}

@@ -16,7 +16,15 @@ import {
   vttToTranscriptText,
 } from "../lib/transcript-files.ts";
 import { parseTranscriptText, synthesizeTranscript } from "../lib/transcript.ts";
-import { CANVAS_BLOCKS, DISCOVERY_SECTIONS, canonicalCanvasBlock } from "../lib/workflow.ts";
+import {
+  CANVAS_BLOCKS,
+  DISCOVERY_SECTIONS,
+  canonicalCanvasBlock,
+  computeMetricDelta,
+} from "../lib/workflow.ts";
+
+const DAYS = { name: "Approval turnaround", value: "3", unit: "days", period: "per estimate", source: "Ana, call 1" };
+const confirmed = { baselineConfirmed: true };
 
 const RESEARCH = {
   sourceUrl: "https://acme.example/",
@@ -149,6 +157,44 @@ test("research proposes a company value flow and anchored questions with no API 
   );
 });
 
+test("two different companies produce materially different flows and questions", () => {
+  // The whole point of the research contract: the call script must belong to this
+  // company. Before this work every engagement got the same six steps and six questions.
+  const fabricator = synthesizeResearch("https://acme-fab.example/", {
+    title: "Acme Fabrication",
+    description: "Custom structural steel fabrication.",
+    text: "Request a quote for your project. We schedule installation on site and handle warranty support after handover.",
+  }, "Acme Fabrication");
+
+  const clinic = synthesizeResearch("https://brightsmile.example/", {
+    title: "Brightsmile Dental",
+    description: "Family dental care with same-week appointments.",
+    text: "Book an appointment online. New patients complete onboarding before their first consultation, and we bill insurance directly.",
+  }, "Brightsmile Dental");
+
+  const names = (result) => (result.valueFlow ?? []).map((step) => step.name);
+  assert.notDeepEqual(names(fabricator), names(clinic), "two companies must not share one flow");
+  assert.ok(
+    names(fabricator).some((name) => !names(clinic).includes(name)),
+    "at least one flow step must be unique to the fabricator",
+  );
+
+  const questions = (result) => (result.discoveryQuestions ?? []).map((item) => item.question);
+  const shared = questions(fabricator).filter((question) => questions(clinic).includes(question));
+  assert.ok(
+    shared.length < questions(fabricator).length,
+    "the two question sets must not be identical",
+  );
+
+  // Both must still cover every required section — divergence cannot cost coverage.
+  for (const result of [fabricator, clinic]) {
+    const sections = new Set((result.discoveryQuestions ?? []).map((item) => item.section));
+    for (const section of DISCOVERY_SECTIONS) {
+      assert.ok(sections.has(section), `${result.title} must still cover ${section}`);
+    }
+  }
+});
+
 test("research fallback still refuses to invent a flow it cannot see", () => {
   const result = synthesizeResearch("https://offline.example/", null, "Offline Co");
   assert.ok(result.valueFlow?.length);
@@ -207,6 +253,47 @@ test("uploaded transcript files carry real content, not a filename", async () =>
   const synthesis = synthesizeTranscript(decoded.text, { client: "Acme", callNumber: 1 });
   assert.ok(synthesis.constraintCandidate, "real file content produces real evidence");
   assert.equal(synthesis.quotes[0].provenance, "client-stated");
+});
+
+test("a measured change is never called an improvement without being told which way is better", () => {
+  const faster = { ...DAYS, value: "1", source: "Ana, sprint review" };
+
+  // Turnaround 3 days -> 1 day. The arithmetic went down; that is a win here, but the
+  // app cannot know that on its own, so it must refuse to characterize it.
+  const undeclared = computeMetricDelta(DAYS, faster, confirmed);
+  assert.equal(undeclared.delta.direction, "decreased");
+  assert.equal(undeclared.delta.interpretation, "not-interpreted");
+
+  const declaredLower = computeMetricDelta(DAYS, faster, { ...confirmed, improvedWhen: "lower" });
+  assert.equal(declaredLower.delta.interpretation, "improved");
+  assert.equal(declaredLower.delta.absolute, "-2 days");
+  assert.equal(declaredLower.delta.percent, "-66.7%");
+
+  // The same arithmetic on a throughput metric is a regression.
+  const declaredHigher = computeMetricDelta(DAYS, faster, { ...confirmed, improvedWhen: "higher" });
+  assert.equal(declaredHigher.delta.interpretation, "worsened");
+
+  const unchanged = computeMetricDelta(DAYS, { ...DAYS, source: "Ana, sprint review" }, confirmed);
+  assert.equal(unchanged.delta.direction, "unchanged");
+  assert.equal(unchanged.delta.interpretation, "unchanged");
+});
+
+test("a delta is blocked rather than invented whenever the readings do not support one", () => {
+  const unconfirmed = computeMetricDelta(DAYS, { ...DAYS, value: "1" }, { baselineConfirmed: false });
+  assert.equal(unconfirmed.delta, null);
+  assert.match(unconfirmed.blockedReason, /never confirmed/);
+
+  const mismatched = computeMetricDelta(DAYS, { ...DAYS, value: "18", unit: "hours" }, confirmed);
+  assert.equal(mismatched.delta, null);
+  // Reads "days per estimate", not "days per per estimate".
+  assert.equal(mismatched.blockedReason, "Readings are not comparable (days per estimate vs hours per estimate).");
+
+  const nonNumeric = computeMetricDelta(DAYS, { ...DAYS, value: "much faster" }, confirmed);
+  assert.equal(nonNumeric.delta, null);
+  assert.match(nonNumeric.blockedReason, /not numeric/);
+
+  const noBaseline = computeMetricDelta(undefined, { ...DAYS, value: "1" }, confirmed);
+  assert.equal(noBaseline.delta, null);
 });
 
 test("rendered document HTML escapes content instead of executing it", () => {

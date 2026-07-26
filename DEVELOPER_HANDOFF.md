@@ -1,10 +1,8 @@
 # Tier 4 Advisor Cockpit Developer Handoff
 
-**Handoff date:** 2026-07-25  
+**Handoff date:** 2026-07-26  
 **Audience:** the next AI agent or developer continuing implementation  
-**Repository root:** `C:\Users\mrobe\Documents\Codex\2026-07-24\sales-plugin-sales-openai-curated-remote\work\tier4-advisor-app`  
-**Branch at handoff:** `main`  
-**Implementation baseline commit:** `11c0fd34c796dd09ae31e11fb70cec5f23c045bc`  
+**Branch at handoff:** `claude/repo-overview-b7tlrs`  
 **Documentation handoff source:** current Git `HEAD`
 
 ## Mission
@@ -37,188 +35,64 @@ Do not turn the product into a general AI-opportunity audit. It is a throughput 
 
 ## Current implementation truth
 
+Verified on 2026-07-26: `npm run lint` clean, `npx tsc --noEmit` clean, `npm run build` succeeds, 2 rendered-frontend tests and 25 backend tests pass, and the full workflow was exercised against a running dev server.
+
 ### Working and verified
 
-- The UI supports fresh engagement, external migration, and resuming an engagement.
+- Fresh engagement, external migration, and resume.
 - Engagements, artifacts, transcripts, activities, and intents persist in Cloudflare D1.
-- Website input accepts bare domains after URL normalization.
-- Public URLs receive SSRF, redirect, DNS, and response-size checks.
-- OpenAI Responses API web search runs server-side when configured.
-- Research uses `store: false`, a strict structured response schema, and retained source URLs.
-- The Business Model Canvas screen displays source-backed research facts and explicit Missing blocks.
-- The approved Pre-Call Readiness Brief excludes internal questions, Canvas v0, and suspected findings.
-- Both calls contain the required recording/transcription disclosure.
-- Transcript paste preserves speaker labels, timestamps, and wording when the input format is supported.
-- Transcript evidence separates client, advisor, and unknown speakers.
-- Missing baselines remain provisional and numeric projected deltas remain blocked.
-- Canvas-commit and diagnosis approvals are explicit workflow gates.
+- Website input accepts bare domains; public URLs receive SSRF, redirect, DNS, and response-size checks.
+- OpenAI Responses API web search runs server-side when configured, with `store: false`, a strict schema, and retained source URLs.
+- Research produces a company-specific `valueFlow` and `discoveryQuestions`, deterministically with no API key and enriched when the key is present.
+- One canonical Business Model Canvas is written by research and corrected by client evidence. The audit report reads that Canvas.
+- The Flow of Work screen, the research question set, and the guided call script are all generated from that engagement's research.
+- Transcript upload decodes TXT, VTT, SRT, JSON, and DOCX into real speaker- and timestamp-attributed lines.
+- Transcript synthesis reconciles against research and produces contradictions, Canvas corrections, flow confirmations, decisions, tasks, roles, and metrics.
+- Every record is scoped to the owning advisor in SQL; a cross-owner row is indistinguishable from a missing row.
+- Resend, Google Sheets, and Google Docs adapters perform real writes, reachable only from an explicitly approved intent.
+- Sprint activation, outcome measurement, and catalog write-back complete the workflow.
+- Both calls contain the required recording/transcription disclosure, and consent gates transcript processing.
+- Missing baselines keep the finding provisional and block numeric projections.
 - Diagnosis approval requires client evidence and a named human owner.
-- Internal diagnosis, report, proposal, roadmap, and developer-specification artifacts can be generated.
-- The current validation suite passes: lint, TypeScript, build, 2 frontend tests, and 15 backend tests.
 
-### Partly working
+### Deliberately constrained, not missing
 
-- Research-tab questions use OpenAI-produced constraint metadata, but the frontend renders a generic `Could <type> be limiting <block>?` wrapper.
-- Fireflies has a real backend adapter, but no key is configured in the current local environment.
-- Integration-status truth exists in `/api/integrations`, but the Integration Center UI renders hardcoded statuses for everything except OpenAI.
-- Documents are persisted and readable inside the app, but they are Markdown records rather than formal external documents.
+These behave this way on purpose. Do not "fix" them without reading the reasoning.
 
-### Not implemented or defective
+- **A delta is refused rather than estimated.** Two client-confirmed readings in the same unit and period, or an explicit blocked reason. See `computeMetricDelta` in `lib/workflow.ts`.
+- **Improvement is never inferred.** The arithmetic direction is `increased` or `decreased`. Calling it improved or worsened requires the advisor to declare `improvedWhen`, because a shorter turnaround is a win while a smaller throughput is not.
+- **Approval and execution are two decisions.** An intent is created `pending_review`, must be approved, and only then may be executed. An unconfigured provider performs no network call and leaves the intent approved so it can be retried.
+- **Research can never emit `client-stated` or `doc` provenance.** A value-flow step whose source URL cannot be verified keeps the step as a proposal and downgrades it to `gap`.
+- **A corrected research claim is superseded, not deleted.** Evidence is never destroyed.
 
-1. **Value flow is static.**
-   - `AdvisorCockpit.tsx` renders the same six flow stages for every company.
-   - The research schema contains no `valueFlow` field.
+### Still open
 
-2. **The guided client-call script is static.**
-   - `callTopics` in `AdvisorCockpit.tsx` contains the original six demo questions.
-   - The live call does not consume current research, gaps, hypotheses, or source facts.
+1. **Transcript synthesis is deterministic, not model-assisted.** It is keyword, overlap, and pattern based. Model-assisted analysis would improve contradiction detection and role mapping considerably. Any such change must keep the deterministic path as the offline fallback and must not let a model promote evidence provenance.
 
-3. **Transcript uploads do not upload transcript content.**
-   - The file input retains only `File.name`.
-   - Analysis submits a synthetic line naming the file.
-   - TXT, VTT, SRT, and DOCX parsing must be implemented deliberately.
+2. **No native DOCX or PDF generator.** Deliverables are Markdown plus a self-contained printable HTML rendering (`renderMarkdownToHtml`). Google Docs conversion is the current route to a formal document. A real DOCX writer would need a dependency that works on the Workers runtime.
 
-4. **Transcript synthesis is shallow.**
-   - `lib/transcript.ts` uses fixed keyword lists and one regular expression for metrics.
-   - It does not reconcile research, call notes, Canvas blocks, contradictions, tasks, roles, or decisions with model-assisted analysis.
+3. **Gmail has no adapter.** Resend is the implemented sender. Apollo and PandaDoc remain connector-first contracts.
 
-5. **The canonical Canvas is not populated from research.**
-   - The frontend reads `research.facts` directly.
-   - `generateAuditReport()` reads `engagement.data.canvas`.
-   - Research never writes that Canvas field, so the final report can claim every block is Missing.
+4. **Exa and Firecrawl are not implemented.** The recommended routing in README remains a proposal.
 
-6. **Generated deliverables are templates, not formal documents.**
-   - No Google Doc, DOCX/PDF, or PandaDoc output exists.
-   - The proposal and developer specification are generic around the detected constraint.
+5. **Value flow is proposed, never confirmed automatically.** `flowConfirmations` records what the client spoke to, but there is no UI yet for the advisor to edit a flow step directly during the call.
 
-7. **External actions are intents only.**
-   - Readiness email is not sent.
-   - Google Sheets is not updated.
-   - Google Docs and Drive artifacts are not created.
-   - PandaDoc documents are not created.
-   - Resend is not implemented.
+## Highest-priority next slice
 
-8. **No application tenancy exists.**
-   - There is a helper for reading Sites-authenticated headers, but `app/page.tsx` and API routes do not require it.
-   - Database records contain no tenant, organization, or advisor-user owner ID.
-   - The current outer Sites access setting is owner-only; it is not a substitute for app-layer authorization.
+1. Give the advisor an in-call editor for value-flow steps, writing corrections back with `client-stated` provenance.
+2. Decide whether transcript synthesis should become model-assisted, and if so specify the fallback and provenance rules before writing code.
+3. Before exposing the app beyond one advisor: set `REQUIRE_ADVISOR_AUTH=1`, set `LEGACY_OWNER_EMAIL` to the real advisor, and re-verify tenant isolation against the deployed database.
 
-9. **The workflow stops before actual operations.**
-   - Sprint activation, before/after measurement, constraint migration, and reusable catalog write-back are specification-only.
-
-## Highest-priority implementation slice
-
-Do this before adding Exa, Firecrawl, or new document providers.
-
-### 1. Expand the research contract
-
-Add source-grounded value-flow and interview-plan objects to `ResearchSynthesis`.
-
-Suggested shape:
-
-```ts
-interface ValueFlowStep {
-  id: string;
-  order: number;
-  name: string;
-  description: string;
-  input: string;
-  output: string;
-  actor: string;
-  system: string;
-  evidenceStatus: "public-research" | "advisor-note" | "gap";
-  sourceUrls: string[];
-  confidence: number;
-  confirmationQuestion: string;
-}
-
-interface DiscoveryQuestion {
-  id: string;
-  section: "demand" | "promise" | "flow" | "constraint" | "baseline" | "roles" | "feasibility";
-  question: string;
-  whyItMatters: string;
-  publicAssumption: string;
-  sourceUrls: string[];
-  evidenceStatus: "public-research" | "advisor-note" | "gap";
-  hypothesisId?: string;
-  expectedAnswerType: "narrative" | "number" | "person" | "choice";
-  required: boolean;
-  followUps: string[];
-}
-```
-
-The model must return:
-
-- a proposed flow only where sources support it;
-- explicit gaps where public evidence cannot establish the real operating flow;
-- questions tied to a fact, gap, Canvas block, flow step, or hypothesis;
-- required diagnostic coverage without reusing generic text when client context exists.
-
-### 2. Make one canonical Canvas
-
-Map the retained research facts into `engagement.data.canvas` during `runResearch()`.
-
-The UI and every document generator must read the same stored Canvas. Later client corrections should produce versioned revisions rather than a second unconnected representation.
-
-### 3. Bind the UI to research
-
-- Replace the fixed Flow of Work array with `research.valueFlow`.
-- Replace `callTopics` with `research.discoveryQuestions` plus saved advisor edits.
-- Keep a small mandatory diagnostic coverage contract, but generate the wording and public assumptions for the client.
-- Let the advisor edit, reorder, add, disable, or mark a question answered before the call.
-- Preserve large type, one primary action, and client-safe screen sharing.
-
-### 4. Add regression tests
-
-At minimum, use two contrasting company fixtures and prove:
-
-- their Canvas facts differ;
-- their proposed value-flow steps differ;
-- their visible call questions differ;
-- every public assumption has a retained source or is labeled Missing/Assumed;
-- final deliverables use the same canonical Canvas visible in the research UI;
-- deterministic fallback still produces safe gaps when OpenAI is unavailable.
-
-## Second implementation slice
-
-### Transcript ingestion and synthesis
-
-1. Read actual TXT, VTT, and SRT data in the browser or a multipart server route.
-2. Use a trusted DOCX text-extraction library server-side; reject unsupported or oversized files.
-3. Preserve the raw immutable transcript.
-4. Add structured OpenAI transcript synthesis for:
-   - Canvas corrections;
-   - actual value-flow steps and handoffs;
-   - queues, waits, loops, approvals, and rework;
-   - tasks and roles inside the traced flow;
-   - client-attributed metrics;
-   - contradictions and open gaps;
-   - evidence for and against each hypothesis.
-5. Keep deterministic guards after model analysis. The model may propose; it may not manufacture client evidence, consent, a confirmed baseline, or approval.
-6. Reconcile Call 2 without overwriting Call 1 history.
-
-## Third implementation slice
-
-### Identity, tenancy, and production controls
-
-- Require the authenticated user on every page and API route.
-- Add `tenant_id`, `owner_user_id`, and optionally `advisor_user_id` to every engagement-owned table.
-- Enforce ownership in every read and write query.
-- Add an admin-safe advisor invitation/onboarding path.
-- Define retention and deletion rules for transcripts and client data.
-- Add request IDs, provider latency, token/search cost, error classification, and audit logs.
-- Add rate limiting and abuse protection to research and transcript-analysis endpoints.
-- Add idempotency to all external-action execution routes.
 
 ## Integration sequence
 
 | Order | Integration | Why |
 | --- | --- | --- |
-| 1 | Fireflies | Closes the primary evidence-ingestion path |
-| 2 | Google Sheets | Makes the lightweight CRM real |
-| 3 | Google Drive/Docs | Creates collaborative approved artifacts |
-| 4 | Gmail or Resend | Executes approved readiness and follow-up sends |
-| 5 | PandaDoc | Produces formal proposal/SOW drafts and signatures |
+| 1 | Fireflies | Adapter exists; needs a key. Direct file upload now also closes this path |
+| 2 | Google Sheets | Done. Writes the CRM row from an approved intent |
+| 3 | Google Drive/Docs | Done. Creates the approved artifact from an approved publication intent |
+| 4 | Resend | Done. Executes the approved readiness send. Gmail still has no adapter |
+| 5 | PandaDoc | Next. Formal proposal/SOW drafts and signatures |
 | 6 | Exa | Adds a second company-research index when OpenAI coverage is weak |
 | 7 | Firecrawl | Recovers targeted sites/pages that ordinary retrieval cannot extract |
 | 8 | Apollo | Optional, paid, approval-gated enrichment for a named gap |

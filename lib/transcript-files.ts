@@ -88,8 +88,9 @@ export async function decodeTranscriptFile(
     warnings.push(
       `Unrecognized file type for ${name}; read as ${format === "txt" ? "plain text" : format.toUpperCase()}.`,
     );
-  } else if (sniffed && sniffed !== detected && (detected === "txt" || sniffed === "vtt")) {
-    // Extension lied about the content; trust the content.
+  } else if ((sniffed === "vtt" || sniffed === "srt") && sniffed !== detected) {
+    // A recognized extension is only overridden by a certain sniff: a WEBVTT header or an
+    // SRT index+arrow block. A leading "[" is a timestamped transcript far more often than JSON.
     format = sniffed;
     warnings.push(`${name} is named as ${detected.toUpperCase()} but contains ${sniffed.toUpperCase()} content.`);
   }
@@ -125,10 +126,16 @@ function hasSpeakerLabels(text: string): boolean {
 
 function sniffTextFormat(text: string): TranscriptFormat | null {
   const head = text.slice(0, 4096);
-  if (/^﻿?WEBVTT\b/.test(head)) return "vtt";
-  if (/^\s*[[{]/.test(head)) return "json";
+  if (/^﻿?\s*WEBVTT\b/.test(head)) return "vtt";
   if (/^\s*\d+\s*\n\s*\d{1,3}:\d{2}:\d{2},\d{1,3}\s*-->/m.test(head)) return "srt";
-  return null;
+  // A leading bracket is not evidence of JSON: `[00:10] Speaker: text` is the most common
+  // transcript shape there is. Only real, transcript-shaped JSON counts.
+  if (!/^\s*[[{]/.test(head)) return null;
+  try {
+    return findSegments(JSON.parse(text)) ? "json" : null;
+  } catch {
+    return null;
+  }
 }
 
 /* ------------------------------------------------------------------ bytes */

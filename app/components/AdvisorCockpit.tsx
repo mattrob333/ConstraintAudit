@@ -49,7 +49,12 @@ type SprintRecord = {
 };
 type OutcomeMeasurement = {
   measuredAt: string; measuredBy: string; startingMetric: Metric; endingMetric: Metric;
-  delta: { absolute: string; percent: string; direction: "improved" | "worsened" | "unchanged" } | null;
+  delta: {
+    absolute: string;
+    percent: string;
+    direction: "increased" | "decreased" | "unchanged";
+    interpretation: "improved" | "worsened" | "unchanged" | "not-interpreted";
+  } | null;
   deltaBlockedReason?: string; constraintMoved: boolean; nextConstraintObserved: string;
 };
 type CatalogEntry = {
@@ -519,7 +524,7 @@ export default function AdvisorCockpit() {
     }
   }
 
-  async function recordOutcome(body: { endingMetric: Metric; constraintMoved: boolean; nextConstraintObserved: string }) {
+  async function recordOutcome(body: { endingMetric: Metric; improvedWhen: "higher" | "lower"; constraintMoved: boolean; nextConstraintObserved: string }) {
     if (!activeId) return setNotice("Action not completed: select or create an engagement first.");
     setOpsBusy("outcome"); setOpsError("");
     try {
@@ -970,27 +975,174 @@ function Deliver({ approved, generated, onActions, onBack, onGenerate, onOperate
   </section>;
 }
 
-function IntegrationCenter({ onBack }: { onBack: () => void }) {
-  const [openAI, setOpenAI] = useState<{ status: string; model?: string } | null>(null);
+function OpsRail({ current, onNavigate }: { current: Screen; onNavigate: (screen: Screen) => void }) {
+  const items: Array<[Screen, string, IconName]> = [["sprint", "Sprint", "briefcase"], ["measure", "Measure", "refresh"], ["catalog", "Catalog", "folder"], ["actions", "Reviewed actions", "lock"]];
+  return <nav aria-label="Operations" className="ops-rail">{items.map(([target, label, icon]) => <button aria-current={target === current ? "page" : undefined} className={target === current ? "active" : ""} key={target} onClick={() => onNavigate(target)} type="button"><Icon name={icon} size={15} />{label}</button>)}</nav>;
+}
+
+function SprintScreen({ busy, error, onActivate, onBack, onNavigate, onTask, sprint }: {
+  busy: string; error: string; onActivate: () => void; onBack: () => void;
+  onNavigate: (screen: Screen) => void; onTask: (taskId: string, status: SprintTask["status"]) => void; sprint: SprintRecord | null;
+}) {
+  const taskStatuses: Array<[SprintTask["status"], string]> = [["todo", "To do"], ["in_progress", "In progress"], ["done", "Done"]];
+  const tasks = sprint?.tasks ?? [];
+  return <section className="guided wide"><Back onClick={onBack}>Deliverables</Back><PageHead eyebrow="Operate · Sprint" side={<Pill tone={sprint ? "success" : "assumed"}>{sprint ? "Sprint active" : "Not activated"}</Pill>} title="Run the fixed sprint.">Activation freezes the scope, records the named human owner, and starts the measurement clock against the starting metric the server already holds. Nothing is scheduled or sent externally.</PageHead>
+    <OpsRail current="sprint" onNavigate={onNavigate} />
+    {error ? <p className="ops-error" role="alert"><Icon name="info" size={15} />{error}</p> : null}
+    {!sprint ? <div className="panel ops-empty"><h3>No sprint has been activated for this engagement.</h3><p>Activation requires an approved diagnosis with a named human owner. The starting metric is taken from the approved finding — it is never invented here.</p><Button disabled={busy === "sprint"} icon="check" onClick={onActivate}>{busy === "sprint" ? "Activating…" : "Activate sprint"}</Button></div> : <>
+      <div className="ops-summary">{[["Prescription", sprint.prescription || "Not recorded"], ["Human owner", sprint.humanOwner ? `${sprint.humanOwner.name}, ${sprint.humanOwner.role}` : "Not recorded"], ["Starting metric", sprint.startingMetric ? `${sprint.startingMetric.name}: ${sprint.startingMetric.value} ${sprint.startingMetric.unit} · ${sprint.startingMetric.period}` : "Missing"], ["Measurement clock", sprint.measurementClockStartedAt ? new Date(sprint.measurementClockStartedAt).toLocaleString() : "Not started"]].map(([label, text]) => <article key={label}><span>{label}</span><strong>{text}</strong></article>)}</div>
+      <div className="table-wrap"><table><thead><tr><th>Sprint task</th><th>Owner</th><th>Status</th></tr></thead><tbody>{tasks.length ? tasks.map((task) => <tr key={task.id}><td><strong>{task.task}</strong></td><td>{task.owner || "Unassigned"}</td><td><div className="status-toggle">{taskStatuses.map(([status, label]) => <button className={task.status === status ? "selected" : ""} disabled={busy === `task:${task.id}`} key={status} onClick={() => onTask(task.id, status)} type="button">{label}</button>)}</div>{busy === `task:${task.id}` ? <small role="status">Saving…</small> : null}</td></tr>) : <tr><td colSpan={3}>The activated sprint returned no tasks.</td></tr>}</tbody></table></div>
+      <div className="page-actions"><p><Icon name="info" size={16} />No delta is computed in the browser. The ending metric is captured separately.</p><Button icon="arrow" onClick={() => onNavigate("measure")}>Record the outcome</Button></div>
+    </>}
+  </section>;
+}
+
+function Measure({ busy, error, onBack, onNavigate, onSubmit, outcome, sprint }: {
+  busy: boolean; error: string; onBack: () => void; onNavigate: (screen: Screen) => void;
+  onSubmit: (body: { endingMetric: Metric; improvedWhen: "higher" | "lower"; constraintMoved: boolean; nextConstraintObserved: string }) => void;
+  outcome: OutcomeMeasurement | null; sprint: SprintRecord | null;
+}) {
+  const starting = sprint?.startingMetric;
+  const [metric, setMetric] = useState<Metric>({ name: starting?.name ?? "", period: starting?.period ?? "", source: "", unit: starting?.unit ?? "", value: "" });
+  const [moved, setMoved] = useState(false);
+  const [next, setNext] = useState("");
+  const [better, setBetter] = useState<"higher" | "lower">("lower");
+  const fields: Array<[keyof Metric, string, string]> = [["name", "Metric name", "Bids returned per month"], ["value", "Ending value", "48"], ["unit", "Unit", "bids"], ["period", "Measurement period", "month"], ["source", "Source of this reading", "Client-stated in the closing call"]];
+  return <section className="guided wide"><Back onClick={onBack}>Sprint</Back><PageHead eyebrow="Operate · Outcome" side={<Pill tone={outcome ? "success" : "assumed"}>{outcome ? "Measured" : "Not measured"}</Pill>} title="Measure what actually changed.">Record the ending reading exactly as the client states it. The before/after comparison is returned by the server; this screen never calculates or projects a number.</PageHead>
+    <OpsRail current="measure" onNavigate={onNavigate} />
+    {error ? <p className="ops-error" role="alert"><Icon name="info" size={15} />{error}</p> : null}
+    <div className="ops-columns">
+      <form className="panel" onSubmit={(event) => { event.preventDefault(); onSubmit({ constraintMoved: moved, endingMetric: metric, improvedWhen: better, nextConstraintObserved: next }); }}>
+        <p className="eyebrow">Ending metric</p>
+        {starting ? <p className="ops-hint"><Icon name="info" size={15} />Starting metric on record: {starting.name} — {starting.value} {starting.unit} · {starting.period}</p> : <p className="ops-hint"><Icon name="info" size={15} />No starting metric is on record yet. Activate the sprint first so a before reading exists.</p>}
+        {fields.map(([key, label, placeholder]) => <label key={key}><span>{label} <em>Required</em></span><input onChange={(event) => setMetric({ ...metric, [key]: event.target.value })} placeholder={placeholder} required value={metric[key]} /></label>)}
+        <label><span>This metric is better when it goes <em>Required</em></span><select onChange={(event) => setBetter(event.target.value === "higher" ? "higher" : "lower")} value={better}><option value="lower">Lower — a shorter time, smaller queue, or fewer errors is the win</option><option value="higher">Higher — more throughput, volume, or revenue is the win</option></select><small>Without this the server reports the arithmetic change only and will not call it an improvement.</small></label>
+        <label className="confirm"><input checked={moved} onChange={(event) => setMoved(event.target.checked)} type="checkbox" />The client confirmed the constraint moved.</label>
+        <label><span>Next constraint observed <small>Optional</small></span><textarea onChange={(event) => setNext(event.target.value)} placeholder="Where the client says work now waits…" rows={3} value={next} /></label>
+        <div className="action-row"><p><Icon name="lock" size={16} />Only client-confirmed readings are submitted.</p><Button disabled={busy || !metric.name.trim() || !metric.value.trim() || !metric.source.trim()} icon="check" type="submit">{busy ? "Recording…" : "Record ending metric"}</Button></div>
+      </form>
+      <div className="panel ops-result"><p className="eyebrow">Before and after</p>
+        {!outcome ? <p className="registry-empty">No outcome has been recorded yet. Nothing is estimated in the meantime.</p> : <>
+          <div className="ops-summary">{[["Starting metric", `${outcome.startingMetric?.value ?? "—"} ${outcome.startingMetric?.unit ?? ""}`, `${outcome.startingMetric?.name ?? "Missing"} · ${outcome.startingMetric?.source ?? "no source"}`], ["Ending metric", `${outcome.endingMetric?.value ?? "—"} ${outcome.endingMetric?.unit ?? ""}`, `${outcome.endingMetric?.name ?? "Missing"} · ${outcome.endingMetric?.source ?? "no source"}`]].map(([label, value, note]) => <article key={label}><span>{label}</span><strong>{value}</strong><small>{note}</small></article>)}</div>
+          {outcome.delta ? <div className="ops-delta"><Pill tone={outcome.delta.interpretation === "improved" ? "success" : outcome.delta.interpretation === "worsened" ? "missing" : "neutral"}>{outcome.delta.interpretation === "not-interpreted" ? `${outcome.delta.direction} · not interpreted` : outcome.delta.interpretation}</Pill><strong>{outcome.delta.absolute}</strong><span>{outcome.delta.percent}</span><small>{outcome.delta.interpretation === "not-interpreted" ? "The metric changed by this much. Whether that is better was not declared, so nothing calls it an improvement." : "Server-computed from two confirmed readings."}</small></div> : <div className="ops-delta blocked"><Pill tone="missing">No delta claimed</Pill><strong>{outcome.deltaBlockedReason || "The server returned no delta and no reason. No numeric change is claimed."}</strong><small>Nothing is computed client-side to fill this gap.</small></div>}
+          <dl className="ops-meta"><div><dt>Constraint moved</dt><dd>{outcome.constraintMoved ? "Yes, client-confirmed" : "Not confirmed"}</dd></div><div><dt>Next constraint</dt><dd>{outcome.nextConstraintObserved || "Not observed yet"}</dd></div><div><dt>Measured</dt><dd>{outcome.measuredAt ? new Date(outcome.measuredAt).toLocaleString() : "Unknown"}</dd></div></dl>
+          <Button icon="arrow" onClick={() => onNavigate("catalog")}>Write the pattern back</Button>
+        </>}
+      </div>
+    </div>
+  </section>;
+}
+
+function Catalog({ busy, entry, error, onBack, onNavigate, onSubmit, outcome }: {
+  busy: boolean; entry: CatalogEntry | null; error: string; onBack: () => void;
+  onNavigate: (screen: Screen) => void; onSubmit: (body: { industryContext: string; reusableFor: string }) => void;
+  outcome: OutcomeMeasurement | null;
+}) {
+  const [industryContext, setIndustryContext] = useState("");
+  const [reusableFor, setReusableFor] = useState("");
+  return <section className="guided wide"><Back onClick={onBack}>Outcome</Back><PageHead eyebrow="Operate · Catalog" side={<Pill tone={entry ? "success" : "assumed"}>{entry ? "Pattern written" : "Not written"}</Pill>} title="Compound the pattern.">The constraint, prescription, and measured result come from the approved record. You only add where this pattern is reusable.</PageHead>
+    <OpsRail current="catalog" onNavigate={onNavigate} />
+    {error ? <p className="ops-error" role="alert"><Icon name="info" size={15} />{error}</p> : null}
+    {!outcome ? <p className="ops-hint"><Icon name="info" size={15} />No measured outcome is on record. A catalog entry written now carries no measured result.</p> : null}
+    <div className="ops-columns">
+      <form className="panel" onSubmit={(event) => { event.preventDefault(); onSubmit({ industryContext, reusableFor }); }}>
+        <p className="eyebrow">Reuse context</p>
+        <label><span>Industry context</span><input onChange={(event) => setIndustryContext(event.target.value)} placeholder="Regional industrial fabrication, 20–80 staff" value={industryContext} /></label>
+        <label><span>Reusable for</span><textarea onChange={(event) => setReusableFor(event.target.value)} placeholder="Which businesses this pattern should be tested against next…" rows={4} value={reusableFor} /></label>
+        <div className="action-row"><p><Icon name="info" size={16} />Nothing is published externally by this action.</p><Button disabled={busy} icon="check" type="submit">{busy ? "Writing…" : "Write catalog entry"}</Button></div>
+      </form>
+      <div className="panel ops-result"><p className="eyebrow">Catalog entry</p>
+        {!entry ? <p className="registry-empty">No catalog entry exists for this engagement yet.</p> : <dl className="ops-meta">{[["Constraint type", entry.constraintType], ["Canvas block", entry.canvasBlock], ["Pattern", entry.pattern], ["Prescription", entry.prescription], ["Measured result", entry.measuredResult || "None recorded"], ["Industry context", entry.industryContext || "Not stated"], ["Reusable for", entry.reusableFor || "Not stated"], ["Written", entry.writtenAt ? new Date(entry.writtenAt).toLocaleString() : "Unknown"]].map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>}
+      </div>
+    </div>
+  </section>;
+}
+
+function ReviewedActions({ engagementId, onBack, onNavigate }: { engagementId: string | null; onBack: () => void; onNavigate: (screen: Screen) => void }) {
+  const [intents, setIntents] = useState<IntentItem[]>([]);
+  const [loading, setLoading] = useState(Boolean(engagementId));
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState("");
+  const [confirming, setConfirming] = useState("");
+  const [reloadToken, setReloadToken] = useState(0);
   useEffect(() => {
-    api<{ integrations: Array<{ id: string; status: string; model?: string }> }>("/api/integrations")
-      .then((result) => setOpenAI(result.integrations.find((item) => item.id === "openai") ?? null))
-      .catch(() => setOpenAI({ status: "unavailable" }));
+    if (!engagementId) return;
+    let active = true;
+    api<{ intents: IntentItem[] }>(`/api/intents?engagementId=${encodeURIComponent(engagementId)}`)
+      .then((result) => { if (active) setIntents(result.intents ?? []); })
+      .catch((reason: Error) => { if (active) { setIntents([]); setError(`Reviewed actions could not be loaded: ${reason.message}`); } })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [engagementId, reloadToken]);
+  async function act(intent: IntentItem, action: "approve" | "reject" | "execute") {
+    setBusy(`${intent.id}:${action}`); setError("");
+    try {
+      await api(`/api/intents/${intent.id}`, { body: JSON.stringify({ action }), method: "POST" });
+      setConfirming("");
+      setLoading(true);
+      setReloadToken((token) => token + 1);
+    } catch (reason) {
+      setError(`The action could not be completed: ${reason instanceof Error ? reason.message : "unknown request failure"}`);
+    } finally {
+      setBusy("");
+    }
+  }
+  return <section className="guided wide"><Back onClick={onBack}>Sprint</Back><PageHead eyebrow="Operate · External actions" title="Review before anything leaves this app.">Every externally-visible action is created as a reviewed intent. Approval and execution are separate, deliberate steps.</PageHead>
+    <OpsRail current="actions" onNavigate={onNavigate} />
+    <div className="security"><Icon name="lock" size={18} /><div><strong>Execute performs a real external write.</strong><p>Approve records your review only. Execute contacts the external provider and cannot be undone from this screen. An intent must be approved first.</p></div></div>
+    {!engagementId ? <p className="registry-empty">Select or create an engagement before reviewing its external actions.</p> : null}
+    {engagementId && loading ? <p className="registry-empty" role="status">Loading reviewed actions…</p> : null}
+    {error ? <p className="ops-error" role="alert"><Icon name="info" size={15} />{error}</p> : null}
+    {engagementId && !loading && !error && intents.length === 0 ? <p className="registry-empty">No external actions have been proposed for this engagement.</p> : null}
+    <div className="intent-list">{intents.map((intent) => <article key={intent.id}>
+      <header><div><Pill tone={intent.status === "executed" ? "success" : intent.status === "approved" ? "known" : intent.status === "rejected" || intent.status === "failed" ? "missing" : "assumed"}>{intent.status.replace(/_/g, " ")}</Pill><strong>{intent.type.replace(/_/g, " ")}</strong></div><small>Created {intent.created_at ? new Date(intent.created_at).toLocaleString() : "unknown"}{intent.executed_at ? ` · executed ${new Date(intent.executed_at).toLocaleString()}` : ""}</small></header>
+      <details><summary>Payload sent on execution</summary><pre>{JSON.stringify(intent.payload, null, 2)}</pre></details>
+      {confirming === intent.id ? <div className="intent-confirm"><Icon name="lock" size={17} /><div><strong>This performs a real external write now.</strong><small>The payload above is sent to the external provider for {intent.type.replace(/_/g, " ")}.</small></div><Button onClick={() => setConfirming("")} variant="secondary">Cancel</Button><Button disabled={busy === `${intent.id}:execute`} icon="external" onClick={() => act(intent, "execute")}>{busy === `${intent.id}:execute` ? "Executing…" : "Yes, execute the external write"}</Button></div> : <div className="intent-actions">
+        <Button disabled={intent.status !== "pending_review" || busy === `${intent.id}:approve`} icon="check" onClick={() => act(intent, "approve")} variant="secondary">{busy === `${intent.id}:approve` ? "Approving…" : "Approve"}</Button>
+        <Button disabled={intent.status !== "pending_review" || busy === `${intent.id}:reject`} onClick={() => act(intent, "reject")} variant="secondary">{busy === `${intent.id}:reject` ? "Rejecting…" : "Reject"}</Button>
+        <Button disabled={intent.status !== "approved"} icon="external" onClick={() => setConfirming(intent.id)}>Execute external write</Button>
+        {intent.status !== "approved" ? <small>Execution stays locked until this intent is approved.</small> : null}
+      </div>}
+    </article>)}</div>
+  </section>;
+}
+
+function modeIcon(mode: string): IconName {
+  const value = (mode || "").toLowerCase();
+  if (value.includes("transcript") || value.includes("meeting") || value.includes("import")) return "mic";
+  if (value.includes("persistence") || value.includes("store") || value.includes("durable")) return "shield";
+  if (value.includes("research") || value.includes("fetch") || value.includes("search")) return "search";
+  if (value.includes("send") || value.includes("email") || value.includes("delivery")) return "mail";
+  if (value.includes("draft") || value.includes("document") || value.includes("doc")) return "document";
+  if (value.includes("write") || value.includes("intent")) return "folder";
+  if (value.includes("credit") || value.includes("roster")) return "people";
+  return "integration";
+}
+
+function IntegrationCenter({ onBack }: { onBack: () => void }) {
+  const [integrations, setIntegrations] = useState<IntegrationItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    let active = true;
+    api<{ integrations: IntegrationItem[] }>("/api/integrations")
+      .then((result) => { if (active) setIntegrations(result.integrations ?? []); })
+      .catch((reason: Error) => { if (active) { setIntegrations([]); setError(`Integration status could not be read: ${reason.message}`); } })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
   }, []);
-  const openAIReady = openAI?.status === "configured";
-  const items: [string, IconName, string, Tone, string, string][] = [
-    ["Local workflow engine", "shield", "Ready", "success", "Deterministic state, sample research, guided call, synthesis, and artifacts. No secret required.", "Working default"],
-    ["Google Drive & Sheets", "folder", "Not connected", "neutral", "Canonical records, inspectable registry, approved artifacts, and source links.", "Authorize Google"],
-    ["Fireflies", "mic", "Not connected", "neutral", "Full transcripts, speakers, timestamps, quotes, decisions, and commitments.", "Connect Fireflies"],
-    ["Apollo", "people", "Approval required", "assumed", "Optional company and roster enrichment. Never runs automatically.", "Configure credits"],
-    ["PandaDoc", "document", "Not connected", "neutral", "Formal proposal and statement-of-work generation from approved templates.", "Add API key"],
-    ["Resend", "upload", "Not connected", "neutral", "Optional transactional delivery for approved client-facing documents.", "Add API key"],
-    ["Gmail & Calendar", "calendar", "Not connected", "neutral", "Meeting identity, attendees, correspondence, and reviewed drafts.", "Authorize Google"],
-    ["OpenAI web research", "spark", openAIReady ? "Ready" : openAI ? "Not connected" : "Checking", openAIReady ? "success" : "assumed", openAIReady ? `Responses API web search is connected server-side${openAI?.model ? ` with ${openAI.model}` : ""}.` : "Connect a server-side API key to enrich public company research. Local research remains available.", openAIReady ? "Connected" : "Add API key"],
-  ];
-  return <section className="guided wide integrations"><Back onClick={onBack}>Start</Back><PageHead eyebrow="Setup & data sources" title="Integration Center">The working default is local and deterministic. Connectors add source access or external delivery only after explicit authorization.</PageHead>
+  return <section className="guided wide integrations"><Back onClick={onBack}>Start</Back><PageHead eyebrow="Setup & data sources" title="Integration Center">Every status below is read live from the server. Nothing on this screen is asserted by the browser.</PageHead>
     <div className="local-default"><Icon name="shield" size={23} /><div><strong>Ready without credentials</strong><p>Intake, research, guided call, transcript paste/upload, synthesis, findings, and deliverables remain usable.</p></div><Pill tone="success">Working default</Pill></div>
-    <div className="integration-list">{items.map(([name, icon, status, tone, text, action]) => <article key={name}><span><Icon name={icon} size={21} /></span><div><header><h2>{name}</h2><Pill tone={tone}>{status}</Pill></header><p>{text}</p></div><Button disabled={status === "Ready"} onClick={() => window.open("/docs/integrations.md", "_blank", "noopener,noreferrer")} variant="secondary">{action}</Button></article>)}</div>
+    {loading ? <p className="registry-empty" role="status">Reading connector status…</p> : null}
+    {error ? <p className="ops-error" role="alert"><Icon name="info" size={15} />{error}</p> : null}
+    {!loading && !error && integrations.length === 0 ? <p className="registry-empty">The server returned no integrations.</p> : null}
+    <div className="integration-list">{integrations.map((item) => <article key={item.id}><span><Icon name={modeIcon(item.mode)} size={21} /></span>
+      <div><header><h2>{item.name}</h2><Pill tone={statusTone[item.status] ?? "neutral"}>{item.status.replace(/_/g, " ")}</Pill>{item.model ? <Pill tone="inferred">{item.model}</Pill> : null}</header>
+        <p>{item.setup || `No setup step is required beyond the ${(item.mode || "declared").replace(/_/g, " ")} mode.`}</p>
+        <dl className="integration-meta"><div><dt>Mode</dt><dd>{(item.mode || "unspecified").replace(/_/g, " ")}</dd></div>{item.environmentVariables?.length ? <div><dt>Required env</dt><dd>{item.environmentVariables.map((name) => <code key={name}>{name}</code>)}</dd></div> : null}</dl></div>
+      {item.resource ? <a className="button secondary" href={item.resource.url} rel="noopener noreferrer" target="_blank">{item.resource.name}<Icon name="external" size={14} /></a> : <span className="integration-none">No linked resource</span>}
+    </article>)}</div>
+    <div className="status-legend"><p className="eyebrow">What each status means</p><dl>{statusLegend.map(([status, text]) => <div key={status}><dt><Pill tone={statusTone[status] ?? "neutral"}>{status.replace(/_/g, " ")}</Pill></dt><dd>{text}</dd></div>)}</dl></div>
     <div className="security"><Icon name="lock" size={18} /><div><strong>Authorization boundary</strong><p>Secrets are never entered into the audit. External writes, connector imports, paid enrichment, and customer sends require explicit review and approval.</p></div></div>
   </section>;
 }

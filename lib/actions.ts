@@ -36,6 +36,7 @@ import {
 import { synthesizeTranscript } from "./transcript";
 import { decodeTranscriptFile, type TranscriptFileInput } from "./transcript-files";
 import {
+  computeMetricDelta,
   makeId,
   WORKFLOW_STATES,
   type BaselineMetric,
@@ -575,15 +576,18 @@ export async function reviewIntent(
   }
 
   const result = await executeIntent(type, intentId, payload);
-  const updated = await updateIntentStatus(
-    intentId,
-    principal.ownerId,
-    result.ok ? "executed" : "failed",
-    result,
-  );
+  // "not-configured" means nothing was attempted, so the approval survives and the same
+  // intent can be executed again once the credential exists. A genuine failure stays
+  // failed and needs a fresh approval, because we cannot know whether the write landed.
+  const nextStatus = result.ok
+    ? "executed"
+    : result.status === "not-configured" ? "approved" : "failed";
+  const updated = await updateIntentStatus(intentId, principal.ownerId, nextStatus, result);
   await addActivity(engagement, {
     activityType: "Integration",
-    summary: `Executed ${type} intent`,
+    summary: result.status === "not-configured"
+      ? `Could not execute ${type} intent`
+      : `Executed ${type} intent`,
     outcome: `${result.provider}: ${result.status} — ${result.detail}`,
     sourceLink: result.externalUrl ?? null,
   });
@@ -720,13 +724,6 @@ export async function activateSprint(
   return { engagement: updated, sprint, document };
 }
 
-function parseMeasure(value: string): number | null {
-  const match = value.replace(/,/g, "").match(/-?\d+(?:\.\d+)?/);
-  if (!match) return null;
-  const parsed = Number(match[0]);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
 /**
  * Record the before/after result. A delta is computed only from two client-confirmed
  * readings in the same unit; anything else records an explicit blocked reason instead
@@ -737,6 +734,8 @@ export async function measureOutcome(
   principal: Principal,
   input: {
     endingMetric: BaselineMetric;
+    /** Which way is better for this metric. Without it no improvement is claimed. */
+    improvedWhen?: "higher" | "lower";
     constraintMoved?: boolean;
     nextConstraintObserved?: string;
     evidence?: Array<{ quote: string; source: string }>;
@@ -753,29 +752,10 @@ export async function measureOutcome(
     throw new Error("The ending metric requires name, value, unit, period, and source.");
   }
   const starting = engagement.data.baseline ?? sprint.startingMetric;
-  const startValue = parseMeasure(starting?.value ?? "");
-  const endValue = parseMeasure(ending.value);
-  const sameUnit = (starting?.unit ?? "").trim().toLowerCase() === ending.unit.trim().toLowerCase();
-  const samePeriod = (starting?.period ?? "").trim().toLowerCase() === ending.period.trim().toLowerCase();
-
-  let delta: OutcomeMeasurement["delta"] = null;
-  let deltaBlockedReason: string | undefined;
-  if (engagement.baselineStatus !== "Confirmed") {
-    deltaBlockedReason = "The starting metric was never confirmed, so no before/after delta may be claimed.";
-  } else if (startValue === null || endValue === null) {
-    deltaBlockedReason = "One of the readings is not numeric, so no delta may be computed.";
-  } else if (!sameUnit || !samePeriod) {
-    deltaBlockedReason = `Readings are not comparable (${starting?.unit} per ${starting?.period} vs ${ending.unit} per ${ending.period}).`;
-  } else {
-    const absolute = endValue - startValue;
-    delta = {
-      absolute: `${absolute > 0 ? "+" : ""}${Number(absolute.toFixed(4))} ${ending.unit}`,
-      percent: startValue === 0
-        ? "not computable from a zero baseline"
-        : `${absolute > 0 ? "+" : ""}${Number(((absolute / Math.abs(startValue)) * 100).toFixed(1))}%`,
-      direction: absolute === 0 ? "unchanged" : absolute > 0 ? "improved" : "worsened",
-    };
-  }
+  const { delta, blockedReason: deltaBlockedReason } = computeMetricDelta(starting, ending, {
+    baselineConfirmed: engagement.baselineStatus === "Confirmed",
+    improvedWhen: input.improvedWhen,
+  });
 
   const outcome: OutcomeMeasurement = {
     measuredAt: new Date().toISOString(),
@@ -784,6 +764,7 @@ export async function measureOutcome(
     endingMetric: ending,
     delta,
     deltaBlockedReason,
+    improvedWhen: input.improvedWhen,
     constraintMoved: input.constraintMoved ?? false,
     nextConstraintObserved: input.nextConstraintObserved?.trim() ?? "",
     evidence: (input.evidence ?? []).filter((item) => item.quote?.trim() && item.source?.trim()),
@@ -806,7 +787,9 @@ export async function measureOutcome(
   await addActivity(updated, {
     activityType: "Measurement",
     summary: "Recorded the measured outcome",
-    outcome: delta ? `Delta ${delta.absolute} (${delta.direction})` : `No delta claimed: ${deltaBlockedReason}`,
+    outcome: delta
+      ? `Delta ${delta.absolute} (${delta.direction}${delta.interpretation === "not-interpreted" ? "; not interpreted" : `; ${delta.interpretation}`})`
+      : `No delta claimed: ${deltaBlockedReason}`,
   });
   return { engagement: updated, outcome, document };
 }
@@ -829,7 +812,7 @@ export async function writeCatalogEntry(
     pattern: `${finding.constraintType} constraint in ${finding.canvasBlock}`,
     prescription: finding.prescription.description,
     measuredResult: outcome.delta
-      ? `${outcome.delta.absolute} (${outcome.delta.direction}) on ${outcome.endingMetric.name}`
+      ? `${outcome.delta.absolute} (${outcome.delta.direction}${outcome.delta.interpretation === "not-interpreted" ? "" : `, ${outcome.delta.interpretation}`}) on ${outcome.endingMetric.name}`
       : `Not claimed — ${outcome.deltaBlockedReason ?? "no comparable measurement"}`,
     industryContext: input.industryContext?.trim() ?? "",
     reusableFor: input.reusableFor?.trim() ?? "",

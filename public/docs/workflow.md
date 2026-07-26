@@ -1,7 +1,7 @@
 # Tier 4 Throughput Audit
 ## Corrected Sales-to-Delivery Workflow for Codex
 
-**Status:** Approved target workflow — current implementation delta documented 2026-07-25  
+**Status:** Approved target workflow — current implementation delta documented 2026-07-26  
 **Purpose:** Define the evidence-grounded, two-call workflow that locates the single constraint governing a client's throughput, validates it with the client, prescribes the smallest intervention that removes it, measures the result, and writes the outcome back to the Tier 4 intervention catalog.
 
 ---
@@ -10,30 +10,32 @@
 
 This document is the canonical target workflow. It intentionally distinguishes the approved product behavior from what the current application has shipped.
 
-As of 2026-07-25:
+As of 2026-07-26:
 
 | Area | Current implementation |
 | --- | --- |
 | Public research | Working through deterministic website extraction plus optional OpenAI Responses API web search |
-| Business Model Canvas v0 | Dynamic and source-backed in the research interface |
-| Value Flow v0 | Not implemented; the interface shows a fixed six-stage scaffold |
-| Recon question generation | Constraint metadata is dynamic, but displayed question wording is generic |
-| Guided Call 1 plan | Not implemented from research; the client-call view uses six fixed demo topics |
-| Readiness Brief | Working as an approved artifact and send intent; no email is sent |
+| Business Model Canvas v0 | Working. One canonical Canvas is written by research and corrected by client evidence; every deliverable reads it |
+| Value Flow v0 | Working. Generated per company from research; unsupported steps are explicit gaps carrying confirmation questions |
+| Recon question generation | Working. Questions are anchored to a specific fact, gap, Canvas block, flow step, or hypothesis |
+| Guided Call 1 plan | Working. The client-call view is driven by the same discovery questions; number and person answers capture the value |
+| Readiness Brief | Working as an approved artifact and send intent; the send executes only from an approved intent |
 | Transcript paste | Working with deterministic evidence and metric extraction |
-| Transcript file upload | Incomplete; only the filename is submitted |
+| Transcript file upload | Working. TXT, VTT, SRT, JSON and DOCX decode to real speaker- and timestamp-attributed lines |
 | Fireflies | Backend import adapter exists; requires server-side authorization |
-| Transcript synthesis | Deterministic keyword rules; full research/Canvas/flow reconciliation is not implemented |
+| Transcript synthesis | Working but deterministic. Reconciles research, Canvas, and flow, and extracts contradictions, decisions, tasks, roles and metrics. Not model-assisted |
 | Findings governance | Consent, evidence, named-owner, and missing-baseline gates are working |
-| Final documents | Internal Markdown artifacts only; external renderers are not implemented |
-| CRM and catalog | Reviewed intents only; no Google Sheets write or measured-outcome catalog loop |
-| Identity and tenancy | Not implemented at the application layer |
+| Final documents | Markdown artifacts plus a self-contained printable HTML rendering. No native DOCX or PDF generator |
+| CRM and catalog | Working. Google Sheets writes and the measured-outcome catalog loop both execute from explicitly approved intents |
+| Identity and tenancy | Working. Every row carries `owner_id` and every query is scoped in SQL |
+
+Remaining gaps are transcript synthesis being deterministic rather than model-assisted, the absence of a native DOCX/PDF generator, and the absence of adapters for Gmail, Apollo, PandaDoc, Exa and Firecrawl.
 
 No current UI placeholder, intent record, or documented connector may be represented as a completed integration.
 
-The next required product milestone is:
+The milestone above is met. The next required product milestone is:
 
-> A fresh engagement must turn research into a source-grounded Value Flow v0 and a client-specific discovery plan, use that plan during Call 1, reconcile the transcript into the same canonical Canvas and value flow, and carry those verified facts into every final deliverable.
+> The advisor must be able to correct a value-flow step during the call so the correction is recorded as client-stated evidence rather than remaining an unconfirmed research proposal.
 
 ---
 

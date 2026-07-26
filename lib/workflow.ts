@@ -175,8 +175,20 @@ export interface OutcomeMeasurement {
   measuredBy: string;
   startingMetric: BaselineMetric;
   endingMetric: BaselineMetric;
-  delta: { absolute: string; percent: string; direction: "improved" | "worsened" | "unchanged" } | null;
+  /**
+   * `direction` is the arithmetic fact. Whether that fact is good or bad depends on the
+   * metric — a shorter turnaround is an improvement, a smaller throughput is not — so
+   * `interpretation` stays `not-interpreted` unless the advisor declares `improvedWhen`.
+   * Nothing in this app is allowed to guess which way is better.
+   */
+  delta: {
+    absolute: string;
+    percent: string;
+    direction: "increased" | "decreased" | "unchanged";
+    interpretation: "improved" | "worsened" | "unchanged" | "not-interpreted";
+  } | null;
   deltaBlockedReason?: string;
+  improvedWhen?: "higher" | "lower";
   constraintMoved: boolean;
   nextConstraintObserved: string;
   evidence: Array<{ quote: string; source: string }>;
@@ -461,6 +473,67 @@ export function canonicalCanvasBlock(value: unknown): CanvasBlock | null {
   const exact = CANVAS_BLOCKS.find((block) => block.toLowerCase() === trimmed.toLowerCase());
   if (exact) return exact;
   return CANVAS_BLOCK_ALIASES[trimmed.toLowerCase()] ?? null;
+}
+
+function parseMeasure(value: string): number | null {
+  const match = value.replace(/,/g, "").match(/-?\d+(?:\.\d+)?/);
+  if (!match) return null;
+  const parsed = Number(match[0]);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+/** "days per estimate" — the period often already reads as a phrase, so don't double the "per". */
+function describeMeasure(metric: BaselineMetric | undefined): string {
+  const unit = metric?.unit?.trim() ?? "";
+  const period = metric?.period?.trim() ?? "";
+  if (!period) return unit || "an unlabelled reading";
+  return /^(per|each|every|a|an)\b/i.test(period) ? `${unit} ${period}` : `${unit} per ${period}`;
+}
+
+/**
+ * Compare two readings. A number is produced only from two client-confirmed readings in
+ * the same unit and period; every other case returns an explicit blocked reason instead.
+ *
+ * `direction` is arithmetic. Calling a change an improvement requires `improvedWhen`,
+ * because whether up is good depends on the metric — a shorter turnaround is a win, a
+ * smaller throughput is not. The app must never guess which way is better.
+ */
+export function computeMetricDelta(
+  starting: BaselineMetric | undefined,
+  ending: BaselineMetric,
+  options: { baselineConfirmed: boolean; improvedWhen?: "higher" | "lower" },
+): { delta: OutcomeMeasurement["delta"]; blockedReason?: string } {
+  if (!options.baselineConfirmed) {
+    return { delta: null, blockedReason: "The starting metric was never confirmed, so no before/after delta may be claimed." };
+  }
+  const startValue = parseMeasure(starting?.value ?? "");
+  const endValue = parseMeasure(ending.value ?? "");
+  if (startValue === null || endValue === null) {
+    return { delta: null, blockedReason: "One of the readings is not numeric, so no delta may be computed." };
+  }
+  const sameUnit = (starting?.unit ?? "").trim().toLowerCase() === (ending.unit ?? "").trim().toLowerCase();
+  const samePeriod = (starting?.period ?? "").trim().toLowerCase() === (ending.period ?? "").trim().toLowerCase();
+  if (!sameUnit || !samePeriod) {
+    return {
+      delta: null,
+      blockedReason: `Readings are not comparable (${describeMeasure(starting)} vs ${describeMeasure(ending)}).`,
+    };
+  }
+  const absolute = endValue - startValue;
+  const direction = absolute === 0 ? "unchanged" as const
+    : absolute > 0 ? "increased" as const : "decreased" as const;
+  return {
+    delta: {
+      absolute: `${absolute > 0 ? "+" : ""}${Number(absolute.toFixed(4))} ${ending.unit}`,
+      percent: startValue === 0
+        ? "not computable from a zero baseline"
+        : `${absolute > 0 ? "+" : ""}${Number(((absolute / Math.abs(startValue)) * 100).toFixed(1))}%`,
+      direction,
+      interpretation: direction === "unchanged" ? "unchanged"
+        : !options.improvedWhen ? "not-interpreted"
+        : (options.improvedWhen === "higher") === (direction === "increased") ? "improved" : "worsened",
+    },
+  };
 }
 
 export function emptyCanvas(): Record<CanvasBlock, EvidenceClaim[]> {
