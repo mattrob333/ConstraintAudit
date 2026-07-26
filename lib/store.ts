@@ -546,6 +546,39 @@ function mapIntent(row: DbRow): DbRow {
   };
 }
 
+/**
+ * Remove an engagement and everything hanging off it. Used by Practice mode so an advisor
+ * can reset the worked example to pristine. Scoped by owner like every other write.
+ */
+/**
+ * Insert a fully-formed engagement, ids and all. Only Practice mode uses this: the worked
+ * example is deterministic, so it cannot go through `createEngagement`'s generated id.
+ */
+export async function insertEngagement(engagement: Engagement): Promise<Engagement> {
+  await ensureDatabase();
+  requireOwner(engagement.ownerId);
+  await engagementInsert(getD1(), engagement).run();
+  return engagement;
+}
+
+export async function deleteEngagementCascade(id: string, ownerId: string): Promise<boolean> {
+  await ensureDatabase();
+  const owner = requireOwner(ownerId);
+  const db = getD1();
+  const existing = await db.prepare(
+    "SELECT id FROM engagements WHERE id = ? AND owner_id = ? LIMIT 1"
+  ).bind(id, owner).first<DbRow>();
+  if (!existing) return false;
+  await db.batch([
+    db.prepare("DELETE FROM artifacts WHERE engagement_id = ? AND owner_id = ?").bind(id, owner),
+    db.prepare("DELETE FROM transcripts WHERE engagement_id = ? AND owner_id = ?").bind(id, owner),
+    db.prepare("DELETE FROM activities WHERE engagement_id = ? AND owner_id = ?").bind(id, owner),
+    db.prepare("DELETE FROM intents WHERE engagement_id = ? AND owner_id = ?").bind(id, owner),
+    db.prepare("DELETE FROM engagements WHERE id = ? AND owner_id = ?").bind(id, owner),
+  ]);
+  return true;
+}
+
 export async function createIntent(
   engagement: Engagement,
   type: string,

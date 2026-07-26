@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { requirePrincipal } from "@/lib/auth";
+import { advisorAuthMode, requirePrincipalAsync } from "@/lib/auth";
 import { firefliesConfigured } from "@/lib/fireflies";
 import { integrationRuntimeStatus } from "@/lib/integrations";
 import { openAIResearchConfigured, openAIResearchModel } from "@/lib/openai-research";
@@ -19,12 +19,13 @@ export async function GET(request: Request) {
   return route(async () => {
     // Which providers are wired up is not public information: it describes the
     // deployment. Scope it to a signed-in advisor like every other route.
-    requirePrincipal(request);
+    await requirePrincipalAsync(request);
     await ensureDatabase();
     // The adapters decide whether they are configured. Reading that back here keeps
     // this screen from drifting away from what a write would actually do.
     const runtime = new Map(integrationRuntimeStatus().map((item) => [item.id, item]));
     const adapterReady = (id: string): boolean => runtime.get(id)?.configured ?? false;
+    const authMode = advisorAuthMode();
     return {
       integrations: [
         {
@@ -62,10 +63,22 @@ export async function GET(request: Request) {
         {
           id: "advisor_auth",
           name: "Advisor authentication",
-          status: hasAll("REQUIRE_ADVISOR_AUTH") ? "enforced" : "single_advisor",
-          mode: "sites_identity_headers_with_owner_scoping",
-          setup: "Every record is scoped to the signed-in advisor. Set REQUIRE_ADVISOR_AUTH=1 to refuse unauthenticated requests before exposing the app to more than one advisor.",
-          environmentVariables: ["REQUIRE_ADVISOR_AUTH", "LOCAL_ADVISOR_EMAIL"],
+          status: authMode === "cloudflare-access" ? "enforced"
+            : authMode === "sites-headers" ? "enforced"
+            : authMode === "denied" ? "misconfigured"
+            : "single_advisor",
+          mode: authMode,
+          setup: authMode === "cloudflare-access"
+            ? "Cloudflare Access is the identity provider. Every request must carry a signed Access JWT, which is verified against your team's public keys before an advisor is resolved."
+            : authMode === "sites-headers"
+              ? "Identity comes from the hosting layer's authenticated-user headers."
+              : authMode === "denied"
+                ? "Only one of CF_ACCESS_TEAM_DOMAIN / CF_ACCESS_AUD is set while advisor auth is required. Set both, or unset both, before deploying."
+                : "Everyone is treated as one local advisor. Put Cloudflare Access in front and set CF_ACCESS_TEAM_DOMAIN, CF_ACCESS_AUD and REQUIRE_ADVISOR_AUTH=1 before more than one person uses this.",
+          environmentVariables: [
+            "REQUIRE_ADVISOR_AUTH", "LOCAL_ADVISOR_EMAIL",
+            "CF_ACCESS_TEAM_DOMAIN", "CF_ACCESS_AUD",
+          ],
           storesSecrets: false,
         },
         {

@@ -1,4 +1,4 @@
-import { requirePrincipal } from "@/lib/auth";
+import { requirePrincipalAsync } from "@/lib/auth";
 import { route } from "@/lib/http";
 import { resolveMetricDirection } from "@/lib/metric-direction";
 import { CONSTRAINT_TYPES, isOneOf } from "@/lib/workflow";
@@ -12,7 +12,7 @@ export const dynamic = "force-dynamic";
  */
 export async function GET(request: Request) {
   return route(async () => {
-    requirePrincipal(request);
+    await requirePrincipalAsync(request);
     const params = new URL(request.url).searchParams;
     const constraintType = params.get("constraintType");
     return {

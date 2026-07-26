@@ -1,4 +1,4 @@
-import { requirePrincipal } from "@/lib/auth";
+import { requirePrincipalAsync } from "@/lib/auth";
 import { engagementId, readJson, route } from "@/lib/http";
 import { requirePatchCommand } from "@/lib/guards";
 import { getEngagement, listActivities, listArtifacts, listIntents, updateEngagement } from "@/lib/store";
@@ -9,7 +9,7 @@ type Context = { params: Promise<{ id: string }> };
 
 export async function GET(request: Request, context: Context) {
   return route(async () => {
-    const principal = requirePrincipal(request);
+    const principal = await requirePrincipalAsync(request);
     const id = await engagementId(context);
     const engagement = await getEngagement(id, principal.ownerId);
     if (!engagement) throw new Error("Engagement not found");
@@ -24,7 +24,7 @@ export async function GET(request: Request, context: Context) {
 
 export async function PATCH(request: Request, context: Context) {
   return route(async () => {
-    const principal = requirePrincipal(request);
+    const principal = await requirePrincipalAsync(request);
     const id = await engagementId(context);
     const command = requirePatchCommand(await readJson<unknown>(request));
     if (command.command === "update_metadata") {

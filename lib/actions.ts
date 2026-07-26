@@ -1,5 +1,14 @@
 import type { Principal } from "./auth";
 import { applyCanvasUpdates, buildCanvasFromResearch, mergeCanvas } from "./canvas";
+import {
+  DEMO_TIMELINE,
+  buildDemoEngagement,
+  demoActivities,
+  demoArtifacts,
+  demoEngagementIdFor,
+  demoSpeakerRoles,
+  demoTranscript,
+} from "./demo";
 import { fetchFirefliesTranscript } from "./fireflies";
 import {
   generateAuditReport,
@@ -30,9 +39,11 @@ import {
   createArtifact,
   createIntent,
   createTranscript,
+  deleteEngagementCascade,
   getArtifact,
   getEngagement,
   getIntent,
+  insertEngagement,
   updateEngagement,
   updateIntentStatus,
 } from "./store";
@@ -552,6 +563,45 @@ export async function createDocumentPublishIntent(
     outcome: "No document was published; intent is pending explicit approval",
   });
   return { engagement, intent };
+}
+
+/**
+ * Seed the Practice-mode engagement: one fully worked, entirely fictional client an advisor
+ * can walk end to end before touching a real one. Deterministic and offline — it needs no
+ * API key, costs nothing, and shows every advisor the identical worked example.
+ */
+export async function seedDemoEngagement(principal: Principal, reset = false) {
+  const id = demoEngagementIdFor(principal.ownerId);
+  const existing = await getEngagement(id, principal.ownerId);
+  if (existing && !reset) return { engagement: existing, seeded: false };
+  if (existing) await deleteEngagementCascade(id, principal.ownerId);
+
+  const engagement = buildDemoEngagement(principal.ownerId, DEMO_TIMELINE.catalogWritten);
+  await insertEngagement(engagement);
+  for (const artifact of demoArtifacts(engagement)) await createArtifact(engagement, artifact);
+  for (const activity of demoActivities()) await addActivity(engagement, activity);
+  for (const callNumber of [1, 2] as const) {
+    await createTranscript(engagement, {
+      callNumber,
+      source: "paste",
+      title: `${engagement.client} — Call ${callNumber} transcript (practice)`,
+      rawText: demoTranscript(callNumber),
+      data: { practice: true, speakerRoles: demoSpeakerRoles() },
+    });
+  }
+  return { engagement, seeded: true };
+}
+
+export async function removeDemoEngagement(principal: Principal) {
+  const removed = await deleteEngagementCascade(
+    demoEngagementIdFor(principal.ownerId),
+    principal.ownerId,
+  );
+  return { removed };
+}
+
+export async function getDemoEngagement(principal: Principal) {
+  return { engagement: await getEngagement(demoEngagementIdFor(principal.ownerId), principal.ownerId) };
 }
 
 /**

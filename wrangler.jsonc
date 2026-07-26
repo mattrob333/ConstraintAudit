@@ -1,0 +1,119 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+
+  // ---------------------------------------------------------------------------------------------
+  // Cloudflare Workers deployment configuration for the Tier 4 Advisor Cockpit.
+  //
+  // READ THIS FIRST. Two things about this file are unusual, and both are deliberate:
+  //
+  // 1. Everything that matters lives under `env.production`, not at the top level.
+  //    `vite.config.ts` builds its Worker bindings inline and the Cloudflare Vite plugin
+  //    auto-discovers any `wrangler.jsonc` sitting in the repo root and MERGES it with those
+  //    inline bindings — arrays are concatenated, not replaced. A top-level `d1_databases` here
+  //    would give `npm run dev` two D1 bindings both named `DB`, and local development would
+  //    silently start using a different local database. Keeping the deploy configuration inside a
+  //    named environment keeps it invisible to the dev server. The top level below is limited to
+  //    values that already match what the dev server computes for itself, so merging changes
+  //    nothing.
+  //
+  //    => If you paste new bindings into this file (for example the `d1_databases` snippet that
+  //       `wrangler d1 create` prints), paste them INSIDE `env.production`, never at the top level.
+  //
+  // 2. Deploy commands must name this file and this environment:
+  //
+  //       npm run build
+  //       npx wrangler deploy -c wrangler.jsonc -e production
+  //
+  //    `npm run build` writes its own generated config to `dist/server/wrangler.json` and a
+  //    redirect at `.wrangler/deploy/config.json`. A bare `npx wrangler deploy` follows that
+  //    redirect and would deploy with the placeholder D1 database id from `vite.config.ts`, not
+  //    the real one below. Always pass `-c wrangler.jsonc -e production`.
+  //
+  // Full walkthrough, including Cloudflare Access: docs/DEPLOYMENT.md
+  // ---------------------------------------------------------------------------------------------
+
+  // Worker name. Also the `<name>.<your-subdomain>.workers.dev` hostname.
+  "name": "tier4-advisor-cockpit",
+
+  // Which version of the Workers runtime API this code is written against. Matches the date the
+  // build already uses, so the dev server behaves identically with or without this file.
+  "compatibility_date": "2026-05-15",
+
+  "env": {
+    "production": {
+      // Repeated explicitly: with named environments Wrangler otherwise deploys a separate Worker
+      // called `tier4-advisor-cockpit-production`.
+      "name": "tier4-advisor-cockpit",
+      "compatibility_date": "2026-05-15",
+
+      // `nodejs_compat` gives the Worker the Node built-ins the app and its dependencies expect.
+      // Required — the build sets the same flag.
+      "compatibility_flags": ["nodejs_compat"],
+
+      // The server bundle produced by `npm run build` (vinext + @cloudflare/vite-plugin).
+      // Verified against `dist/server/wrangler.json`, which the build generates: its `main` is
+      // `index.js` relative to `dist/server`. Run `npm run build` before deploying or this path
+      // will not exist.
+      "main": "./dist/server/index.js",
+
+      // Vite has already bundled the server. `no_bundle` tells Wrangler to upload the emitted
+      // files as-is instead of re-bundling them, and `rules` tells it which sibling files to
+      // upload alongside `main`. `dist/server/index.js` reaches the renderer through a runtime
+      // `import("./ssr/index.js")`, so that second module must be uploaded too — without these two
+      // settings the deployed Worker fails at request time, not at deploy time. Both mirror the
+      // generated `dist/server/wrangler.json`.
+      "no_bundle": true,
+      "rules": [{ "type": "ESModule", "globs": ["**/*.js", "**/*.mjs"] }],
+
+      // Static assets (client JS/CSS, /docs, images). Cloudflare serves a matching file directly
+      // and forwards everything else to the Worker. The `binding` exposes the same files to the
+      // Worker as `env.ASSETS`, which `worker/index.ts` uses for image optimization.
+      "assets": {
+        "directory": "./dist/client",
+        "binding": "ASSETS"
+      },
+
+      // Cloudflare D1 — every engagement, artifact, transcript, activity and intent.
+      // `binding` MUST stay `DB`: that is what `db/index.ts` reads and what `.openai/hosting.json`
+      // declares. Create the database first and paste its id here:
+      //
+      //     npx wrangler d1 create tier4-advisor-cockpit
+      //
+      // REPLACE the database_id placeholder below with the uuid that command prints.
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "tier4-advisor-cockpit",
+          "database_id": "REPLACE_ME_WITH_THE_D1_DATABASE_ID"
+        }
+      ],
+
+      // Cloudflare Images, used only by the `/_vinext/image` optimizer in `worker/index.ts`.
+      // Optional: if your account does not have Images enabled and `wrangler deploy` rejects this
+      // block, delete it. Images then render unoptimized instead of failing.
+      "images": { "binding": "IMAGES" },
+
+      // Serve on https://tier4-advisor-cockpit.<your-subdomain>.workers.dev.
+      //
+      // Useful for a first smoke test, but SET THIS TO false ONCE CLOUDFLARE ACCESS IS IN PLACE.
+      // Access protects hostnames on a zone in your own Cloudflare account; it cannot be put in
+      // front of a workers.dev URL, so leaving workers.dev enabled leaves a second door into the
+      // same Worker that Access never sees. `lib/auth.ts` fails closed on that door — with
+      // CF_ACCESS_* configured, a request with no verified Access assertion gets 401 — but do not
+      // rely on that alone. Serve the app from a custom domain and turn this off:
+      //
+      // "workers_dev": false,
+      // "routes": [{ "pattern": "cockpit.example.com", "custom_domain": true }],
+      "workers_dev": true,
+
+      // Logs and traces in the Cloudflare dashboard. Nothing here is client data; the app never
+      // logs a token, key, or transcript.
+      "observability": { "enabled": true }
+
+      // Configuration values are NOT set here. Everything in .env.example, plus
+      // CF_ACCESS_TEAM_DOMAIN, CF_ACCESS_AUD and REQUIRE_ADVISOR_AUTH, is set with
+      // `npx wrangler secret put <NAME> -c wrangler.jsonc -e production` so no credential is ever
+      // committed to this repository. See docs/DEPLOYMENT.md.
+    }
+  }
+}

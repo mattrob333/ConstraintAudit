@@ -196,14 +196,62 @@ function clientStatedNumbers(engagement: Engagement, finding: ConstraintFinding)
     const number = text(symptom.number);
     if (number) lines.push(`- ${number} — ${text(symptom.statement) || "symptom recorded without a statement"}`);
   }
+  // `metric.value` already carries its unit ("3 days"), so appending unit and period blindly
+  // produced "four years years". Only add a part the value does not already contain, and drop
+  // the generated label entirely — "Client-stated year metric" is not language to read to a client.
+  const seen = new Set<string>();
   for (const record of synthesisRecords(engagement)) {
     for (const metric of record.metrics ?? []) {
-      const value = [text(metric.value), text(metric.unit), text(metric.period)].filter(Boolean).join(" ");
+      const value = text(metric.value);
       if (!value) continue;
-      lines.push(`- ${text(metric.label) || "Metric"}: ${value} — “${text(metric.quote)}” (${text(metric.speaker)}, ${text(metric.timestamp)})`);
+      const lower = value.toLowerCase();
+      const measure = [value, ...[text(metric.unit), text(metric.period)]
+        .filter((part) => part && !lower.includes(part.toLowerCase()))].join(" ");
+      const quote = text(metric.quote);
+      // Overlapping extraction patterns can match the same figure in one line twice.
+      const key = `${measure.toLowerCase()}|${quote.toLowerCase()}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      lines.push(`- ${measure} — “${quote}” (${text(metric.speaker)}, ${text(metric.timestamp)})`);
     }
   }
   return lines;
+}
+
+/**
+ * A client call contains every number the client happened to say — the age of their website,
+ * how long a former hire lasted. Reading all of them back is noise that undermines the
+ * advisor, so a client-facing page keeps only the figures that bear on this constraint.
+ */
+function constraintRelevantNumbers(
+  engagement: Engagement,
+  finding: ConstraintFinding,
+  limit = 6,
+): string[] {
+  const all = clientStatedNumbers(engagement, finding);
+  const baselineTerms = [
+    text(finding.baselineMetric?.unit),
+    text(finding.baselineMetric?.period),
+    text(finding.baselineMetric?.value),
+  ].filter(Boolean).map((term) => term.toLowerCase());
+  const evidenceQuotes = (finding.evidence ?? [])
+    .map((item) => text(item.quote).toLowerCase())
+    .filter(Boolean);
+
+  const scored = all.map((line) => {
+    const lower = line.toLowerCase();
+    // Symptom-derived lines are advisor-recorded against this finding, so they always belong.
+    const isSymptom = !lower.includes("“");
+    const matchesBaseline = baselineTerms.some((term) => lower.includes(term));
+    const inEvidence = evidenceQuotes.some((quote) => quote && lower.includes(quote.slice(0, 40)));
+    return { line, score: (isSymptom ? 4 : 0) + (matchesBaseline ? 2 : 0) + (inEvidence ? 1 : 0) };
+  });
+  const relevant = scored.filter((item) => item.score > 0);
+  // If nothing scored, the honest answer is the unfiltered list rather than an empty page.
+  return (relevant.length ? relevant : scored)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit)
+    .map((item) => item.line);
 }
 
 function evidenceQuotes(finding: ConstraintFinding): string {
@@ -943,7 +991,7 @@ function agendaHeardBody(engagement: Engagement, finding: ConstraintFinding, quo
     .filter(Boolean);
   // Only the figures the client said out loud, each still carrying its quote; the
   // symptom-derived numbers are advisor-recorded and already listed above.
-  const numbers = clientStatedNumbers(engagement, finding).filter((line) => line.includes("“"));
+  const numbers = constraintRelevantNumbers(engagement, finding).filter((line) => line.includes("“"));
   if (!symptoms.length && !numbers.length && !quoteCount) {
     return `We are not going to tell you what we heard, because nothing has been recorded in your words yet. No client-stated evidence exists on this engagement.
 

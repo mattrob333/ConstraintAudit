@@ -1,12 +1,12 @@
 import { runResearch } from "@/lib/actions";
-import { requirePrincipal } from "@/lib/auth";
+import { requirePrincipalAsync } from "@/lib/auth";
 import { engagementId, readJson, route } from "@/lib/http";
 
 type Context = { params: Promise<{ id: string }> };
 
 export async function POST(request: Request, context: Context) {
   return route(async () => {
-    const principal = requirePrincipal(request);
+    const principal = await requirePrincipalAsync(request);
     const id = await engagementId(context);
     const input = await readJson<{ sourceUrl?: string }>(request);
     return runResearch(id, principal, input.sourceUrl);
