@@ -159,6 +159,233 @@ const sectionLabels: Record<DiscoverySection, string> = {
   feasibility: "What can actually change",
 };
 
+/* ===========================================================================
+ * ADVISOR COACHING LAYER — copy and data
+ * ---------------------------------------------------------------------------
+ * Everything from here to the end of this block is guidance the ADVISOR reads
+ * or says. It is not evidence. It is never client-stated, never enters quotes,
+ * metrics, the Canvas, or a transcript, and it is never posted to an evidence
+ * endpoint. The only place any of it can be persisted is the advisor's own gap
+ * register (see `mergeGapNotes`), which writes to the engagement's free-text
+ * notes under an explicit "advisor" heading.
+ *
+ * It is also never rendered while the call view is being shared with a client.
+ * The single gate for that is <AdvisorOnly hidden={…} />, which returns null —
+ * the coaching is absent from the DOM, not merely styled out of view.
+ * =========================================================================== */
+
+/** The three call answers, in the order they appear. Index 2 is the unknown. */
+const answerChoices = ["That’s right", "Correct it", "We don’t know yet"] as const;
+const UNKNOWN_ANSWER: string = answerChoices[2];
+
+type CoachTab = "followups" | "unknown" | "steer" | "objections" | "glossary";
+
+const coachTabs: Array<{ id: CoachTab; label: string; icon: IconName }> = [
+  { id: "followups", label: "Go deeper", icon: "search" },
+  { id: "unknown", label: "They don’t know", icon: "info" },
+  { id: "steer", label: "Steer back", icon: "refresh" },
+  { id: "objections", label: "Pushback", icon: "shield" },
+  { id: "glossary", label: "Plain English", icon: "document" },
+];
+
+/** A spoken noun phrase for each section, dropped into the steer-back lines. */
+const sectionTopic: Record<DiscoverySection, string> = {
+  demand: "how work comes in the door",
+  promise: "what you actually sell them",
+  flow: "how a job moves through the business",
+  constraint: "where the work waits",
+  baseline: "the rough numbers",
+  roles: "who does what",
+  feasibility: "what could realistically change",
+};
+
+/** Derived probes for a thin or hedged answer, chosen by what the question asked for. */
+const probesByAnswerType: Record<DiscoveryQuestion["expectedAnswerType"], string[]> = {
+  narrative: [
+    "Can you walk me through the last real one, start to finish?",
+    "And then what happens — who picks it up next?",
+    "Where does that usually go wrong?",
+  ],
+  number: [
+    "Roughly — is that closer to five or fifty?",
+    "Take a normal month, not your best one. What does that look like?",
+    "You don’t have to be exact. What would you guess, and how far out could you be?",
+  ],
+  person: [
+    "Who specifically, by name?",
+    "Is that the person who does it, or the person who signs it off?",
+    "And if they’re away that week, who does it instead?",
+  ],
+  choice: [
+    "If you had to pick one, which is it most of the time?",
+    "How often does it go the other way?",
+    "What makes it go one way rather than the other?",
+  ],
+};
+
+/** Always available, whatever the question is. These reopen an answer that closed too early. */
+const universalProbes = [
+  "Say more about that.",
+  "When did you last see that happen?",
+  "What does that cost you when it goes wrong?",
+];
+
+/** For “I don’t know”, “it depends”, “I’d have to check”. An unknown is information, not a dead end. */
+const unknownProbes = [
+  "That’s completely fine — who in the business would know?",
+  "What would we have to look at to find out? A report, an inbox, a spreadsheet?",
+  "Give me your gut number and we’ll write it down as a guess. A rough figure beats a blank.",
+  "Is it that nobody knows, or that nobody has looked?",
+];
+
+/** Literal phrases for bringing a wandering client back without being rude. */
+function steerLines(section: DiscoverySection): string[] {
+  const topic = sectionTopic[section] ?? "the question we were on";
+  return [
+    `That’s really useful — can I bring you back to ${topic} for a second?`,
+    `I want to come back to that, and I’m writing it down so we don’t lose it. First, ${topic}.`,
+    `Hold that thought — it might be the more interesting problem. Can we finish ${topic} first?`,
+    `Let me park that one. Back to ${topic} — where were we?`,
+  ];
+}
+
+/** Predictable pushback and a one-line answer the advisor can say as written. */
+const objectionScripts: Array<[string, string]> = [
+  ["We already tried that.", "Then you know more about it than I do. What did you try, and what made it stop working? That usually tells us where the real limit is."],
+  ["That’s just how it is in this industry.", "You might be right. I’d still like to know what it would take to change it — even if the honest answer turns out to be “nothing worth doing”."],
+  ["I don’t have those numbers.", "That’s fine, and it’s useful on its own. Give me your best guess and we’ll mark it as a guess. If nobody has the number, that’s often the first thing worth fixing."],
+  ["Is this going to turn into a big project?", "No. We’re looking for one step to change, not a transformation. If it does turn out to be big, we’ll tell you it’s big and you can say no."],
+  ["Can’t you just tell us what’s wrong?", "I could guess now and I’d probably be wrong. Give me twenty more minutes of how the work actually moves and it’s usually obvious to both of us."],
+  ["Everyone’s flat out — everything is a bottleneck.", "That’s how it feels, and it’s almost never true. Usually one step sets the pace and the rest is noise. That’s the one I’m hunting."],
+  ["Why are you asking about that? It isn’t the problem.", "Fair. I’m not assuming it is. I’m ruling it out, so that when I do point at something you know I looked everywhere else first."],
+  ["We don’t really have a process.", "Everybody has one, it’s just not written down. Tell me what happened with the last job and I’ll write it down for you."],
+];
+
+/** Plain-English vocabulary, written for an owner-operator. `say` is the line to use out loud. */
+const glossaryTerms: Array<{ term: string; plain: string; say: string }> = [
+  {
+    term: "Constraint",
+    plain: "The one step that limits how much work the whole business can finish. Speed up any other step and the total does not move.",
+    say: "A constraint is the one step that sets the pace for everything else. If we fix the wrong step, you finish exactly as much work next month as you did this month.",
+  },
+  {
+    term: "Throughput",
+    plain: "How much finished work actually comes out of the far end in a period. Not how much started, and not how busy anyone is.",
+    say: "Throughput is just how many jobs you actually finish in a month. Not how many you start — how many are done and paid for.",
+  },
+  {
+    term: "Bottleneck",
+    plain: "The everyday word for a constraint. Use it when “constraint” sounds academic.",
+    say: "It’s the narrow bit of the bottle. Everything upstream of it piles up, and everything downstream sits around waiting.",
+  },
+  {
+    term: "Cycle time",
+    plain: "How long one job takes from arriving to the customer calling it done — including every hour it spent waiting.",
+    say: "Cycle time is the clock your customer feels. From the moment they ask to the moment they’ve got it, including every day it sat on somebody’s desk.",
+  },
+  {
+    term: "Baseline",
+    plain: "Today's number, written down before anything changes, so afterwards we can prove whether it moved.",
+    say: "The baseline is just today’s number, written down before we touch anything. Without it we can’t tell you honestly whether anything got better.",
+  },
+  {
+    term: "Queue",
+    plain: "Work that has arrived but has not been started. The cheapest place to spot a constraint is wherever the queue is biggest.",
+    say: "A queue is work that’s turned up but nobody has picked up yet. Wherever the pile is biggest is usually where the limit is.",
+  },
+  {
+    term: "Rework",
+    plain: "Work done a second time because the first pass was wrong, incomplete, or came back.",
+    say: "Rework is anything you have to do twice. It burns the same hours as new work, and the customer never pays you for it.",
+  },
+  {
+    term: "Single point of dependency",
+    plain: "One person, system, or approval that everything has to pass through. Often the constraint, always a risk.",
+    say: "Sometimes there’s one person everything has to go through. It works fine right up until they’re on holiday — and quietly, it caps how much you can do.",
+  },
+  {
+    term: "Value flow",
+    plain: "The real path a job takes from first contact to done, with every handoff and every wait in it. Not the org chart, not the ideal process.",
+    say: "We’re mapping the actual route a job takes through your business. Not how it’s meant to go — how it went last Tuesday.",
+  },
+  {
+    term: "Business Model Canvas block",
+    plain: "One of nine boxes describing how the business works: who you serve, what you promise, how you deliver, what it costs, what it earns. Every finding is tagged to a box.",
+    say: "It’s a one-page map of the business — who you serve, what you promise, how you deliver it, what it costs and what it earns. We use it so we’re both pointing at the same part of the business.",
+  },
+  {
+    term: "Prescription",
+    plain: "The smallest change we think will move the constraint. One intervention, not a programme.",
+    say: "The prescription is the smallest thing we think you could change that would actually move the number. If it needs six months, it isn’t the prescription.",
+  },
+  {
+    term: "Constraint migration",
+    plain: "When you relieve one constraint, the limit moves somewhere else. That is success, not failure — and it tells you where to look next.",
+    say: "When we fix this one, something else becomes the slowest step. That’s not us being wrong — that’s how it’s meant to go, and it tells us where to look next.",
+  },
+];
+
+/** The shape of the hour, so an advisor knows where they should be and when. */
+const callArc: Array<[string, string, string]> = [
+  ["0–2 min", "Consent and framing", "Ask to record. Say what the hour is for: understanding how the work actually moves. You are not selling anything today."],
+  ["2–10 min", "How demand comes in, what you promise", "Easy ground on purpose. Let them talk. You are learning their words for things, not testing them."],
+  ["10–30 min", "Trace one real job, end to end", "The heart of the call. One real job, last week if possible, from first contact to paid. Every handoff, every wait."],
+  ["30–42 min", "Where it waits or loops", "Now hunt. Where does work pile up, come back, or wait on one person?"],
+  ["42–50 min", "The numbers that anchor it", "Rough is fine. Volume in a normal month, typical turnaround, what is waiting right now, what got turned away."],
+  ["50–58 min", "Who owns it, what could change", "Get a name. Find out what they are allowed to change without a board meeting."],
+  ["58–60 min", "Close", "Say what happens next and when. Do not diagnose on the call — you have not looked at the transcript yet."],
+];
+
+/** The three things that make the call a success. Everything else is a bonus. */
+const mustLeaveWith: Array<[string, string]> = [
+  ["A traced flow", "One real job, start to finish, in their words — with the handoffs and the waits actually in it."],
+  ["A candidate constraint", "One step you can point at and say “everything seems to wait here”. A candidate, not a verdict."],
+  ["A named owner", "A real person, by name, who owns that step. Not a department."],
+];
+
+/** What to do when the call gets away from you. Read one of these out and carry on. */
+const ifYouGetLost: string[] = [
+  "“Can I just check I’ve got this right?” — then say their flow back to them, slightly wrong, on purpose. They will correct you, and the correction is the good bit.",
+  "“Take me to the last real one.” A specific job from last week beats any general answer, every time.",
+  "“What’s the bit about this that annoys you most?” That question gets you back to the constraint from anywhere in the conversation.",
+  "If you have completely lost the thread: open the next question and say “let me come back to that in a minute”. Nobody has ever minded.",
+];
+
+/** The advisor's own open questions from the guided call. Advisor notes — never client evidence. */
+type GapFlag = {
+  questionId: string; question: string; section: DiscoverySection;
+  owner: string; lookIn: string; flaggedAt: string;
+};
+
+const GAP_BLOCK_START = "<!-- tier4:call-gaps -->";
+const GAP_BLOCK_END = "<!-- /tier4:call-gaps -->";
+
+/**
+ * Rewrites the advisor's gap register inside the engagement's free-text notes.
+ * The managed block is replaced, never appended twice, and the rest of the notes
+ * are preserved byte-for-byte. The heading says "advisor" so nothing in here can
+ * later be mistaken for something the client said.
+ */
+function mergeGapNotes(existing: string, gaps: GapFlag[]): string {
+  const start = existing.indexOf(GAP_BLOCK_START);
+  const end = existing.indexOf(GAP_BLOCK_END);
+  const base = (start >= 0 && end > start
+    ? `${existing.slice(0, start)}\n${existing.slice(end + GAP_BLOCK_END.length)}`
+    : existing).trim();
+  if (!gaps.length) return base;
+  const lines = gaps.map((gap) => `- [${gap.section}] ${gap.question}${gap.owner ? ` — who would know: ${gap.owner}` : ""}${gap.lookIn ? ` — where to look: ${gap.lookIn}` : ""}`);
+  const block = [
+    GAP_BLOCK_START,
+    "## Gaps to chase — advisor, guided call",
+    "",
+    "Open questions the advisor flagged live. Advisor notes only: nothing here was stated by the client and nothing here is evidence.",
+    "",
+    ...lines,
+    GAP_BLOCK_END,
+  ].join("\n");
+  return base ? `${base}\n\n${block}` : block;
+}
+
 /** Used only when research produced no client-specific questions. Labelled generic everywhere it appears. */
 const genericScript: DiscoveryQuestion[] = [
   { id: "generic-flow", section: "flow", question: "Walk us through one request from the moment it arrives to the moment the customer calls it complete.", whyItMatters: "We are mapping the actual flow, including every handoff and approval.", publicAssumption: "No client-specific question set was produced, so nothing public is being asserted here.", sourceUrls: [], evidenceStatus: "gap", expectedAnswerType: "narrative", required: true, followUps: [] },
@@ -602,6 +829,11 @@ export default function AdvisorCockpit() {
   const [confirmed, setConfirmed] = useState(false);
   const [briefSent, setBriefSent] = useState(false);
   const [callIndex, setCallIndex] = useState(0);
+  /** Advisor-only coaching is rendered only while this is false. See <AdvisorOnly>. */
+  const [presenting, setPresenting] = useState(false);
+  const [gapFlags, setGapFlags] = useState<GapFlag[]>([]);
+  const [gapSave, setGapSave] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [gapError, setGapError] = useState("");
   const [consent, setConsent] = useState<"pending" | "recorded" | "not-recorded">("pending");
   const [call2Consent, setCall2Consent] = useState<"pending" | "recorded" | "not-recorded">("pending");
   const [answers, setAnswers] = useState<Record<string, string>>({});
@@ -773,6 +1005,8 @@ export default function AdvisorCockpit() {
       setResearchResult(researchResponse.research);
       setCanvas(researchResponse.engagement?.data?.canvas ?? null);
       setCallIndex(0);
+      setGapFlags([]); setGapSave("idle"); setGapError(""); setPresenting(false);
+      setAnswers({}); setNotes({}); setValues({});
       go("research");
       if (sourceOutcome) setNotice(sourceOutcome);
     } catch {
@@ -810,6 +1044,9 @@ export default function AdvisorCockpit() {
   async function resume(item: Engagement) {
     setCompany(item.companyName); setWebsite(item.website); setActiveId(item.id); setCallIndex(0);
     setContact(item.primaryContact); setRole(item.primaryContactRole); setEmail(item.email);
+    // The coaching state belongs to one engagement's call, never to the next one opened.
+    setGapFlags([]); setGapSave("idle"); setGapError(""); setPresenting(false);
+    setAnswers({}); setNotes({}); setValues({});
     setScheduleError(""); setScheduleSavedAt(""); setDeliverError(""); setAgendaError(""); setAgendaStep(0);
     const record = await loadEngagement(item.id);
     if (!record) return;
@@ -1147,6 +1384,59 @@ export default function AdvisorCockpit() {
     }
   }
 
+  /**
+   * The advisor's live gap register. These are the advisor's own open questions,
+   * flagged when the client says they do not know. They are advisor notes: they
+   * never become quotes, metrics, Canvas claims, or anything client-stated.
+   */
+  function flagGap(input: { owner: string; lookIn: string }) {
+    if (!callQuestion) return;
+    setGapSave("idle"); setGapError("");
+    setGapFlags((all) => [
+      ...all.filter((gap) => gap.questionId !== callQuestion.id),
+      {
+        flaggedAt: new Date().toISOString(), lookIn: input.lookIn, owner: input.owner,
+        question: callQuestion.question, questionId: callQuestion.id, section: callQuestion.section,
+      },
+    ]);
+  }
+
+  function unflagGap() {
+    if (!callQuestion) return;
+    setGapSave("idle"); setGapError("");
+    setGapFlags((all) => all.filter((gap) => gap.questionId !== callQuestion.id));
+  }
+
+  /**
+   * Writes the gap register into the engagement's free-text notes under an explicit
+   * advisor heading, replacing the managed block rather than appending to it. Uses
+   * `api` rather than `save` on purpose: a failure has to surface inside the coaching
+   * rail, not as a banner across a screen a client may be looking at.
+   */
+  async function saveGaps() {
+    if (!activeId) {
+      setGapSave("error");
+      setGapError("No engagement is open, so there is nowhere to write these. They are still listed here.");
+      return;
+    }
+    setGapSave("saving"); setGapError("");
+    try {
+      const current = await api<{ engagement: BackendEngagement }>(`/api/engagements/${activeId}`);
+      await api(`/api/engagements/${activeId}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          command: "update_metadata",
+          expectedVersion: current.engagement.version,
+          fields: { notes: mergeGapNotes(current.engagement.notes ?? "", gapFlags) },
+        }),
+      });
+      setGapSave("saved");
+    } catch (reason) {
+      setGapSave("error");
+      setGapError(`Not saved: ${reason instanceof Error ? reason.message : "unknown request failure"}. The gaps are still listed here — try again before you leave the call view.`);
+    }
+  }
+
   async function prepareCrmWriteBack() {
     if (!activeId) return setNotice("Action not completed: select or create an engagement first.");
     try {
@@ -1186,7 +1476,7 @@ export default function AdvisorCockpit() {
       {screen === "engagements" ? <Engagements engagements={engagements} loading={registryLoading} onBack={() => go("home")} onFresh={() => go("intake")} onResume={resume} /> : null}
       {screen === "research" ? <Research canvas={canvas} company={displayCompany} onBack={() => go("intake")} onPrepare={() => go("prepare")} research={researchResult} script={script} /> : null}
       {screen === "prepare" ? <Prepare briefSent={briefSent} call1At={call1At} call2At={call2At} contact={contact || "Primary contact"} email={email} onBack={() => go("research")} onCall={() => { setCallIndex(0); go("call"); }} onSaveSchedule={saveSchedule} onSend={() => { setConfirmed(false); setConfirmSend(true); }} savedAt={scheduleSavedAt} scheduleBusy={scheduleBusy} scheduleError={scheduleError} /> : null}
-      {screen === "call" && callQuestion ? <Call answer={answers[callQuestion.id] ?? ""} company={displayCompany} consent={consent} generic={script.generic} index={Math.min(callIndex, script.questions.length - 1)} notes={notes[callQuestion.id] ?? ""} onAnswer={(value) => setAnswers((all) => ({ ...all, [callQuestion.id]: value }))} onConsent={setConsent} onExit={() => go("prepare")} onNext={() => callIndex < script.questions.length - 1 ? setCallIndex(callIndex + 1) : go("transcript")} onNotes={(value) => setNotes((all) => ({ ...all, [callQuestion.id]: value }))} onPrevious={() => setCallIndex(Math.max(0, callIndex - 1))} onValue={(value) => setValues((all) => ({ ...all, [callQuestion.id]: value }))} question={callQuestion} scheduledAt={call1At} total={script.questions.length} value={values[callQuestion.id] ?? ""} /> : null}
+      {screen === "call" && callQuestion ? <Call answer={answers[callQuestion.id] ?? ""} company={displayCompany} consent={consent} gapError={gapError} gaps={gapFlags} gapSave={gapSave} generic={script.generic} index={Math.min(callIndex, script.questions.length - 1)} notes={notes[callQuestion.id] ?? ""} onAnswer={(value) => setAnswers((all) => ({ ...all, [callQuestion.id]: value }))} onConsent={setConsent} onExit={() => go("prepare")} onFlagGap={flagGap} onNext={() => callIndex < script.questions.length - 1 ? setCallIndex(callIndex + 1) : go("transcript")} onNotes={(value) => setNotes((all) => ({ ...all, [callQuestion.id]: value }))} onPresenting={setPresenting} onPrevious={() => setCallIndex(Math.max(0, callIndex - 1))} onSaveGaps={saveGaps} onUnflagGap={unflagGap} onValue={(value) => setValues((all) => ({ ...all, [callQuestion.id]: value }))} presenting={presenting} question={callQuestion} scheduledAt={call1At} total={script.questions.length} value={values[callQuestion.id] ?? ""} /> : null}
       {screen === "transcript" ? <Transcript callNumber={transcriptCallNumber} company={displayCompany} date={meetingDate} fileError={fileError} fileName={fileName} fileReading={fileReading} fileSummary={fileSummary} method={transcriptMethod} onAnalyze={analyze} onBack={() => transcriptCallNumber === 2 ? go("findings") : go("call")} onDate={setMeetingDate} onFile={selectTranscriptFile} onMethod={setTranscriptMethod} onText={setTranscript} ready={Boolean(transcriptFile)} text={transcript} /> : null}
       {screen === "synthesis" ? <Synthesis onApprove={() => approve("canvas")} onBack={() => go("transcript")} synthesis={synthesisResult} /> : null}
       {screen === "findings" ? <Findings agendaBusy={agendaBusy} agendaError={agendaError} consent={call2Consent} onApprove={() => approve("diagnosis")} onBack={() => go("synthesis")} onConsent={setCall2Consent} onPresent={openFindingsPresentation} owner={contact && role ? `${contact}, ${role}` : ""} scheduledAt={call2At} synthesis={synthesisResult} /> : null}
@@ -1309,6 +1599,162 @@ function Research({ canvas, company, onBack, onPrepare, research, script }: {
   </section>;
 }
 
+/**
+ * THE ADVISOR-ONLY BOUNDARY.
+ *
+ * Everything passed in as `children` is coaching for the advisor: lines to say,
+ * probes, objection answers, the glossary, the gap register. None of it is
+ * client-facing and none of it is evidence.
+ *
+ * When `hidden` is true this renders NOTHING. Not `display: none`, not
+ * `visibility: hidden`, not off-screen, not `aria-hidden` — absent from the DOM.
+ * A screen share, a screenshot, a scroll, and a screen reader all see the same
+ * thing: no coaching. The guided call passes `hidden={presenting}`, so the
+ * moment the advisor says they are sharing their screen the whole layer is gone.
+ *
+ * Every piece of coaching in this file is rendered inside an <AdvisorOnly>.
+ * If you add more, put it inside one — never beside one.
+ */
+function AdvisorOnly({ children, hidden, label = "Advisor only · the client never sees this" }: {
+  children: React.ReactNode; hidden: boolean; label?: string;
+}) {
+  if (hidden) return null;
+  return <div className="advisor-only" data-advisor-only="true">
+    <p className="advisor-only-flag"><Icon name="lock" size={13} />{label}</p>
+    {children}
+  </div>;
+}
+
+/** Speakable lines. Tapping one ticks it off so the advisor can see what they already used. */
+function CoachLines({ lines, onUse, used }: { lines: string[]; used: Record<string, boolean>; onUse: (line: string) => void }) {
+  return <ul className="coach-lines">{lines.map((line) =>
+    <li key={line}><button aria-pressed={Boolean(used[line])} className={used[line] ? "used" : ""} onClick={() => onUse(line)} type="button">
+      <Icon name={used[line] ? "check" : "arrow"} size={14} /><span>{line}</span>
+    </button></li>)}
+  </ul>;
+}
+
+/** Tap-to-reveal vocabulary. `rail` is the in-call version; `page` is the study-it-beforehand version. */
+function GlossaryPanel({ variant }: { variant: "rail" | "page" }) {
+  const [open, setOpen] = useState("");
+  return <div className={`glossary ${variant}`}>
+    <p className="coach-lead">{variant === "page"
+      ? "Tap a word for the plain-English version and the exact line you can say if a client asks. Five minutes here before the call is worth it."
+      : "One tap, no scrolling away. The second line is what to say out loud."}</p>
+    <ul>{glossaryTerms.map((item) => {
+      const isOpen = open === item.term;
+      return <li key={item.term}>
+        <button aria-expanded={isOpen} onClick={() => setOpen(isOpen ? "" : item.term)} type="button"><span>{item.term}</span><Icon name="chevron" size={14} /></button>
+        {isOpen ? <div className="glossary-body"><p>{item.plain}</p><p className="coach-say"><span>Say it like this</span>“{item.say}”</p></div> : null}
+      </li>;
+    })}</ul>
+  </div>;
+}
+
+/** The pre-call briefing. Read once, feel ready. Advisor guidance — it is not in the client brief. */
+function CallBriefing() {
+  return <details className="briefing" open>
+    <summary><span className="briefing-mark"><Icon name="people" size={19} /></span><span><strong>How this call goes</strong><small>The arc of the hour, the three things you must leave with, and what to do if you get lost.</small></span><Icon name="chevron" size={15} /></summary>
+    <div className="briefing-body">
+      <section><p className="eyebrow">The arc of the hour</p>
+        <ol className="briefing-arc">{callArc.map(([when, title, detail]) => <li key={title}><b>{when}</b><div><strong>{title}</strong><span>{detail}</span></div></li>)}</ol>
+      </section>
+      <section><p className="eyebrow">Leave with these three things</p>
+        <div className="briefing-musts">{mustLeaveWith.map(([title, detail], index) => <article key={title}><b>{index + 1}</b><strong>{title}</strong><p>{detail}</p></article>)}</div>
+        <p className="briefing-note"><Icon name="check" size={15} />Get all three and the call worked. Everything else is a bonus, and the transcript will catch what you missed.</p>
+      </section>
+      <section><p className="eyebrow">If you get lost</p>
+        <ul className="briefing-lost">{ifYouGetLost.map((line) => <li key={line}>{line}</li>)}</ul>
+      </section>
+      <p className="briefing-note"><Icon name="shield" size={15} />You are not expected to have the answer on the call. Your job is to get the flow, the waiting, and a name. The diagnosis happens afterwards with the transcript in front of you.</p>
+    </div>
+  </details>;
+}
+
+/**
+ * The in-call coaching rail. Always mounted beside the question while the advisor
+ * is not presenting, so switching panels swaps content inside a fixed column and
+ * never reflows the question the client is reading.
+ */
+function CoachRail(props: {
+  question: DiscoveryQuestion; answer: string; flagged: GapFlag | undefined; gaps: GapFlag[];
+  gapSave: "idle" | "saving" | "saved" | "error"; gapError: string; onHide: () => void;
+  onFlag: (input: { owner: string; lookIn: string }) => void; onUnflag: () => void; onSaveGaps: () => void;
+}) {
+  // Keyed on the question id by the caller, so ticked lines and half-typed gap leads
+  // never survive into the next question. Only the unknown jump is adjusted in render.
+  const unknown = props.answer === UNKNOWN_ANSWER;
+  const [tab, setTab] = useState<CoachTab>(unknown ? "unknown" : "followups");
+  const [sawUnknown, setSawUnknown] = useState(unknown);
+  const [used, setUsed] = useState<Record<string, boolean>>({});
+  const [owner, setOwner] = useState("");
+  const [lookIn, setLookIn] = useState("");
+  if (unknown !== sawUnknown) {
+    setSawUnknown(unknown);
+    if (unknown) setTab("unknown");
+  }
+  const use = (line: string) => setUsed((all) => ({ ...all, [line]: !all[line] }));
+  const research = props.question.followUps.filter((line) => line.trim());
+  const derived = probesByAnswerType[props.question.expectedAnswerType] ?? probesByAnswerType.narrative;
+  const unflagged = unknown && !props.flagged;
+  return <aside aria-label="Advisor coaching" className="coach-rail">
+    <nav aria-label="Coaching topics" className="coach-tabs" role="tablist">{coachTabs.map((item) =>
+      <button aria-selected={tab === item.id} className={`${tab === item.id ? "active" : ""}${item.id === "unknown" && unflagged ? " alert" : ""}`} key={item.id} onClick={() => setTab(item.id)} role="tab" type="button"><Icon name={item.icon} size={14} />{item.label}</button>)}
+    </nav>
+    <div className="coach-body">
+      {tab === "followups" ? <div className="coach-panel">
+        <p className="coach-lead">They have answered. Do not move on yet — one of these turns a sentence into the actual story.</p>
+        {research.length ? <><p className="coach-group">Written for this client</p><CoachLines lines={research} onUse={use} used={used} /></> : null}
+        <p className="coach-group">{research.length ? "If the answer is still vague" : `No research follow-ups for this one · ${props.question.expectedAnswerType} answer expected`}</p>
+        <CoachLines lines={derived} onUse={use} used={used} />
+        <p className="coach-group">Works on any answer</p>
+        <CoachLines lines={universalProbes} onUse={use} used={used} />
+      </div> : null}
+      {tab === "unknown" ? <div className="coach-panel">
+        <p className="coach-lead">“I don’t know”, “it depends”, “I’d have to check” — that is information. Do not let it pass as an answer.</p>
+        <CoachLines lines={unknownProbes} onUse={use} used={used} />
+        <div className={`gap-flag${props.flagged ? " done" : ""}`}>
+          {props.flagged ? <>
+            <Pill tone="missing">Flagged as a gap to chase</Pill>
+            <p>{props.flagged.owner ? `Who would know: ${props.flagged.owner}. ` : ""}{props.flagged.lookIn ? `Where to look: ${props.flagged.lookIn}.` : ""}{!props.flagged.owner && !props.flagged.lookIn ? "No lead recorded yet — worth going back for one before the call ends." : ""}</p>
+            <button className="call-link" onClick={props.onUnflag} type="button">Remove this flag</button>
+          </> : <>
+            <p className="coach-group">Turn it into something you can chase</p>
+            <label><span>Who would know?</span><input onChange={(event) => setOwner(event.target.value)} placeholder="Dave in the workshop" value={owner} /></label>
+            <label><span>Where would we look?</span><input onChange={(event) => setLookIn(event.target.value)} placeholder="The job board, or March invoices" value={lookIn} /></label>
+            <Button icon="plus" onClick={() => props.onFlag({ lookIn: lookIn.trim(), owner: owner.trim() })} variant="secondary">Flag this as a gap</Button>
+          </>}
+        </div>
+        {unflagged ? <p className="coach-warn" role="status"><Icon name="info" size={15} />You marked this “we don’t know yet”. Flag it before you move on, or it goes nowhere.</p> : null}
+        <div className="gap-register">
+          <p className="coach-group">Gaps to chase · {props.gaps.length}</p>
+          {props.gaps.length ? <ul>{props.gaps.map((gap) => <li key={gap.questionId}><b>{gap.section}</b><span>{gap.question}</span></li>)}</ul> : <p className="coach-empty">Nothing flagged yet.</p>}
+          <Button disabled={!props.gaps.length || props.gapSave === "saving"} icon="upload" onClick={props.onSaveGaps} variant="secondary">{props.gapSave === "saving" ? "Saving…" : "Save to the engagement record"}</Button>
+          {props.gapSave === "saved" ? <p className="coach-ok"><Icon name="check" size={14} />Written to the engagement notes as advisor gaps. They are not evidence and never become a client quote.</p> : null}
+          {props.gapSave === "error" ? <p className="coach-warn" role="alert"><Icon name="info" size={14} />{props.gapError}</p> : null}
+        </div>
+      </div> : null}
+      {tab === "steer" ? <div className="coach-panel">
+        <p className="coach-lead">They have gone somewhere else. Let them finish the sentence, then use one of these.</p>
+        <CoachLines lines={steerLines(props.question.section)} onUse={use} used={used} />
+        <p className="coach-note"><Icon name="info" size={14} />A tangent is often the real problem wearing a disguise. Put it in your notes before you steer — do not just drop it.</p>
+      </div> : null}
+      {tab === "objections" ? <div className="coach-panel">
+        <p className="coach-lead">Say these as written. They are short on purpose — a long answer sounds defensive.</p>
+        <div className="objection-list">
+          <article className="tied"><b>“Why does that matter?”</b><p>“Fair question. {props.question.whyItMatters}”</p><small>Built from this question’s own reason, so the answer is specific instead of a platitude.</small></article>
+          {objectionScripts.map(([trigger, reply]) => <article key={trigger}><b>“{trigger}”</b><p>“{reply}”</p></article>)}
+        </div>
+      </div> : null}
+      {tab === "glossary" ? <div className="coach-panel"><GlossaryPanel variant="rail" /></div> : null}
+    </div>
+    <footer className="coach-foot">
+      <button onClick={props.onHide} type="button"><Icon name="lock" size={13} />Hide all of this (Esc)</button>
+      <small>Coaching only. Nothing here is recorded as something the client said.</small>
+    </footer>
+  </aside>;
+}
+
 function Prepare({ briefSent, call1At, call2At, contact, email, onBack, onCall, onSaveSchedule, onSend, savedAt, scheduleBusy, scheduleError }: {
   briefSent: boolean; call1At: string | null; call2At: string | null; contact: string; email: string;
   onBack: () => void; onCall: () => void; onSend: () => void; savedAt: string; scheduleBusy: boolean; scheduleError: string;
@@ -1318,6 +1764,13 @@ function Prepare({ briefSent, call1At, call2At, contact, email, onBack, onCall, 
   const [call2, setCall2] = useState(toLocalInput(call2At));
   const dirty = call1 !== toLocalInput(call1At) || call2 !== toLocalInput(call2At);
   return <section className="guided document-page"><Back onClick={onBack}>Research review</Back><PageHead eyebrow="Prepare · Client-facing brief" side={<Pill tone={briefSent ? "success" : "assumed"}>{briefSent ? "Send intent recorded" : "Draft · no send intent"}</Pill>} title="Put the right facts within reach.">Review exactly what the client will see. Internal research, questions, and constraint hypotheses stay private.</PageHead>
+    {/* Advisor preparation. Never part of the client brief and never sent — see AdvisorOnly. */}
+    <AdvisorOnly hidden={false} label="Advisor only · not in the client brief, not sent to anyone">
+      <CallBriefing />
+      <details className="briefing glossary-study"><summary><span className="briefing-mark"><Icon name="document" size={19} /></span><span><strong>Plain English for the words we use</strong><small>Constraint, throughput, cycle time, baseline and the rest — with the line to say if a client asks.</small></span><Icon name="chevron" size={15} /></summary>
+        <div className="briefing-body"><GlossaryPanel variant="page" /></div>
+      </details>
+    </AdvisorOnly>
     <div className="schedule-panel">
       <div><p className="eyebrow">Meeting times</p><strong>{formatMeeting(call1At)}</strong><small>Discovery call · {call2At ? `Findings Call ${formatMeeting(call2At)}` : "Findings Call not scheduled yet"}</small></div>
       <label><span>Discovery call (call 1)</span><input onChange={(event) => setCall1(event.target.value)} type="datetime-local" value={call1} /></label>
@@ -1338,21 +1791,52 @@ function Prepare({ briefSent, call1At, call2At, contact, email, onBack, onCall, 
   </section>;
 }
 
+/**
+ * The guided call. Two modes, one switch.
+ *
+ * `presenting === false` — the advisor is looking at this alone. The coaching
+ * rail is mounted beside the question.
+ * `presenting === true` — the advisor has said they are sharing their screen.
+ * Every <AdvisorOnly> in here returns null, the question takes the full width,
+ * and the screen is exactly the client-facing view it has always been.
+ *
+ * Escape is the panic key: it turns presenting on immediately, from anywhere in
+ * the call view, so an advisor who is suddenly asked to share has one keystroke.
+ */
 function Call(props: {
   company: string; consent: "pending" | "recorded" | "not-recorded"; generic: boolean; index: number; total: number;
   question: DiscoveryQuestion; answer: string; notes: string; value: string; scheduledAt: string | null;
+  presenting: boolean; gaps: GapFlag[]; gapSave: "idle" | "saving" | "saved" | "error"; gapError: string;
   onConsent: (v: "pending" | "recorded" | "not-recorded") => void; onAnswer: (v: string) => void; onNotes: (v: string) => void;
   onValue: (v: string) => void; onPrevious: () => void; onNext: () => void; onExit: () => void;
+  onPresenting: (v: boolean) => void; onFlagGap: (input: { owner: string; lookIn: string }) => void;
+  onUnflagGap: () => void; onSaveGaps: () => void;
 }) {
   const question = props.question;
+  const { onPresenting } = props;
   const needsValue = question.expectedAnswerType === "number" || question.expectedAnswerType === "person";
-  return <section className="call-mode"><header><div><i />Client call view · {props.company}{props.scheduledAt ? <span className="call-scheduled"><Icon name="calendar" size={14} />{formatMeeting(props.scheduledAt)}</span> : null}</div><button onClick={props.onExit} type="button">Exit call view</button></header>
-    {props.consent === "pending" ? <div className="consent-gate"><span><Icon name="mic" size={29} /></span><p className="eyebrow">Before the conversation begins</p><h1>Confirm recording consent.</h1><blockquote>“With your permission, we’ll record and transcribe this session so we quote you accurately rather than paraphrasing you.”</blockquote><p>Do not begin transcript capture until the disclosure and applicable consent requirements are satisfied.</p><Button icon="check" onClick={() => props.onConsent("recorded")}>Consent confirmed</Button><button className="call-link" onClick={() => props.onConsent("not-recorded")} type="button">Continue without recording</button></div> :
+  const unknownChosen = props.answer === UNKNOWN_ANSWER;
+  const flagged = props.gaps.find((gap) => gap.questionId === question.id);
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") onPresenting(true); };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [onPresenting]);
+  return <section className="call-mode"><header><div><i />{props.presenting ? "Client call view" : "Advisor working view"} · {props.company}{props.scheduledAt ? <span className="call-scheduled"><Icon name="calendar" size={14} />{formatMeeting(props.scheduledAt)}</span> : null}</div>
+    <div className="call-head-actions"><button aria-pressed={props.presenting} className={`share-toggle${props.presenting ? " on" : ""}`} onClick={() => props.onPresenting(!props.presenting)} type="button"><Icon name={props.presenting ? "people" : "lock"} size={14} />{props.presenting ? "Screen shared · coaching hidden" : "Coaching showing · tap before you share"}</button><button onClick={props.onExit} type="button">Exit call view</button></div></header>
+    {props.consent === "pending" ? <div className="consent-gate"><span><Icon name="mic" size={29} /></span><p className="eyebrow">Before the conversation begins</p><h1>Confirm recording consent.</h1><blockquote>“With your permission, we’ll record and transcribe this session so we quote you accurately rather than paraphrasing you.”</blockquote><p>Do not begin transcript capture until the disclosure and applicable consent requirements are satisfied.</p><Button icon="check" onClick={() => props.onConsent("recorded")}>Consent confirmed</Button><button className="call-link" onClick={() => props.onConsent("not-recorded")} type="button">Continue without recording</button>
+      <AdvisorOnly hidden={props.presenting} label="Advisor only"><p className="coach-note"><Icon name="info" size={15} />You get a coaching rail on the next screen: follow-up prompts, what to say when they don’t know, how to steer back, answers to pushback, and plain English for the jargon. Tap the bar at the top — or press Esc — before you share your screen and every word of it disappears.</p></AdvisorOnly>
+    </div> :
       <div className="call-content"><div className="call-progress"><span>Conversation {props.index + 1} of {props.total}</span><div><i style={{ width: `${((props.index + 1) / props.total) * 100}%` }} /></div><span>{sectionLabels[question.section] ?? question.section}</span></div>
+        <div className={`call-stage${props.presenting ? " solo" : ""}`}>
         <div className="question"><p className="call-opening">Let’s make sure we understand how your business actually works.</p>{props.generic ? <p className="call-generic"><Icon name="info" size={14} />Generic fallback question — research produced no client-specific script.</p> : null}<h1>{question.question}</h1><p className="why">{question.whyItMatters}</p><div className="call-tags"><Pill tone={evidenceTone[question.evidenceStatus] ?? "neutral"}>{evidenceLabel[question.evidenceStatus] ?? question.evidenceStatus}</Pill>{question.required ? <Pill tone="missing">Required answer</Pill> : null}{question.canvasBlock ? <Pill tone="inferred">{question.canvasBlock}</Pill> : null}</div><div className="assumption"><span>What we found publicly</span><p>{question.publicAssumption}</p></div>
-          <div className="answer-buttons">{["That’s right", "Correct it", "We don’t know yet"].map((choice) => <button className={props.answer === choice ? "selected" : ""} key={choice} onClick={() => props.onAnswer(choice)} type="button">{props.answer === choice ? <Icon name="check" size={17} /> : null}{choice}</button>)}{needsValue ? <label className="answer-value"><span>{question.expectedAnswerType === "number" ? "Stated number" : "Named person"}</span><input onChange={(e) => props.onValue(e.target.value)} placeholder={question.expectedAnswerType === "number" ? "e.g. 42 bids per month" : "e.g. Maya Chen, COO"} value={props.value} /></label> : null}</div>
-          {question.followUps.length ? <ul className="follow-ups">{question.followUps.map((follow) => <li key={follow}>{follow}</li>)}</ul> : null}
+          <div className="answer-buttons">{answerChoices.map((choice) => <button className={`${props.answer === choice ? "selected" : ""}${choice === UNKNOWN_ANSWER ? " unknown" : ""}`} key={choice} onClick={() => props.onAnswer(choice)} type="button">{props.answer === choice ? <Icon name={choice === UNKNOWN_ANSWER ? "info" : "check"} size={17} /> : null}{choice}</button>)}{needsValue ? <label className="answer-value"><span>{question.expectedAnswerType === "number" ? "Stated number" : "Named person"}</span><input onChange={(e) => props.onValue(e.target.value)} placeholder={question.expectedAnswerType === "number" ? "e.g. 42 bids per month" : "e.g. Maya Chen, COO"} value={props.value} /></label> : null}</div>
+          {unknownChosen ? <p className="unknown-marker" role="status"><Icon name="info" size={15} />{flagged ? "Open question — we’ll chase this one down after the call. It is not recorded as an answer." : "Open question, not an answer. Nothing gets written down as known here."}</p> : null}
           <label className="call-notes"><span>Conversation notes</span><textarea onChange={(e) => props.onNotes(e.target.value)} placeholder="Capture the client’s words, numbers, corrections, and named owners…" rows={5} value={props.notes} /></label>
+        </div>
+        <AdvisorOnly hidden={props.presenting}>
+          <CoachRail answer={props.answer} flagged={flagged} gapError={props.gapError} gaps={props.gaps} gapSave={props.gapSave} key={question.id} onFlag={props.onFlagGap} onHide={() => props.onPresenting(true)} onSaveGaps={props.onSaveGaps} onUnflag={props.onUnflagGap} question={question} />
+        </AdvisorOnly>
         </div><div className="call-actions"><Button disabled={props.index === 0} onClick={props.onPrevious} variant="secondary"><Icon name="back" size={16} />Back</Button><Button icon="arrow" onClick={props.onNext}>{props.index === props.total - 1 ? "Finish guided call" : "Next question"}</Button></div><div className={`consent-status ${props.consent}`}><Icon name={props.consent === "recorded" ? "mic" : "shield"} size={14} />{props.consent === "recorded" ? "Recording consent confirmed" : "Continuing without recording"}</div>
       </div>}
   </section>;

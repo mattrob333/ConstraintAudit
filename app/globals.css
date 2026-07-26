@@ -2424,3 +2424,493 @@ blockquote { margin: 0; }
   .call-scheduled { border-left: 0; padding-left: 0; }
   .call-mode > header div { flex-wrap: wrap; }
 }
+
+/* ===========================================================================
+ * ADVISOR COACHING LAYER
+ * ---------------------------------------------------------------------------
+ * In-call support for the advisor: follow-up prompts, unknown handling, steer-
+ * back lines, objection answers, plain-English glossary, and the pre-call
+ * briefing. None of it is client-facing.
+ *
+ * There is no CSS here that hides coaching from a client. There deliberately
+ * is not: hiding by style leaves the words in the DOM, in the page source, and
+ * in a screen reader. The boundary is the <AdvisorOnly> component, which
+ * renders nothing at all. These rules only describe what the layer looks like
+ * when the advisor is entitled to see it.
+ * =========================================================================== */
+
+.advisor-only {
+  border: 1px dashed #b0bdb4;
+  border-radius: 11px;
+  background: repeating-linear-gradient(135deg, rgba(23, 76, 60, .028) 0 9px, transparent 9px 18px), var(--surface);
+  padding: 14px;
+  text-align: left;
+}
+
+.consent-gate .advisor-only { margin-top: 22px; }
+.guided > .advisor-only { margin-bottom: 18px; }
+
+.advisor-only-flag {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-family: "JetBrains Mono", monospace;
+  font-size: .66rem;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+/* The guided call splits into question + rail. `solo` is the client-facing shape. */
+.call-stage {
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 372px;
+  align-items: start;
+  gap: 26px;
+}
+
+.call-stage.solo { grid-template-columns: minmax(0, 1fr); }
+.call-stage .question { flex: 0 1 auto; }
+.call-stage:not(.solo) .question h1 { max-width: none; font-size: clamp(1.95rem, 3.3vw, 3.35rem); }
+.call-stage:not(.solo) .why { font-size: 1.02rem; }
+.call-stage > .advisor-only { position: sticky; top: 14px; padding: 12px; }
+
+.call-mode > header .call-head-actions { gap: 14px; }
+
+.call-mode > header .share-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  padding: 6px 13px;
+  color: var(--muted);
+  font-size: .74rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.call-mode > header .share-toggle:hover { border-color: var(--forest); color: var(--forest); }
+
+.call-mode > header .share-toggle.on {
+  border-color: #a9d7ba;
+  background: var(--confirmed);
+  color: #155b35;
+}
+
+/* An unknown must never wear the same green as a confirmed answer. */
+.answer-buttons button.selected.unknown {
+  border-color: #e49787;
+  background: #f9d5ce;
+  color: #7b2c20;
+}
+
+.unknown-marker {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 920px;
+  margin: -10px 0 20px;
+  border-left: 4px solid #e49787;
+  background: #fff0ed;
+  padding: 11px 14px;
+  color: #7b2c20;
+  font-size: .9rem;
+}
+
+/* The rail itself. Fixed column, panels swap inside it, nothing reflows. */
+.coach-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 520px;
+}
+
+.coach-tabs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.coach-tabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--paper);
+  padding: 8px 10px;
+  color: var(--muted);
+  font-size: .76rem;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.coach-tabs button:hover { border-color: var(--forest); color: var(--forest); }
+.coach-tabs button.active { border-color: var(--forest); background: var(--step); color: var(--forest); }
+.coach-tabs button.alert { border-color: #e49787; background: #f9d5ce; color: #7b2c20; }
+.coach-tabs button:last-child:nth-child(odd) { grid-column: 1 / -1; }
+
+.coach-body {
+  flex: 1;
+  min-height: 0;
+  max-height: min(62vh, 620px);
+  overflow-y: auto;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.coach-panel { display: grid; gap: 10px; }
+
+.coach-lead {
+  margin: 0;
+  color: var(--ink);
+  font-size: .84rem;
+  line-height: 1.5;
+}
+
+.coach-group {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-family: "JetBrains Mono", monospace;
+  font-size: .63rem;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.coach-lines {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.coach-lines button {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  align-items: start;
+  gap: 9px;
+  width: 100%;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--forest);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 10px 12px;
+  color: var(--ink);
+  font-family: "Space Grotesk", system-ui, sans-serif;
+  font-size: .93rem;
+  line-height: 1.4;
+  text-align: left;
+  cursor: pointer;
+}
+
+.coach-lines button > svg { margin-top: 3px; color: var(--forest); }
+.coach-lines button:hover { background: var(--step); }
+.coach-lines button.used { border-left-color: #a9d7ba; background: var(--confirmed); color: #2e6d50; }
+
+.coach-note,
+.coach-warn,
+.coach-ok {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin: 4px 0 0;
+  border-radius: 8px;
+  padding: 9px 11px;
+  font-size: .78rem;
+  line-height: 1.45;
+}
+
+.coach-note { border: 1px solid var(--line); background: var(--paper); color: var(--muted); }
+.coach-warn { border: 1px solid #e49787; background: #fff0ed; color: #7b2c20; }
+.coach-ok { border: 1px solid #a9d7ba; background: var(--confirmed); color: #155b35; }
+.coach-empty { margin: 0; color: var(--muted); font-size: .8rem; }
+
+/* Flagging an unknown so it becomes a gap to chase instead of nothing. */
+.gap-flag {
+  display: grid;
+  gap: 9px;
+  border: 1px solid #e2c55f;
+  border-radius: 9px;
+  background: #fff9df;
+  padding: 12px;
+}
+
+.gap-flag.done { border-color: #e49787; background: #fff0ed; }
+.gap-flag p { margin: 0; color: #735c07; font-size: .8rem; }
+.gap-flag.done p { color: #7b2c20; }
+.gap-flag label { display: grid; gap: 4px; }
+.gap-flag label > span { font-size: .62rem; }
+.gap-flag input { padding: 9px 11px; font-size: .87rem; }
+.gap-flag .call-link { justify-self: start; font-size: .78rem; }
+
+.gap-register {
+  display: grid;
+  gap: 8px;
+  border-top: 1px solid var(--line);
+  padding-top: 11px;
+}
+
+.gap-register ul { display: grid; gap: 5px; margin: 0; padding: 0; list-style: none; }
+
+.gap-register li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px;
+  border-left: 3px solid #e49787;
+  background: var(--paper);
+  padding: 7px 10px;
+  font-size: .79rem;
+}
+
+.gap-register li b {
+  color: #7b2c20;
+  font-family: "JetBrains Mono", monospace;
+  font-size: .62rem;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+.gap-register .button { justify-self: start; padding: 8px 13px; font-size: .8rem; }
+
+/* Objection answers: the trigger, then the exact sentence to say. */
+.objection-list { display: grid; gap: 8px; }
+
+.objection-list article {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 10px 12px;
+}
+
+.objection-list article.tied { border-color: var(--forest); background: var(--step); }
+.objection-list b { display: block; color: var(--muted); font-size: .78rem; font-weight: 600; }
+
+.objection-list p {
+  margin: 6px 0 0;
+  font-family: "Space Grotesk", system-ui, sans-serif;
+  font-size: .93rem;
+  line-height: 1.42;
+}
+
+.objection-list small { display: block; margin-top: 6px; color: var(--muted); font-size: .7rem; }
+
+/* Plain-English glossary, one tap open, in the rail and on the Prepare screen. */
+.glossary ul { display: grid; gap: 5px; margin: 10px 0 0; padding: 0; list-style: none; }
+.glossary li { border: 1px solid var(--line); border-radius: 8px; background: var(--surface); overflow: hidden; }
+
+.glossary li > button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  border: 0;
+  background: none;
+  padding: 10px 12px;
+  font-family: "Space Grotesk", system-ui, sans-serif;
+  font-size: .92rem;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.glossary li > button:hover { background: var(--step); }
+.glossary li > button > svg { flex: none; color: var(--forest); transition: transform .15s; }
+.glossary li > button[aria-expanded="true"] { background: var(--step); }
+.glossary li > button[aria-expanded="true"] > svg { transform: rotate(90deg); }
+.glossary-body { border-top: 1px solid var(--line); padding: 11px 12px; }
+.glossary-body > p { margin: 0; color: var(--muted); font-size: .83rem; line-height: 1.5; }
+
+.coach-say {
+  display: grid;
+  gap: 4px;
+  margin: 10px 0 0 !important;
+  border-left: 3px solid var(--forest);
+  background: var(--paper);
+  padding: 9px 11px;
+  color: var(--ink) !important;
+  font-family: "Space Grotesk", system-ui, sans-serif;
+  font-size: .9rem !important;
+  line-height: 1.42 !important;
+}
+
+.coach-say > span {
+  color: var(--forest);
+  font-family: "JetBrains Mono", monospace;
+  font-size: .62rem;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.glossary.page ul { grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }
+.glossary.page .glossary-body { border-top: 1px solid var(--line); }
+
+.coach-foot {
+  display: grid;
+  gap: 7px;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+
+.coach-foot button {
+  display: inline-flex;
+  align-items: center;
+  justify-self: start;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--paper);
+  padding: 6px 12px;
+  color: var(--muted);
+  font-size: .74rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.coach-foot button:hover { border-color: var(--forest); color: var(--forest); }
+.coach-foot small { color: var(--muted); font-size: .7rem; line-height: 1.4; }
+
+/* Pre-call confidence briefing on the Prepare screen. */
+.advisor-only .briefing + .briefing { margin-top: 12px; }
+
+.briefing {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.briefing > summary {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  padding: 15px 17px;
+  list-style: none;
+  cursor: pointer;
+}
+
+.briefing > summary::-webkit-details-marker { display: none; }
+.briefing > summary > svg:last-child { color: var(--forest); transition: transform .15s; }
+.briefing[open] > summary > svg:last-child { transform: rotate(90deg); }
+.briefing > summary strong { display: block; font-family: "Space Grotesk", system-ui, sans-serif; font-size: 1.06rem; }
+.briefing > summary small { color: var(--muted); font-size: .82rem; }
+
+.briefing-mark {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--step);
+  color: var(--forest);
+}
+
+.briefing-body {
+  display: grid;
+  gap: 22px;
+  border-top: 1px solid var(--line);
+  padding: 18px 17px 20px;
+}
+
+.briefing-body > section { display: grid; gap: 9px; }
+.briefing-body .eyebrow { margin: 0; color: var(--forest); }
+
+.briefing-arc { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; counter-reset: none; }
+
+.briefing-arc li {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr);
+  align-items: baseline;
+  gap: 14px;
+  border-left: 3px solid var(--step);
+  padding: 9px 12px;
+}
+
+.briefing-arc li:hover { border-left-color: var(--forest); background: var(--paper); }
+
+.briefing-arc b {
+  color: var(--forest);
+  font-family: "JetBrains Mono", monospace;
+  font-size: .72rem;
+  font-weight: 500;
+}
+
+.briefing-arc strong { display: block; font-size: .95rem; }
+.briefing-arc span { color: var(--muted); font-size: .84rem; line-height: 1.45; }
+
+.briefing-musts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+
+.briefing-musts article {
+  display: grid;
+  gap: 5px;
+  align-content: start;
+  border: 1px solid var(--line);
+  border-top: 3px solid var(--forest);
+  border-radius: 9px;
+  background: var(--paper);
+  padding: 13px 14px;
+}
+
+.briefing-musts b {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--forest);
+  color: white;
+  font-family: "JetBrains Mono", monospace;
+  font-size: .72rem;
+}
+
+.briefing-musts strong { font-family: "Space Grotesk", system-ui, sans-serif; font-size: 1rem; }
+.briefing-musts p { margin: 0; color: var(--muted); font-size: .82rem; line-height: 1.45; }
+
+.briefing-lost { display: grid; gap: 7px; margin: 0; padding: 0 0 0 18px; }
+.briefing-lost li { color: var(--muted); font-size: .86rem; line-height: 1.5; }
+
+.briefing-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--paper);
+  padding: 11px 13px;
+  color: var(--muted);
+  font-size: .82rem;
+  line-height: 1.5;
+}
+
+.briefing-note > svg { flex: none; margin-top: 2px; color: var(--forest); }
+
+@media (max-width: 1100px) {
+  .call-stage { grid-template-columns: minmax(0, 1fr) 330px; gap: 20px; }
+}
+
+@media (max-width: 980px) {
+  .call-stage,
+  .call-stage:not(.solo) { grid-template-columns: minmax(0, 1fr); }
+  .call-stage > .advisor-only { position: static; }
+  .coach-rail { min-height: 0; }
+  .coach-body { max-height: none; }
+  .glossary.page ul { grid-template-columns: minmax(0, 1fr); }
+  .briefing-musts { grid-template-columns: minmax(0, 1fr); }
+}
+
+@media (max-width: 720px) {
+  .call-head-actions { flex-wrap: wrap; gap: 8px; }
+  .share-toggle { font-size: .7rem; }
+  .coach-tabs { grid-template-columns: minmax(0, 1fr); }
+  .coach-tabs button:last-child:nth-child(odd) { grid-column: auto; }
+  .briefing-arc li { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+  .briefing > summary { grid-template-columns: auto minmax(0, 1fr); }
+  .briefing > summary > svg:last-child { display: none; }
+}
