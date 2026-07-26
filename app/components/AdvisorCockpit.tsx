@@ -44,8 +44,17 @@ type DiscoveryQuestion = {
 type SprintTask = { id: string; task: string; owner: string; status: "todo" | "in_progress" | "done" };
 type Metric = { name: string; value: string; unit: string; period: string; source: string };
 type SprintRecord = {
-  sprintId: string; constraintId: string; activatedAt: string; activatedBy: string; prescription: string;
+  sprintId: string; constraintId: string; constraintType?: "capacity" | "latency" | "quality" | "knowledge" | "policy"; activatedAt: string; activatedBy: string; prescription: string;
   humanOwner: { name: string; role: string }; startingMetric: Metric; measurementClockStartedAt: string; tasks: SprintTask[];
+};
+/** Which way a metric has to move to count as an improvement, and how that was decided. Server-owned. */
+type DirectionSource = "advisor" | "unit-table" | "metric-semantics" | "model" | "none";
+type DirectionInference = {
+  improvedWhen: "higher" | "lower" | null;
+  source: DirectionSource;
+  basis: string;
+  confidence: number;
+  ambiguous?: boolean;
 };
 type OutcomeMeasurement = {
   measuredAt: string; measuredBy: string; startingMetric: Metric; endingMetric: Metric;
@@ -56,6 +65,8 @@ type OutcomeMeasurement = {
     interpretation: "improved" | "worsened" | "unchanged" | "not-interpreted";
   } | null;
   deltaBlockedReason?: string; constraintMoved: boolean; nextConstraintObserved: string;
+  improvedWhen?: "higher" | "lower";
+  directionInference?: DirectionInference;
 };
 type CatalogEntry = {
   entryId: string; constraintType: string; canvasBlock: string; pattern: string; prescription: string;
@@ -93,6 +104,13 @@ type TranscriptSynthesis = {
     prescription: { description: string; whySmallestIntervention: string };
     baselineMetric: { name: string; value: string; unit: string; period: string; source: string };
   };
+  analysisMode?: "deterministic" | "model-assisted";
+  modelStatus?: "used" | "not-configured" | "failed";
+  providerModel?: string;
+  /** The model's reading of the call. Advisor-note provenance always — never client evidence. */
+  narrative?: string;
+  /** Model output that failed the evidence check, kept visible so a silent drop is never mistaken for silence. */
+  groundingRejections?: Array<{ kind: string; reason: string; text: string }>;
 };
 
 const canvasBlocks = [
@@ -145,6 +163,34 @@ const evidenceTone: Record<string, Tone> = {
 const evidenceLabel: Record<string, string> = {
   "client-stated": "Client stated", doc: "Document", "public-research": "Public research", "advisor-note": "Advisor note", gap: "Gap",
 };
+
+const directionSourceLabel: Record<DirectionSource, string> = {
+  advisor: "Advisor-declared", "unit-table": "Inferred from the unit", "metric-semantics": "Inferred from the metric name",
+  model: "Inferred by model", none: "No direction established",
+};
+
+const directionSourceTone: Record<DirectionSource, Tone> = {
+  advisor: "known", "unit-table": "inferred", "metric-semantics": "inferred", model: "assumed", none: "missing",
+};
+
+const directionChoiceCopy: Record<"lower" | "higher", [string, string]> = {
+  lower: ["Lower is better", "A shorter time, smaller queue, or fewer errors is the win"],
+  higher: ["Higher is better", "More throughput, volume, or revenue is the win"],
+};
+
+/** Plain language for how the server will read the number. Never used to compute an interpretation. */
+function directionSentence(direction: "higher" | "lower", unit: string): string {
+  const noun = unit.trim() || "the value";
+  return direction === "higher"
+    ? `A higher reading of ${noun} will be called improved; a lower one worsened.`
+    : `A lower reading of ${noun} will be called improved; a higher one worsened.`;
+}
+
+/** The server sends confidence as a 0–1 ratio; anything above 1 is shown verbatim rather than mislabelled. */
+function confidenceLabel(confidence: number): string {
+  if (!Number.isFinite(confidence)) return "not reported";
+  return confidence <= 1 ? `${Math.round(confidence * 100)}%` : String(confidence);
+}
 
 const statusTone: Record<string, Tone> = {
   connected: "success", ready: "success", configured: "success",
@@ -524,15 +570,33 @@ export default function AdvisorCockpit() {
     }
   }
 
-  async function recordOutcome(body: { endingMetric: Metric; improvedWhen: "higher" | "lower"; constraintMoved: boolean; nextConstraintObserved: string }) {
+  /** `improvedWhen` is sent only when the advisor explicitly picked or confirmed it; omitting it accepts the server inference. */
+  async function recordOutcome(body: { endingMetric: Metric; improvedWhen?: "higher" | "lower"; constraintMoved: boolean; nextConstraintObserved: string }) {
     if (!activeId) return setNotice("Action not completed: select or create an engagement first.");
     setOpsBusy("outcome"); setOpsError("");
     try {
       const response = await save<{ outcome: OutcomeMeasurement }>(`/api/engagements/${activeId}/outcome`, body);
       setOutcome(response.outcome);
-      setNotice("Ending metric recorded. Only the server-returned delta is displayed.");
+      setNotice(body.improvedWhen
+        ? "Ending metric recorded with your declared direction. Only the server-returned delta is displayed."
+        : "Ending metric recorded. The server's inferred direction was accepted; only the server-returned delta is displayed.");
     } catch (reason) {
       setOpsError(`The outcome could not be recorded: ${reason instanceof Error ? reason.message : "unknown request failure"}`);
+    } finally {
+      setOpsBusy("");
+    }
+  }
+
+  /** Corrects the direction after the fact. The server recomputes the interpretation and regenerates the outcome report. */
+  async function correctOutcomeDirection(improvedWhen: "higher" | "lower") {
+    if (!activeId) return setNotice("Action not completed: select or create an engagement first.");
+    setOpsBusy("direction"); setOpsError("");
+    try {
+      const response = await save<{ outcome: OutcomeMeasurement }>(`/api/engagements/${activeId}/outcome`, { improvedWhen }, "PATCH");
+      setOutcome(response.outcome);
+      setNotice("Direction corrected. The server re-read the delta and regenerated the outcome report.");
+    } catch (reason) {
+      setOpsError(`The direction could not be corrected: ${reason instanceof Error ? reason.message : "unknown request failure"}`);
     } finally {
       setOpsBusy("");
     }
@@ -769,7 +833,7 @@ export default function AdvisorCockpit() {
       {screen === "findings" ? <Findings consent={call2Consent} onApprove={() => approve("diagnosis")} onBack={() => go("synthesis")} onConsent={setCall2Consent} owner={contact && role ? `${contact}, ${role}` : ""} synthesis={synthesisResult} /> : null}
       {screen === "deliver" ? <Deliver approved={diagnosisApproved} generated={generated} onActions={() => openOperations("actions")} onBack={() => go("findings")} onGenerate={generateAllDeliverables} onOperate={openOperations} onSync={prepareCrmWriteBack} /> : null}
       {screen === "sprint" ? <SprintScreen busy={opsBusy} error={opsError} onActivate={activateSprint} onBack={() => go("deliver")} onNavigate={openOperations} onTask={updateSprintTask} sprint={sprint} /> : null}
-      {screen === "measure" ? <Measure busy={opsBusy === "outcome"} error={opsError} onBack={() => openOperations("sprint")} onNavigate={openOperations} onSubmit={recordOutcome} outcome={outcome} sprint={sprint} /> : null}
+      {screen === "measure" ? <Measure busy={opsBusy === "outcome"} correcting={opsBusy === "direction"} error={opsError} onBack={() => openOperations("sprint")} onCorrectDirection={correctOutcomeDirection} onNavigate={openOperations} onSubmit={recordOutcome} outcome={outcome} sprint={sprint} /> : null}
       {screen === "catalog" ? <Catalog busy={opsBusy === "catalog"} entry={catalogEntry} error={opsError} onBack={() => openOperations("measure")} onNavigate={openOperations} onSubmit={writeCatalog} outcome={outcome} /> : null}
       {screen === "actions" ? <ReviewedActions engagementId={activeId} onBack={() => openOperations("sprint")} onNavigate={openOperations} /> : null}
       {screen === "integrations" ? <IntegrationCenter onBack={() => go("home")} /> : null}
@@ -931,13 +995,42 @@ function Transcript(props: {
   </section>;
 }
 
+/** Says plainly which reading is on screen. An advisor must never think a deterministic pass was a model analysis. */
+function SynthesisMode({ synthesis }: { synthesis: TranscriptSynthesis | null }) {
+  if (!synthesis) return null;
+  if (synthesis.analysisMode === "model-assisted" && synthesis.modelStatus === "used") return <div className="research-source-note"><Icon name="spark" size={17} /><span><strong>Model-assisted synthesis</strong>{synthesis.providerModel || "provider model not named"} · every claim still had to match a client quote to survive the evidence check.</span></div>;
+  return <div className="research-source-note warning"><Icon name="info" size={17} /><span><strong>{synthesis.modelStatus === "failed" ? "The model call failed" : synthesis.modelStatus === "not-configured" ? "No model is configured" : "Deterministic synthesis"}</strong>What is on screen is the deterministic reading of the transcript. It is not a deeper analysis.</span></div>;
+}
+
+/** The model's reading of the call. Advisor-note provenance — it is never something the client said. */
+function Narrative({ synthesis }: { synthesis: TranscriptSynthesis | null }) {
+  if (!synthesis?.narrative) return null;
+  return <div className="narrative-block"><header><Pill tone="assumed">Advisor note · model interpretation</Pill><span>Not client evidence</span></header>
+    <p className="narrative-warning"><Icon name="info" size={15} />This is the model reading the call, not the client speaking. Nobody said it. It carries advisor-note provenance and must never be quoted back to the client as their own words.</p>
+    <p>{synthesis.narrative}</p>
+  </div>;
+}
+
+/** Model output that could not be tied to a client quote. Kept visible: a silent drop is worse than a shown rejection. */
+function GroundingRejections({ synthesis }: { synthesis: TranscriptSynthesis | null }) {
+  const rejections = synthesis?.groundingRejections ?? [];
+  if (!rejections.length) return null;
+  return <details className="rejections"><summary>Discarded by evidence check · {rejections.length} claim{rejections.length === 1 ? "" : "s"}</summary>
+    <p>Each item below was proposed but could not be tied to a real client quote, so it was thrown away instead of shown as a finding. Nothing here is evidence.</p>
+    <ul>{rejections.map((item) => <li key={`${item.kind}${item.reason}${item.text}`}><div><Pill tone="missing">{item.kind}</Pill><span>{item.reason}</span></div><blockquote>“{item.text}”</blockquote></li>)}</ul>
+  </details>;
+}
+
 function Synthesis({ onApprove, onBack, synthesis }: { onApprove: () => void; onBack: () => void; synthesis: TranscriptSynthesis | null }) {
   const candidate = synthesis?.constraintCandidate;
   const quotes = synthesis?.quotes ?? [];
   const gaps = synthesis?.gaps ?? [];
   return <section className="guided wide"><Back onClick={onBack}>Transcript</Back><PageHead eyebrow="Synthesize · Checkpoint 1" side={<Pill tone="assumed">Advisor review required</Pill>} title="Here’s what the transcript supports.">Only client-attributed lines appear as evidence. Advisor and unknown-speaker lines remain notes or gaps.</PageHead>
+    <SynthesisMode synthesis={synthesis} />
     <div className="synthesis-stats">{[["Client evidence", String(quotes.length), "Source-linked transcript lines", "known"], ["Baseline", synthesis?.baselineStatus ?? "Missing", "No benchmark is substituted", synthesis?.baselineStatus === "Confirmed" ? "known" : "missing"], ["Open gaps", String(gaps.length), "Named collection actions", gaps.length ? "missing" : "neutral"], ["Constraint", candidate ? "1" : "0", candidate ? "Provisional candidate" : "No signal detected", candidate ? "assumed" : "neutral"]].map(([label, count, text, tone]) => <article key={label}><Pill tone={tone as Tone}>{label}</Pill><strong>{count}</strong><span>{text}</span></article>)}</div>
     <div className="table-wrap"><table className="diff"><thead><tr><th>Speaker</th><th>Timestamp</th><th>Client evidence</th><th>Provenance</th><th>Why it matters</th></tr></thead><tbody>{quotes.length ? quotes.map((quote) => <tr key={`${quote.speaker}${quote.timestamp}${quote.text}`}><td><strong>{quote.speaker}</strong></td><td>{quote.timestamp}</td><td><blockquote>“{quote.text}”</blockquote></td><td><Pill tone="known">{quote.provenance}</Pill></td><td>{quote.reason || "Retained for advisor review."}</td></tr>) : <tr><td colSpan={5}>No client-attributed constraint evidence was detected. Review speaker roles or collect another source.</td></tr>}</tbody></table></div>
+    <Narrative synthesis={synthesis} />
+    <GroundingRejections synthesis={synthesis} />
     <div className="candidate"><div><p className="eyebrow">Leading constraint candidate · {candidate?.findingStatus ?? "none"}</p><h2>{candidate ? `${candidate.constraintType} in ${candidate.canvasBlock}` : "No constraint candidate yet."}</h2><p>{candidate ? candidate.prescription.description : "The system will not invent a finding from a zero-signal transcript."}</p></div><dl><div><dt>Evidence lines</dt><dd>{candidate?.evidence.length ?? 0}</dd></div><div><dt>Baseline</dt><dd>{synthesis?.baselineStatus ?? "Missing"}</dd></div><div><dt>Open gaps</dt><dd>{gaps.length ? gaps.join("; ") : "None detected"}</dd></div></dl></div>
     <div className="page-actions"><p><Icon name="lock" size={16} />Approval commits the reviewed Canvas and evidence diff. It does not approve the diagnosis.</p><Button disabled={!synthesis} icon="check" onClick={onApprove}>Approve Canvas commit</Button></div>
   </section>;
@@ -953,6 +1046,7 @@ function Findings({ consent, onApprove, onBack, onConsent, owner, synthesis }: {
   const steps = [["Reconcile the Canvas", "Confirm corrections, role ownership, and the actual flow."], ["Resolve the baseline", `${baseline} baseline. Confirm its source or assign instrumentation to the named owner.`], ["Test the constraint", candidate ? `Confirm or kill the ${candidate.constraintType} candidate in ${candidate.canvasBlock}.` : "No constraint signal was detected; collect stronger evidence before approval."], ["Reveal the prescription", "Constraint → prescription → metric formula → named owner."]];
   if (consent === "pending") return <section className="guided narrow"><Back onClick={onBack}>Synthesis review</Back><div className="consent-gate"><span><Icon name="mic" size={29} /></span><p className="eyebrow">Findings Call · before the conversation</p><h1>Confirm recording consent again.</h1><blockquote>“With your permission, we’ll record and transcribe this session so we quote you accurately rather than paraphrasing you.”</blockquote><p>Consent is recorded separately for Call 2.</p><Button icon="check" onClick={() => onConsent("recorded")}>Consent confirmed</Button><button className="call-link" onClick={() => onConsent("not-recorded")} type="button">Continue without recording</button></div></section>;
   return <section className="guided findings"><Back onClick={onBack}>Synthesis review</Back><PageHead eyebrow="Synthesize · Findings Call" title="Reconcile first. Reveal second.">The diagnosis stays provisional while the required baseline is missing. The call can continue, but numeric claims cannot.</PageHead>
+    <SynthesisMode synthesis={synthesis} />
     <div className="findings-flow"><ol>{steps.map(([title], index) => <li className={index === step ? "active" : index < step ? "done" : ""} key={title}><button onClick={() => setStep(index)} type="button"><span>{index < step ? <Icon name="check" size={13} /> : index + 1}</span>{title}</button></li>)}</ol>
       <article><p className="eyebrow">Part {step < 2 ? "A · Reconciliation" : "B · Reveal"}</p><h2>{steps[step][0]}</h2><p>{steps[step][1]}</p>
         {step === 1 ? <div className="baseline"><Pill tone={baseline === "Confirmed" ? "known" : "missing"}>{baseline} baseline</Pill><strong>{baseline === "Confirmed" ? "Verify the coherent metric and source." : "No benchmark will be substituted."}</strong><span>{synthesis?.gaps.join("; ") || "Assign baseline instrumentation as the first Sprint task."}</span></div> : null}
@@ -997,26 +1091,67 @@ function SprintScreen({ busy, error, onActivate, onBack, onNavigate, onTask, spr
   </section>;
 }
 
-function Measure({ busy, error, onBack, onNavigate, onSubmit, outcome, sprint }: {
-  busy: boolean; error: string; onBack: () => void; onNavigate: (screen: Screen) => void;
-  onSubmit: (body: { endingMetric: Metric; improvedWhen: "higher" | "lower"; constraintMoved: boolean; nextConstraintObserved: string }) => void;
+function Measure({ busy, correcting, error, onBack, onCorrectDirection, onNavigate, onSubmit, outcome, sprint }: {
+  busy: boolean; correcting: boolean; error: string; onBack: () => void;
+  onCorrectDirection: (improvedWhen: "higher" | "lower") => void; onNavigate: (screen: Screen) => void;
+  onSubmit: (body: { endingMetric: Metric; improvedWhen?: "higher" | "lower"; constraintMoved: boolean; nextConstraintObserved: string }) => void;
   outcome: OutcomeMeasurement | null; sprint: SprintRecord | null;
 }) {
   const starting = sprint?.startingMetric;
   const [metric, setMetric] = useState<Metric>({ name: starting?.name ?? "", period: starting?.period ?? "", source: "", unit: starting?.unit ?? "", value: "" });
   const [moved, setMoved] = useState(false);
   const [next, setNext] = useState("");
-  const [better, setBetter] = useState<"higher" | "lower">("lower");
+  const [choice, setChoice] = useState<"higher" | "lower" | null>(null);
+  // The preview is stored against the exact probe it answered, so a slow reply for an
+  // older metric name can never be read as the inference for what is on screen now.
+  const [preview, setPreview] = useState<{ probe: string; inference: DirectionInference | null; error: string } | null>(null);
   const fields: Array<[keyof Metric, string, string]> = [["name", "Metric name", "Bids returned per month"], ["value", "Ending value", "48"], ["unit", "Unit", "bids"], ["period", "Measurement period", "month"], ["source", "Source of this reading", "Client-stated in the closing call"]];
+  // Only the fields the preview reads are in the key, so typing a value or source never re-requests an inference.
+  const probe = `name=${encodeURIComponent(metric.name.trim())}&unit=${encodeURIComponent(metric.unit.trim())}&period=${encodeURIComponent(metric.period.trim())}${sprint?.constraintType ? `&constraintType=${encodeURIComponent(sprint.constraintType)}` : ""}`;
+  const unnamed = probe.startsWith("name=&");
+  useEffect(() => {
+    if (probe.startsWith("name=&")) return;
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      api<{ inference: DirectionInference }>(`/api/metric-direction?${probe}`, { signal: controller.signal })
+        .then((result) => setPreview({ error: "", inference: result.inference, probe }))
+        .catch((reason: Error) => {
+          if (controller.signal.aborted || reason.name === "AbortError") return;
+          setPreview({ error: `The direction could not be previewed: ${reason.message}`, inference: null, probe });
+        });
+    }, 400);
+    return () => { window.clearTimeout(timer); controller.abort(); };
+  }, [probe]);
+  const current = preview?.probe === probe ? preview : null;
+  const inference = current?.inference ?? null;
+  const inferError = current?.error ?? "";
+  const inferring = !unnamed && !current;
+  const ambiguous = Boolean(inference?.ambiguous) && !choice;
+  // What the panel highlights. An ambiguous inference is never pre-selected for the advisor.
+  const shown = choice ?? (inference?.ambiguous ? null : inference?.improvedWhen ?? null);
+  const recorded = outcome?.directionInference ?? null;
+  const recordedDirection = recorded?.improvedWhen ?? outcome?.improvedWhen ?? null;
   return <section className="guided wide"><Back onClick={onBack}>Sprint</Back><PageHead eyebrow="Operate · Outcome" side={<Pill tone={outcome ? "success" : "assumed"}>{outcome ? "Measured" : "Not measured"}</Pill>} title="Measure what actually changed.">Record the ending reading exactly as the client states it. The before/after comparison is returned by the server; this screen never calculates or projects a number.</PageHead>
     <OpsRail current="measure" onNavigate={onNavigate} />
     {error ? <p className="ops-error" role="alert"><Icon name="info" size={15} />{error}</p> : null}
     <div className="ops-columns">
-      <form className="panel" onSubmit={(event) => { event.preventDefault(); onSubmit({ constraintMoved: moved, endingMetric: metric, improvedWhen: better, nextConstraintObserved: next }); }}>
+      <form className="panel" onSubmit={(event) => { event.preventDefault(); onSubmit({ constraintMoved: moved, endingMetric: metric, nextConstraintObserved: next, ...(choice ? { improvedWhen: choice } : {}) }); }}>
         <p className="eyebrow">Ending metric</p>
         {starting ? <p className="ops-hint"><Icon name="info" size={15} />Starting metric on record: {starting.name} — {starting.value} {starting.unit} · {starting.period}</p> : <p className="ops-hint"><Icon name="info" size={15} />No starting metric is on record yet. Activate the sprint first so a before reading exists.</p>}
         {fields.map(([key, label, placeholder]) => <label key={key}><span>{label} <em>Required</em></span><input onChange={(event) => setMetric({ ...metric, [key]: event.target.value })} placeholder={placeholder} required value={metric[key]} /></label>)}
-        <label><span>This metric is better when it goes <em>Required</em></span><select onChange={(event) => setBetter(event.target.value === "higher" ? "higher" : "lower")} value={better}><option value="lower">Lower — a shorter time, smaller queue, or fewer errors is the win</option><option value="higher">Higher — more throughput, volume, or revenue is the win</option></select><small>Without this the server reports the arithmetic change only and will not call it an improvement.</small></label>
+        <div className={`direction-panel ${ambiguous ? "ambiguous" : ""}`}>
+          <p className="eyebrow">Which way is better</p>
+          {inferring ? <p className="direction-state" role="status"><Icon name="refresh" size={15} />Reading how this metric should be interpreted…</p> : null}
+          {!inferring && inferError ? <p className="direction-state error" role="alert"><Icon name="info" size={15} />{inferError} Pick the direction yourself below, or leave it unset and the result stays uninterpreted.</p> : null}
+          {!inferring && !inferError && choice ? <p className="direction-basis"><Icon name="check" size={15} /><span><b>You set this direction.</b>{directionSentence(choice, metric.unit)} It is sent with the reading as your explicit declaration.</span></p> : null}
+          {!inferring && !inferError && !choice && inference?.ambiguous ? <p className="direction-basis"><Icon name="info" size={15} /><span><b>This metric reads both ways — which is it?</b>{inference.basis}</span></p> : null}
+          {!inferring && !inferError && !choice && inference && !inference.ambiguous && inference.improvedWhen ? <p className="direction-basis"><Icon name="spark" size={15} /><span><b>Proposed, not decided: {directionChoiceCopy[inference.improvedWhen][0].toLowerCase()}.</b>{inference.basis} {directionSentence(inference.improvedWhen, metric.unit)}</span></p> : null}
+          {!inferring && !inferError && !choice && inference && !inference.ambiguous && !inference.improvedWhen ? <p className="direction-basis"><Icon name="info" size={15} /><span><b>No direction could be established.</b>{inference.basis || "Nothing in the metric name, unit, or period says which way is better."} Until you pick one the server reports the arithmetic change only and will not call it an improvement.</span></p> : null}
+          {!inferring && !inferError && !choice && !inference ? <p className="direction-basis"><Icon name="info" size={15} /><span><b>Name the metric to see a proposal.</b>The direction is previewed from the metric name, unit, and period as you type. Nothing is saved by the preview.</span></p> : null}
+          <div aria-label="Which way is better for this metric" className="direction-choices" role="group">{(["lower", "higher"] as const).map((option) => <button aria-pressed={shown === option} className={shown === option ? "selected" : ""} key={option} onClick={() => setChoice(option)} type="button"><strong>{directionChoiceCopy[option][0]}</strong><small>{directionChoiceCopy[option][1]}</small>{shown === option ? <Pill tone={choice ? "known" : "inferred"}>{choice ? "Your choice" : "Proposed"}</Pill> : null}</button>)}</div>
+          {choice && inference && !inference.ambiguous && inference.improvedWhen ? <button className="direction-reset" onClick={() => setChoice(null)} type="button">Use the inferred direction instead ({directionChoiceCopy[inference.improvedWhen][0].toLowerCase()})</button> : null}
+          <p className="direction-effect">{choice ? "Sent as your explicit declaration; the server will record you as the source of the direction." : shown ? "Nothing is sent for direction — the server applies this inference and records where it came from." : "No direction is sent. The result will show the arithmetic change only, marked not interpreted."}</p>
+        </div>
         <label className="confirm"><input checked={moved} onChange={(event) => setMoved(event.target.checked)} type="checkbox" />The client confirmed the constraint moved.</label>
         <label><span>Next constraint observed <small>Optional</small></span><textarea onChange={(event) => setNext(event.target.value)} placeholder="Where the client says work now waits…" rows={3} value={next} /></label>
         <div className="action-row"><p><Icon name="lock" size={16} />Only client-confirmed readings are submitted.</p><Button disabled={busy || !metric.name.trim() || !metric.value.trim() || !metric.source.trim()} icon="check" type="submit">{busy ? "Recording…" : "Record ending metric"}</Button></div>
@@ -1024,7 +1159,22 @@ function Measure({ busy, error, onBack, onNavigate, onSubmit, outcome, sprint }:
       <div className="panel ops-result"><p className="eyebrow">Before and after</p>
         {!outcome ? <p className="registry-empty">No outcome has been recorded yet. Nothing is estimated in the meantime.</p> : <>
           <div className="ops-summary">{[["Starting metric", `${outcome.startingMetric?.value ?? "—"} ${outcome.startingMetric?.unit ?? ""}`, `${outcome.startingMetric?.name ?? "Missing"} · ${outcome.startingMetric?.source ?? "no source"}`], ["Ending metric", `${outcome.endingMetric?.value ?? "—"} ${outcome.endingMetric?.unit ?? ""}`, `${outcome.endingMetric?.name ?? "Missing"} · ${outcome.endingMetric?.source ?? "no source"}`]].map(([label, value, note]) => <article key={label}><span>{label}</span><strong>{value}</strong><small>{note}</small></article>)}</div>
-          {outcome.delta ? <div className="ops-delta"><Pill tone={outcome.delta.interpretation === "improved" ? "success" : outcome.delta.interpretation === "worsened" ? "missing" : "neutral"}>{outcome.delta.interpretation === "not-interpreted" ? `${outcome.delta.direction} · not interpreted` : outcome.delta.interpretation}</Pill><strong>{outcome.delta.absolute}</strong><span>{outcome.delta.percent}</span><small>{outcome.delta.interpretation === "not-interpreted" ? "The metric changed by this much. Whether that is better was not declared, so nothing calls it an improvement." : "Server-computed from two confirmed readings."}</small></div> : <div className="ops-delta blocked"><Pill tone="missing">No delta claimed</Pill><strong>{outcome.deltaBlockedReason || "The server returned no delta and no reason. No numeric change is claimed."}</strong><small>Nothing is computed client-side to fill this gap.</small></div>}
+          {outcome.delta ? <div className={`ops-delta ${outcome.delta.interpretation === "improved" ? "improved" : outcome.delta.interpretation === "worsened" ? "worsened" : "flat"}`}>
+            <div className="delta-readings">
+              <div><span>Arithmetic</span><strong>{outcome.delta.direction} {outcome.delta.absolute}</strong><small>{outcome.delta.percent}</small></div>
+              <div><span>Interpretation</span><Pill tone={outcome.delta.interpretation === "improved" ? "success" : outcome.delta.interpretation === "worsened" ? "missing" : "neutral"}>{outcome.delta.interpretation === "not-interpreted" ? "not interpreted" : outcome.delta.interpretation}</Pill><small>{outcome.delta.interpretation === "not-interpreted" ? "No direction was established, so nothing here calls the change better or worse." : "Read against the direction recorded below."}</small></div>
+            </div>
+            <small>Both readings are exactly what the server returned. The browser never computes or flips an interpretation.</small>
+          </div> : <div className="ops-delta blocked"><Pill tone="missing">No delta claimed</Pill><strong>{outcome.deltaBlockedReason || "The server returned no delta and no reason. No numeric change is claimed."}</strong><small>Nothing is computed client-side to fill this gap.</small></div>}
+          <div className="direction-provenance">
+            <header><Pill tone={directionSourceTone[recorded?.source ?? "none"]}>{recorded ? directionSourceLabel[recorded.source] : "Direction source not reported"}</Pill><span>{recordedDirection ? directionChoiceCopy[recordedDirection][0] : "No direction on record"}</span></header>
+            <p>{recorded?.basis || "The server did not report where this direction came from. Treat the interpretation above as unexplained, and correct the direction if it reads wrong."}</p>
+            {recorded ? <small>Confidence {confidenceLabel(recorded.confidence)}{recorded.ambiguous ? " · flagged as reading both ways" : ""}{recordedDirection ? ` · ${directionSentence(recordedDirection, outcome.endingMetric?.unit ?? "")}` : ""}</small> : null}
+            <div className="direction-override"><span>Disagree with this direction? Correcting it makes the server re-read the delta and regenerate the outcome report.</span>
+              <div className="status-toggle">{(["lower", "higher"] as const).map((option) => <button className={recordedDirection === option ? "selected" : ""} disabled={correcting} key={option} onClick={() => onCorrectDirection(option)} type="button">{directionChoiceCopy[option][0]}</button>)}</div>
+              {correcting ? <small role="status">Correcting the direction and regenerating the outcome report…</small> : null}
+            </div>
+          </div>
           <dl className="ops-meta"><div><dt>Constraint moved</dt><dd>{outcome.constraintMoved ? "Yes, client-confirmed" : "Not confirmed"}</dd></div><div><dt>Next constraint</dt><dd>{outcome.nextConstraintObserved || "Not observed yet"}</dd></div><div><dt>Measured</dt><dd>{outcome.measuredAt ? new Date(outcome.measuredAt).toLocaleString() : "Unknown"}</dd></div></dl>
           <Button icon="arrow" onClick={() => onNavigate("catalog")}>Write the pattern back</Button>
         </>}

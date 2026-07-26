@@ -14,6 +14,7 @@ import {
   renderMarkdownToHtml,
 } from "./deliverables";
 import { HttpError } from "./http";
+import { resolveMetricDirection } from "./metric-direction";
 import { createDocument, appendOrUpdateRow, sendEmail, type CellValue } from "./integrations";
 import { researchPublicWebsite } from "./research";
 import { enrichResearchWithOpenAI } from "./openai-research";
@@ -33,7 +34,8 @@ import {
   updateEngagement,
   updateIntentStatus,
 } from "./store";
-import { synthesizeTranscript } from "./transcript";
+import { parseTranscriptText, synthesizeTranscript } from "./transcript";
+import { synthesizeTranscriptWithOpenAI } from "./openai-transcript";
 import { decodeTranscriptFile, type TranscriptFileInput } from "./transcript-files";
 import {
   computeMetricDelta,
@@ -259,7 +261,8 @@ export async function processTranscript(
       expectedVersion: engagement.version,
     }, principal.ownerId);
   }
-  const synthesis = synthesizeTranscript(rawText, {
+  const valueFlow = engagement.data.valueFlow ?? engagement.data.research?.valueFlow;
+  const deterministic = synthesizeTranscript(rawText, {
     client: engagement.client,
     callNumber: input.callNumber,
     transcriptUrl: input.sourceUrl,
@@ -267,7 +270,21 @@ export async function processTranscript(
     speakerRoles: input.speakerRoles,
     research: engagement.data.research,
     canvas: engagement.data.canvas,
-    valueFlow: engagement.data.valueFlow ?? engagement.data.research?.valueFlow,
+    valueFlow,
+    questions: engagement.data.research?.discoveryQuestions,
+    priorSynthesis: engagement.data.transcriptSynthesis,
+  });
+  // The model reads the call with the full business context, then every claim it makes is
+  // checked back against the real transcript lines. Anything it cannot ground is discarded
+  // and recorded. With no key, or on any failure, the deterministic reading stands.
+  const synthesis = await synthesizeTranscriptWithOpenAI(deterministic, {
+    lines: parseTranscriptText(rawText, input.speakerRoles),
+    client: engagement.client,
+    callNumber: input.callNumber,
+    transcriptUrl: input.sourceUrl,
+    research: engagement.data.research,
+    canvas: engagement.data.canvas,
+    valueFlow,
     questions: engagement.data.research?.discoveryQuestions,
     priorSynthesis: engagement.data.transcriptSynthesis,
   });
@@ -671,6 +688,7 @@ export async function activateSprint(
   const sprint: SprintRecord = {
     sprintId: makeId("spr"),
     constraintId: finding.constraintId,
+    constraintType: finding.constraintType,
     activatedAt: now,
     activatedBy: principal.email,
     prescription: finding.prescription.description,
@@ -752,9 +770,15 @@ export async function measureOutcome(
     throw new Error("The ending metric requires name, value, unit, period, and source.");
   }
   const starting = engagement.data.baseline ?? sprint.startingMetric;
+  // Which way is better is inferred from the metric itself, but the advisor's own
+  // declaration always wins and the basis is recorded so the reasoning is visible.
+  const directionInference = await resolveMetricDirection(ending, {
+    constraintType: finding.constraintType,
+    advisorDeclared: input.improvedWhen,
+  });
   const { delta, blockedReason: deltaBlockedReason } = computeMetricDelta(starting, ending, {
     baselineConfirmed: engagement.baselineStatus === "Confirmed",
-    improvedWhen: input.improvedWhen,
+    improvedWhen: directionInference.improvedWhen ?? undefined,
   });
 
   const outcome: OutcomeMeasurement = {
@@ -764,7 +788,8 @@ export async function measureOutcome(
     endingMetric: ending,
     delta,
     deltaBlockedReason,
-    improvedWhen: input.improvedWhen,
+    improvedWhen: directionInference.improvedWhen ?? undefined,
+    directionInference,
     constraintMoved: input.constraintMoved ?? false,
     nextConstraintObserved: input.nextConstraintObserved?.trim() ?? "",
     evidence: (input.evidence ?? []).filter((item) => item.quote?.trim() && item.source?.trim()),
@@ -792,6 +817,63 @@ export async function measureOutcome(
       : `No delta claimed: ${deltaBlockedReason}`,
   });
   return { engagement: updated, outcome, document };
+}
+
+/**
+ * Correct which direction counts as an improvement after the outcome was recorded.
+ * The measured numbers are immutable; only the reading of them changes, and the
+ * corrected reading is marked as the advisor's own so no inference can be mistaken
+ * for a human decision.
+ */
+export async function correctOutcomeDirection(
+  id: string,
+  principal: Principal,
+  input: { improvedWhen: "higher" | "lower" },
+) {
+  const engagement = await requireEngagement(id, principal.ownerId);
+  const outcome = engagement.data.outcome;
+  const finding = engagement.data.finding;
+  if (!outcome) throw new Error("No measured outcome exists for this engagement.");
+  if (!finding) throw new Error("A constraint finding is required.");
+  if (input.improvedWhen !== "higher" && input.improvedWhen !== "lower") {
+    throw new Error("improvedWhen must be higher or lower.");
+  }
+  const { delta, blockedReason } = computeMetricDelta(outcome.startingMetric, outcome.endingMetric, {
+    baselineConfirmed: engagement.baselineStatus === "Confirmed",
+    improvedWhen: input.improvedWhen,
+  });
+  const corrected: OutcomeMeasurement = {
+    ...outcome,
+    delta,
+    deltaBlockedReason: blockedReason,
+    improvedWhen: input.improvedWhen,
+    directionInference: {
+      improvedWhen: input.improvedWhen,
+      source: "advisor",
+      basis: `${principal.email} declared that a ${input.improvedWhen} number is the improvement for ${outcome.endingMetric.name || "this metric"}.`,
+      confidence: 1,
+    },
+  };
+  const updated = await updateEngagement(id, {
+    data: { outcome: corrected },
+    expectedVersion: engagement.version,
+  }, principal.ownerId);
+  const document = await createArtifact(updated, {
+    kind: "outcome_report",
+    title: `${updated.client} — Measured Outcome`,
+    status: "approved",
+    provenance: "advisor-note",
+    content: generateOutcomeReport(updated, finding, corrected),
+    data: corrected,
+  });
+  await addActivity(updated, {
+    activityType: "Measurement",
+    summary: "Corrected the improvement direction",
+    outcome: delta
+      ? `Advisor set ${input.improvedWhen}-is-better; reading is now ${delta.interpretation}`
+      : `Advisor set ${input.improvedWhen}-is-better; no delta claimed: ${blockedReason}`,
+  });
+  return { engagement: updated, outcome: corrected, document };
 }
 
 /** Write the measured pattern back to the reusable catalog. Requires a real measurement. */

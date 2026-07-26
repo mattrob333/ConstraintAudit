@@ -547,6 +547,21 @@ ${tasks.length
 `;
 }
 
+/**
+ * A document that calls a change an improvement has to say on whose authority.
+ * An advisor's declaration and a machine inference are not the same claim, and a
+ * reader must be able to tell which one they are looking at.
+ */
+function directionBasis(outcome: OutcomeMeasurement): string {
+  const inference = outcome?.directionInference;
+  if (!inference?.improvedWhen) return "";
+  const authority = inference.source === "advisor"
+    ? "declared by the advisor"
+    : `inferred from the metric (${inference.source}), not declared by the advisor`;
+  const basis = text(inference.basis);
+  return `\n- Basis: a ${inference.improvedWhen} number is the improvement — ${authority}.${basis ? `\n  ${basis}` : ""}`;
+}
+
 export function generateOutcomeReport(
   engagement: Engagement,
   finding: ConstraintFinding,
@@ -577,7 +592,7 @@ export function generateOutcomeReport(
 ${outcome?.delta
   ? `- Change: ${text(outcome.delta.absolute) || "unrecorded"} (${text(outcome.delta.percent) || "unrecorded"})\n- Direction: the metric ${outcome.delta.direction}\n- Interpretation: ${outcome.delta.interpretation === "not-interpreted"
       ? "not stated. Whether this metric is better higher or lower was never declared, so this document does not call the change an improvement or a regression."
-      : outcome.delta.interpretation}\n\nBoth readings above are client-confirmed. Nothing here is projected.`
+      : outcome.delta.interpretation}${directionBasis(outcome)}\n\nBoth readings above are client-confirmed. Nothing here is projected.`
   : `No result is claimed. ${text(outcome?.deltaBlockedReason) || "The two client-confirmed readings required to compute a change are not both present."}
 
 No number, percentage, or direction of change may be reported, quoted, or reused until that is resolved.`}

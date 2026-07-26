@@ -157,6 +157,8 @@ export interface EngagementData {
 export interface SprintRecord {
   sprintId: string;
   constraintId: string;
+  /** Carried so the outcome screen can preview the direction with the same context the server resolves it with. */
+  constraintType?: ConstraintType;
   activatedAt: string;
   activatedBy: string;
   prescription: string;
@@ -189,9 +191,25 @@ export interface OutcomeMeasurement {
   } | null;
   deltaBlockedReason?: string;
   improvedWhen?: "higher" | "lower";
+  /** How `improvedWhen` was arrived at, so the advisor can see and override the reasoning. */
+  directionInference?: DirectionInference;
   constraintMoved: boolean;
   nextConstraintObserved: string;
   evidence: Array<{ quote: string; source: string }>;
+}
+
+/**
+ * Which way a metric has to move to count as an improvement, and how that was decided.
+ * `source: "advisor"` always wins — an inference is a default, never a verdict.
+ */
+export interface DirectionInference {
+  improvedWhen: "higher" | "lower" | null;
+  source: "advisor" | "unit-table" | "metric-semantics" | "model" | "none";
+  /** Plain-language reason shown next to the result, e.g. "days measure elapsed time". */
+  basis: string;
+  confidence: number;
+  /** Set when two readings of the metric name disagree; the advisor must settle it. */
+  ambiguous?: boolean;
 }
 
 /** A reusable pattern written back to the catalog after a measured outcome. */
@@ -373,6 +391,18 @@ export interface TranscriptSynthesis {
   }>;
   roles?: RoleMapEntry[];
   analysisMode?: "deterministic" | "model-assisted";
+  modelStatus?: "used" | "not-configured" | "failed";
+  providerModel?: string;
+  /**
+   * The model's own reading of the call. Advisor-note provenance always — it is an
+   * interpretation, never client evidence, and never a substitute for a quote.
+   */
+  narrative?: string;
+  /**
+   * Everything the model returned that failed grounding, kept so a silent drop is
+   * never mistaken for the model having found nothing.
+   */
+  groundingRejections?: Array<{ kind: string; reason: string; text: string }>;
   speakerSummary?: Array<{ speaker: string; lines: number; provenance: TranscriptLine["provenance"] }>;
 }
 
