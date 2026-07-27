@@ -14,7 +14,7 @@ Practice mode is a complete, fictional engagement — Meridian Millwork — seed
 - **Open it from the Home screen**: the *Practice mode* card. That calls `GET /api/demo`, and `POST /api/demo {"action":"seed"}` the first time.
 - **It is a real record in the real database**, scoped to you. The id is `eng_demo_practice_<your owner id>`, so two advisors never share one. Practice records are listed under their own heading, never interleaved with clients.
 - **It is labelled everywhere**: a sticky hazard bar that cannot be dismissed and is deliberately *not* hidden on the client-facing screens, a lock mark in the header and in every list, `PRACTICE MODE — fictional training data, never send to a client` in the record itself, and a practice footer on all 14 generated documents.
-- **It covers the whole engagement**: research, Canvas, value flow, both transcripts, synthesis, diagnosis, all deliverables, sprint, measured outcome, catalog entry. A 15-stop walkthrough docks beside the *real* screens rather than rebuilding fake ones; while the walkthrough is running, creating new engagements is disabled.
+- **It covers the whole engagement**: research, Canvas, value flow, both transcripts, synthesis, diagnosis, all deliverables, sprint, measured outcome, catalog entry. An 8-stop walkthrough docks beside the *real* screens rather than rebuilding fake ones; while the walkthrough is running, creating new engagements is disabled.
 - **Reset or remove it** at any time (`POST /api/demo` with `{"action":"reset"}` or `{"action":"remove"}`). Reset rebuilds it byte-identically.
 
 Because the practice bar stays visible on the call screens by design, practice mode is for rehearsal, not for a screen share with a live audience.
@@ -126,14 +126,15 @@ npx tsc --noEmit
 npm test
 ```
 
-`npm test` runs a full vinext production build first, then 43 checks: 3 rendered-frontend checks (`tests/rendered-html.test.mjs`, which asserts the built artifact exists and that the workflow gates and accessibility attributes are present in the owned client surface) and 40 backend checks:
+`npm test` runs a full vinext production build first, then 50 checks: 3 rendered-frontend checks (`tests/rendered-html.test.mjs`, which asserts the built artifact exists, that the crash screen leaks nothing, and that the workflow gates and accessibility attributes are present in the owned client surface) and 47 backend checks:
 
 | File | Checks | Covers |
 | --- | --- | --- |
-| `tests/backend-workflow.test.mjs` | 15 | Research extraction, URL/DNS/redirect/size safety, transcript parsing, evidence provenance, consent, approval gates, readiness-send binding |
+| `tests/backend-workflow.test.mjs` | 16 | Research extraction, URL/DNS/redirect/size safety, transcript parsing, evidence provenance, consent, approval gates, readiness-send binding |
 | `tests/gap-closure.test.mjs` | 11 | Canonical Canvas construction and precedence, research-driven flow and questions, VTT/SRT/file decoding, blocked deltas, HTML escaping |
 | `tests/reasoning.test.mjs` | 7 | Metric-direction inference and advisor override, and the grounding of model output against real transcript lines |
 | `tests/practice-mode.test.mjs` | 7 | Practice data is deterministic, unmistakably fake, quote-grounded, and generates real content across the whole arc |
+| `tests/bug-review.test.mjs` | 6 | Whole-number and magnitude-suffix grounding, ranges refused as anchors, timestamp and cue parsing edges, and the generic advance kept out of evidence-gated states |
 
 No test requires network access or an API key: the one function that can reach the network takes an injectable fetcher, and the tests pass stubs.
 

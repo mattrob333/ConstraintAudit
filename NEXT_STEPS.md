@@ -153,7 +153,7 @@ security assessment.
 
 1. `npm install && npm run dev`
 2. Open the app, click **Practice mode**
-3. Walk the 15-stop tour — it navigates the real screens with a worked example (Meridian Millwork, a millwork
+3. Walk the 8-stop walkthrough — it navigates the real screens with a worked example (Meridian Millwork, a millwork
    shop whose quotes all wait on the owner: 9 days per quote, down to 3 after the sprint)
 4. In the guided call, press **Escape** to show how coaching vanishes the instant you share your screen
 

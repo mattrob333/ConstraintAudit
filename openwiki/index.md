@@ -19,5 +19,5 @@ Every page separates shipped behavior from target behavior. Verified against sou
 - [Domain and evidence](domain/) — provenance, research contract, Canvas rules, model grounding, metric direction
 - [Integrations](integrations/) — what executes, what is intent-only, what does not exist
 - [Operations](operations/) — setup, identity configuration, migrations, Cloudflare Workers deployment
-- [Testing](testing/) — the 43-test suite and the coverage that is still missing
+- [Testing](testing/) — the 50-test suite and the coverage that is still missing
 - [Roadmap](roadmap/) — what is done and what genuinely remains

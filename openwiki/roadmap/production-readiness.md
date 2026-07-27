@@ -27,7 +27,7 @@ Listed so nobody re-plans them. Every row was confirmed against current source o
 | **Source-document ingest** | `POST /api/engagements/:id/sources` at `doc` provenance; PDF refused explicitly |
 | **The Roles & Responsibility Map artifact** | `generateRolesMap()`; `generateDeliverables()` now produces six artifacts, not five |
 | **Findings Call agenda and presentation view** | `POST /api/engagements/:id/findings-agenda` + a client-facing view with no advisor-only content |
-| **Practice mode** | `lib/demo.ts` + `POST /api/demo` + a 15-stop walkthrough; deterministic, offline, free |
+| **Practice mode** | `lib/demo.ts` + `POST /api/demo` + an 8-stop walkthrough; deterministic, offline, free |
 | **Advisor-only live-call coaching** | `AdvisorOnly` unmounts rather than hiding; `Escape` is a one-way panic key |
 | **Resume routing** | Keyed on `workflowState` through `resumeScreens`, falling back to `research` |
 | **`primaryContactRole`** | Column, migration, and reuse as the default named owner at diagnosis approval |

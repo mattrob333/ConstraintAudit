@@ -54,7 +54,7 @@ Every externally-visible action is an intent, and `lib/actions.ts` is the only p
 4. the adapter is called with the intent id as its idempotency key;
 5. the result is written back to the intent and recorded as an activity with provider, status, detail, and any external URL.
 
-A send intent additionally requires a reviewed, immutable, approved input artifact — `requireApprovedReadinessArtifact()` rejects a regenerated or mismatched brief.
+A send intent additionally requires a reviewed, immutable, approved input artifact — `requireApprovedReadinessArtifact()` rejects a regenerated or mismatched brief — and a recipient: `readinessBriefAction()` refuses `send_intent` when the engagement carries no contact email. Intake no longer collects that address, so this is the check that enforces it.
 
 ### not-configured is not a failure
 
