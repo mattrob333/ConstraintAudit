@@ -640,8 +640,10 @@ function isPracticeEngagement(id: string | null | undefined): boolean {
   return typeof id === "string" && id.startsWith(PRACTICE_ID_PREFIX);
 }
 
-type TourMode = "off" | "guiding" | "exploring" | "done";
-type TourState = { step: number; mode: TourMode };
+type TourMode = "off" | "guiding" | "done";
+/** Where the walkthrough docks. Both positions reflow the app; neither ever overlays it. */
+type TourDock = "side" | "bottom";
+type TourState = { step: number; mode: TourMode; dock: TourDock; collapsed: boolean };
 type ResearchTab = "canvas" | "flow" | "questions";
 
 type TourStop = {
@@ -902,8 +904,11 @@ function readTourState(): TourState | null {
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<TourState>;
     const step = typeof parsed.step === "number" && parsed.step >= 0 && parsed.step < practiceTour.length ? parsed.step : 0;
+    // Anything that is not an explicit "done" resumes as guiding, including the retired
+    // "exploring" mode, whose job the collapsed dock now does.
     const mode: TourMode = parsed.mode === "done" ? "done" : "guiding";
-    return { step, mode };
+    const dock: TourDock = parsed.dock === "bottom" ? "bottom" : "side";
+    return { step, mode, dock, collapsed: parsed.collapsed === true };
   } catch {
     return null;
   }
@@ -1246,6 +1251,11 @@ export default function AdvisorCockpit() {
   const [practiceError, setPracticeError] = useState("");
   const [tourStep, setTourStep] = useState(0);
   const [tourMode, setTourMode] = useState<TourMode>("off");
+  /** The advisor's saved dock preference. What is actually used is `activeDock`, below. */
+  const [tourDock, setTourDock] = useState<TourDock>("side");
+  const [tourCollapsed, setTourCollapsed] = useState(false);
+  /** 0 until the first client-side measurement, which is the signal to leave the preference alone. */
+  const [viewport, setViewport] = useState(0);
   const [researchTab, setResearchTab] = useState<ResearchTab | undefined>(undefined);
   /** Per-button in-flight guards so a double-click cannot fire a mutating request twice. */
   const [analyzing, setAnalyzing] = useState(false);
@@ -1261,6 +1271,7 @@ export default function AdvisorCockpit() {
   const [speakerRoles, setSpeakerRoles] = useState<Record<string, "client" | "advisor" | "unknown">>({});
   const [speakerReq, setSpeakerReq] = useState("");
   const modalRef = useRef<HTMLDivElement>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
   const currentStage = stageFor(screen);
   const practiceActive = isPracticeEngagement(activeId);
   /**
@@ -1270,6 +1281,17 @@ export default function AdvisorCockpit() {
    * NOT gated by this — it is the one thing that has to survive a screen share.
    */
   const guidanceHidden = screen === "findings-call" || (screen === "call" && presenting);
+  /**
+   * Dock geometry. The walkthrough is a real layout column, so the only question is which
+   * edge it takes. The coaching rail always owns the right of the guided call; a walkthrough
+   * column on the left of that same screen makes three columns and crushes the question in
+   * the middle, so below ~1600px that screen forces the bottom strip. Narrow viewports force
+   * it too. Both are overrides, not writes: the saved preference comes back when there is room.
+   */
+  const tourVisible = practiceActive && !guidanceHidden && tourMode !== "off";
+  const coachRailOnScreen = screen === "call" && !presenting;
+  const dockForced = viewport > 0 && (viewport < 1080 || (coachRailOnScreen && viewport < 1600));
+  const activeDock: TourDock = tourCollapsed || dockForced ? "bottom" : tourDock;
   const displayCompany = company || "Untitled engagement";
   const script = callScriptFor(researchResult);
   const callQuestion = script.questions[Math.min(callIndex, script.questions.length - 1)];
@@ -1354,15 +1376,26 @@ export default function AdvisorCockpit() {
     return () => { active = false; };
   }, []);
 
-  /** The advisor's place in the walkthrough survives a reload, a tab close, and a laptop restart. */
+  /** The advisor's place in the walkthrough — and how they like it docked — survives a reload. */
   useEffect(() => {
     if (!practiceActive || tourMode === "off") return;
-    writeTourState({ mode: tourMode === "done" ? "done" : "guiding", step: tourStep });
-  }, [practiceActive, tourMode, tourStep]);
+    writeTourState({ mode: tourMode, step: tourStep, dock: tourDock, collapsed: tourCollapsed });
+  }, [practiceActive, tourMode, tourStep, tourDock, tourCollapsed]);
+
+  /** The dock's shape depends on how much room there is, so the width has to be a real measurement. */
+  useEffect(() => {
+    const measure = () => setViewport(window.innerWidth);
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, []);
 
   function go(next: Screen) {
     setScreen(next); setNotice(""); setMobileNav(false); setResumed(null);
     window.scrollTo({ top: 0, behavior: "smooth" });
+    // While the walkthrough is docked the content column is the scroll container, not the
+    // window, so the window call above is a no-op and this is the one that does the work.
+    bodyRef.current?.scrollTo({ top: 0, behavior: "smooth" });
   }
 
   async function save<T = unknown>(path: string, body: unknown, method = "POST") {
@@ -1596,6 +1629,8 @@ export default function AdvisorCockpit() {
     setEngagements((items) => [toEngagement(record), ...items.filter((item) => item.id !== record.id)]);
     await resume(toEngagement(record));
     const saved = restart ? null : readTourState();
+    setTourDock(saved?.dock ?? "side");
+    setTourCollapsed(saved?.collapsed ?? false);
     if (saved?.mode === "done") {
       setTourStep(practiceTour.length - 1);
       setTourMode("done");
@@ -2112,10 +2147,20 @@ export default function AdvisorCockpit() {
     }
   }
 
-  return <div className={`cockpit ${isClientFacing(screen) ? "client-call" : ""} ${practiceActive ? "practice" : ""}`}>
+  return <div className={`cockpit ${isClientFacing(screen) ? "client-call" : ""} ${practiceActive ? "practice" : ""} ${tourVisible ? `tour-docked tour-${activeDock}${tourCollapsed ? " tour-collapsed" : ""}` : ""}`}>
     <a className="skip" href="#main">Skip to main content</a>
-    {/* Outside <main> and outside every screen, so no screen can suppress it. No dismiss control exists. */}
+    {/* Outside <main> and outside every screen, so no screen can suppress it. No dismiss control exists.
+        It is also outside the dock frame below, so collapsing or moving the walkthrough cannot touch it. */}
     {practiceActive ? <PracticeBar busy={practiceBusy} onLeave={() => leavePractice()} onReset={resetPractice} /> : null}
+    {/*
+      The dock and the app share one frame. When the walkthrough is up the frame is a flex
+      row (side) or reversed column (bottom) and `.cockpit-body` scrolls inside what is left,
+      so no content ever passes under the dock. When it is not up — including the moment
+      Escape hides it — the frame is a plain block and the app is full width again.
+    */}
+    <div className="cockpit-frame">
+    {practiceActive ? <PracticeTour busy={practiceBusy} collapsed={tourCollapsed} dock={activeDock} dockLocked={dockForced} hidden={guidanceHidden} index={tourStep} mode={tourMode} onCollapse={setTourCollapsed} onDock={setTourDock} onFinish={() => setTourMode("done")} onJump={goToStop} onLeave={() => leavePractice()} onNext={() => goToStop(tourStep + 1)} onPrevious={() => goToStop(tourStep - 1)} onRemove={removePractice} onReset={resetPractice} onRestart={() => goToStop(0)} onScreen={screen === practiceTour[Math.min(tourStep, practiceTour.length - 1)].screen} /> : null}
+    <div className="cockpit-body" ref={bodyRef}>
     <header className="app-header">
       <button className="brand" onClick={() => go("home")} type="button"><span><Icon name="shield" size={18} /></span>TIER 4 <em>AUDIT</em></button>
       {screen !== "home" ? <div className="header-context"><i />{displayCompany}{practiceActive ? <PracticeMark compact /> : null}<Pill tone={isClientFacing(screen) ? "known" : "neutral"}>{isClientFacing(screen) ? "Client call view" : "Advisor view"}</Pill></div> : null}
@@ -2174,7 +2219,8 @@ export default function AdvisorCockpit() {
       {screen === "call" && !callQuestion ? <section className="guided narrow"><PageHead eyebrow="Call · guided script" title="No call question is available.">Run research for this engagement so the guided call can be driven by client-specific discovery questions.</PageHead><Button icon="back" onClick={() => go("research")}>Back to research</Button></section> : null}
     </main>
     {screen !== "home" && !isClientFacing(screen) ? <div aria-live="polite" className="save-state"><i className={apiState} />{apiState === "saving" ? "Saving…" : apiState === "saved" ? "Saved" : apiState === "error" ? "Action failed" : "Ready"}</div> : null}
-    {practiceActive ? <PracticeTour busy={practiceBusy} hidden={guidanceHidden} index={tourStep} mode={tourMode} onExplore={() => setTourMode("exploring")} onFinish={() => setTourMode("done")} onJump={goToStop} onLeave={() => leavePractice()} onNext={() => goToStop(tourStep + 1)} onPrevious={() => goToStop(tourStep - 1)} onRemove={removePractice} onReset={resetPractice} onRestart={() => goToStop(0)} onResume={() => goToStop(tourStep)} onScreen={screen === practiceTour[Math.min(tourStep, practiceTour.length - 1)].screen} /> : null}
+    </div>
+    </div>
     {confirmSend ? <div className="modal-layer"><div aria-describedby="send-description" aria-labelledby="send-title" aria-modal="true" className="modal" ref={modalRef} role="dialog">
       <button aria-label="Close" className="modal-close" onClick={() => setConfirmSend(false)} type="button"><Icon name="close" size={17} /></button>
       <span className="modal-icon"><Icon name="mail" size={21} /></span><p className="eyebrow">External intent</p><h2 id="send-title">Approve this send intent</h2>
@@ -2444,13 +2490,18 @@ function PracticeBar({ busy, onLeave, onReset }: {
  * it returns null on a client-facing screen — absent from the DOM, not styled
  * out of view — and everything it does render lives inside <AdvisorOnly>.
  *
- * It never rebuilds a screen. It docks beside the real one and explains it.
+ * It never rebuilds a screen, and it never covers one. It is a DOCK: a real column
+ * (side) or strip (bottom) in the cockpit's layout, so the app reflows into the space
+ * that is left rather than being overlaid. Collapsing it to a single bar is the one
+ * "get out of my way" control — there is no second, competing explore mode.
  */
 function PracticeTour(props: {
-  busy: "" | "open" | "reset" | "remove"; hidden: boolean; index: number; mode: TourMode; onScreen: boolean;
-  onExplore: () => void; onFinish: () => void; onJump: (index: number) => void; onLeave: () => void;
+  busy: "" | "open" | "reset" | "remove"; collapsed: boolean; dock: TourDock; dockLocked: boolean;
+  hidden: boolean; index: number; mode: TourMode; onScreen: boolean;
+  onCollapse: (collapsed: boolean) => void; onDock: (dock: TourDock) => void;
+  onFinish: () => void; onJump: (index: number) => void; onLeave: () => void;
   onNext: () => void; onPrevious: () => void; onRemove: () => void; onReset: () => void;
-  onRestart: () => void; onResume: () => void;
+  onRestart: () => void;
 }) {
   const [listOpen, setListOpen] = useState(false);
   if (props.hidden || props.mode === "off") return null;
@@ -2458,60 +2509,75 @@ function PracticeTour(props: {
   const index = Math.min(Math.max(props.index, 0), total - 1);
   const stop = practiceTour[index];
   const last = index === total - 1;
+  const done = props.mode === "done";
 
-  if (props.mode === "exploring") return <div className="tour-dock collapsed">
+  // The slim bar. Everything needed to keep stepping is here, so collapsing never costs
+  // the advisor their place — which is exactly what "explore on my own" used to be for.
+  if (props.collapsed) return <div className="tour-dock">
     <AdvisorOnly hidden={false} label="Advisor only · practice walkthrough">
-      <button className="tour-rejoin" onClick={props.onResume} type="button">
-        <Icon name="refresh" size={16} />
-        <span><strong>Back to the walkthrough</strong><small>Step {index + 1} of {total} · {stop.title}</small></span>
-      </button>
-    </AdvisorOnly>
-  </div>;
-
-  if (props.mode === "done") return <div className="tour-dock">
-    <AdvisorOnly hidden={false} label="Advisor only · practice walkthrough, never shown to a client">
-      <div className="tour-panel">
-        <header><div><p className="eyebrow">Practice walkthrough · complete</p><h2>That is the whole arc.</h2></div></header>
-        <p className="tour-lead">You have now seen every screen you will use with a real client: what you can learn before you speak to them, how the call is driven, where the two approvals sit, what gets written, and how the result is measured. None of it needed an API key, and nothing left this app without a second, deliberate press.</p>
-        <p className="tour-lead">The thing worth carrying out of here is the shape, not the detail. One constraint. One smallest change. One number, taken from the client’s own record. One person’s name against it. If your first real call gets you a traced flow, a step everything waits at, and a name — the call worked.</p>
-        <p className="tour-note"><Icon name="info" size={15} />{PRACTICE_CLIENT} stays here for as long as you want it. Reset it and walk it again, leave it and start a real engagement, or delete it entirely — it can always be rebuilt exactly as it was.</p>
-        <div className="tour-actions">
-          <Button icon="refresh" onClick={props.onRestart} variant="secondary">Walk it again</Button>
-          <Button disabled={Boolean(props.busy)} onClick={props.onReset} variant="secondary">{props.busy === "reset" ? "Resetting…" : "Reset practice data"}</Button>
-          <Button icon="arrow" onClick={props.onLeave}>Leave practice mode</Button>
-        </div>
-        <button className="tour-remove" disabled={Boolean(props.busy)} onClick={props.onRemove} type="button">{props.busy === "remove" ? "Deleting…" : "Delete the practice engagement"}</button>
+      <div className="tour-slim">
+        <span className="tour-slim-step"><Icon name="shield" size={13} />{done ? "Complete" : `Step ${index + 1} of ${total}`}</span>
+        <strong className="tour-slim-title">{done ? "That is the whole arc." : stop.title}</strong>
+        {done ? null : <span className="tour-slim-nav">
+          <button aria-label="Previous step" disabled={index === 0} onClick={props.onPrevious} type="button"><Icon name="back" size={15} /></button>
+          <button aria-label={last ? "Finish the walkthrough" : "Next step"} onClick={last ? props.onFinish : props.onNext} type="button"><Icon name={last ? "check" : "arrow"} size={15} /></button>
+        </span>}
+        <button className="tour-icon" onClick={() => props.onCollapse(false)} type="button"><Icon name="upload" size={14} />Expand</button>
       </div>
     </AdvisorOnly>
   </div>;
 
+  const tools = <span className="tour-tools">
+    {props.dockLocked ? null : <button className="tour-icon" onClick={() => props.onDock(props.dock === "side" ? "bottom" : "side")} type="button">
+      <Icon name={props.dock === "side" ? "download" : "back"} size={14} />{props.dock === "side" ? "Move to bottom" : "Move to side"}
+    </button>}
+    <button className="tour-icon" onClick={() => props.onCollapse(true)} type="button"><Icon name="download" size={14} />Collapse</button>
+  </span>;
+
   return <div className="tour-dock">
     <AdvisorOnly hidden={false} label="Advisor only · practice walkthrough, never shown to a client">
       <div className="tour-panel">
-        <header>
-          <div><p className="eyebrow">{stop.stage}</p><h2>{stop.title}</h2></div>
-          <button aria-expanded={listOpen} className="tour-count" onClick={() => setListOpen(!listOpen)} type="button">Step {index + 1} of {total}<Icon name="chevron" size={13} /></button>
+        {/* Pinned: the step, the title and the navigation stay reachable however long the body runs. */}
+        <header className="tour-head">
+          <div className="tour-head-top"><p className="eyebrow">{done ? "Practice walkthrough · complete" : stop.stage}</p>{tools}</div>
+          <h2>{done ? "That is the whole arc." : stop.title}</h2>
+          {done ? null : <>
+            <div className="tour-head-meter">
+              <button aria-expanded={listOpen} className="tour-count" onClick={() => setListOpen(!listOpen)} type="button">Step {index + 1} of {total}<Icon name="chevron" size={13} /></button>
+              <div className="tour-progress"><i style={{ width: `${((index + 1) / total) * 100}%` }} /></div>
+            </div>
+            <div className="tour-actions">
+              <Button disabled={index === 0} onClick={props.onPrevious} variant="secondary"><Icon name="back" size={16} />Previous</Button>
+              <Button icon={last ? "check" : "arrow"} onClick={last ? props.onFinish : props.onNext}>{last ? "Finish the walkthrough" : "Next"}</Button>
+            </div>
+          </>}
         </header>
-        <div className="tour-progress"><i style={{ width: `${((index + 1) / total) * 100}%` }} /></div>
-        {listOpen ? <ol className="tour-list">{practiceTour.map((item, position) => <li key={item.id}>
-          <button aria-current={position === index ? "step" : undefined} className={position === index ? "active" : position < index ? "done" : ""} onClick={() => { setListOpen(false); props.onJump(position); }} type="button">
-            <b>{position + 1}</b><span><strong>{item.title}</strong><small>{item.stage}</small></span>
-          </button>
-        </li>)}</ol> : null}
-        {!props.onScreen ? <p className="tour-note" role="status"><Icon name="info" size={15} />You have moved off this step. <button className="call-link" onClick={() => props.onJump(index)} type="button">Take me back to step {index + 1}</button>, or carry on looking around — the walkthrough will wait.</p> : null}
-        <div className="tour-body">
-          <section><p className="eyebrow">What you are looking at</p><p>{stop.looking}</p></section>
-          <section><p className="eyebrow">With a real client</p><p>{stop.real}</p></section>
-          <section><p className="eyebrow">Worth a look</p><ul>{stop.watch.map((line) => <li key={line}>{line}</li>)}</ul></section>
+        <div className="tour-scroll">
+          {listOpen ? <ol className="tour-list">{practiceTour.map((item, position) => <li key={item.id}>
+            <button aria-current={position === index ? "step" : undefined} className={position === index ? "active" : position < index ? "done" : ""} onClick={() => { setListOpen(false); props.onJump(position); }} type="button">
+              <b>{position + 1}</b><span><strong>{item.title}</strong><small>{item.stage}</small></span>
+            </button>
+          </li>)}</ol> : null}
+          {done ? <>
+            <p className="tour-lead">You have now seen every screen you will use with a real client: what you can learn before you speak to them, how the call is driven, where the two approvals sit, what gets written, and how the result is measured. None of it needed an API key, and nothing left this app without a second, deliberate press.</p>
+            <p className="tour-lead">The thing worth carrying out of here is the shape, not the detail. One constraint. One smallest change. One number, taken from the client’s own record. One person’s name against it. If your first real call gets you a traced flow, a step everything waits at, and a name — the call worked.</p>
+            <p className="tour-note"><Icon name="info" size={15} />{PRACTICE_CLIENT} stays here for as long as you want it. Reset it and walk it again, leave it and start a real engagement, or delete it entirely — it can always be rebuilt exactly as it was.</p>
+            <div className="tour-actions">
+              <Button icon="refresh" onClick={props.onRestart} variant="secondary">Walk it again</Button>
+              <Button disabled={Boolean(props.busy)} onClick={props.onReset} variant="secondary">{props.busy === "reset" ? "Resetting…" : "Reset practice data"}</Button>
+              <Button icon="arrow" onClick={props.onLeave}>Leave practice mode</Button>
+            </div>
+            <button className="tour-remove" disabled={Boolean(props.busy)} onClick={props.onRemove} type="button">{props.busy === "remove" ? "Deleting…" : "Delete the practice engagement"}</button>
+          </> : <>
+            {!props.onScreen ? <p className="tour-note" role="status"><Icon name="info" size={15} />You have moved off this step. <button className="call-link" onClick={() => props.onJump(index)} type="button">Take me back to step {index + 1}</button>, or carry on looking around — the walkthrough will wait.</p> : null}
+            <div className="tour-body">
+              <section><p className="eyebrow">What you are looking at</p><p>{stop.looking}</p></section>
+              <section><p className="eyebrow">With a real client</p><p>{stop.real}</p></section>
+              <section><p className="eyebrow">Worth a look</p><ul>{stop.watch.map((line) => <li key={line}>{line}</li>)}</ul></section>
+            </div>
+            <p className="tour-foot"><Icon name="info" size={13} />Wander anywhere you like — the walkthrough keeps your place. Collapse it to a single bar when you want the screen to yourself.</p>
+          </>}
         </div>
-        <div className="tour-actions">
-          <Button disabled={index === 0} onClick={props.onPrevious} variant="secondary"><Icon name="back" size={16} />Previous</Button>
-          <Button icon={last ? "check" : "arrow"} onClick={last ? props.onFinish : props.onNext}>{last ? "Finish the walkthrough" : "Next"}</Button>
-        </div>
-        <footer className="tour-foot">
-          <button onClick={props.onExplore} type="button"><Icon name="search" size={13} />Explore on my own</button>
-          <small>You can wander anywhere. This panel keeps your place and waits for you.</small>
-        </footer>
       </div>
     </AdvisorOnly>
   </div>;
@@ -3415,7 +3481,7 @@ function SettingsScreen({ onBack, onIntegrations }: { onBack: () => void; onInte
       {encryptionMode === "generated-key" ? <p className="settings-keys-extra"><Icon name="info" size={14} />The encryption key was generated for you automatically and is stored alongside the data, so anyone who can read the database can read both. Setting <code>APP_ENCRYPTION_KEY</code> in the deployment environment is the stronger option.</p> : null}
     </div></div>
 
-    <div className="settings-section"><header className="settings-section-head"><p className="eyebrow">Section 1 · API keys</p><h2>Paste your keys and save them</h2><p>One box per key. Each shows whether it is saved, what it unlocks, and where to get it. Nothing you save is ever shown back to you — only the last few characters, so you can tell which key is in there.</p></header>
+    <div className="settings-section"><header className="settings-section-head"><p className="eyebrow">Section 1 · API keys</p><h2>Paste your keys and save them</h2><p>One box per provider. Each shows whether a value is saved, what it unlocks, and where to get it. A saved key is never shown back to you — only its last few characters, so you can tell which one is in there. The plain settings mixed in below (addresses, model names) are not secrets and are stored as typed.</p></header>
       {keysLoading ? <p className="registry-empty" role="status">Reading your saved keys…</p> : null}
       {keysError ? <p className="ops-error" role="alert"><Icon name="info" size={15} />{keysError}</p> : null}
       {!keysLoading && !keysError && groups.length === 0 ? <p className="registry-empty">The server returned no credential fields.</p> : null}
@@ -3438,7 +3504,7 @@ function SettingsScreen({ onBack, onIntegrations }: { onBack: () => void; onInte
               <div className="cred-field-head">
                 <label htmlFor={inputId}><span>{meta.label}</span></label>
                 {managed ? <Pill tone="known">Set on the server</Pill> : savedInApp ? <Pill tone="success">Saved</Pill> : <Pill tone="neutral">Not set</Pill>}
-                {savedInApp && credential?.hint ? <span className="cred-hint">ends in {credential.hint}</span> : null}
+                {savedInApp && credential?.hint ? <span className="cred-hint">{meta.secret ? `ends in ${credential.hint.replace(/^…/, "")}` : credential.hint}</span> : null}
                 <code className="cred-name">{field}</code>
               </div>
               {managed
