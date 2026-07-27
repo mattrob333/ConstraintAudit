@@ -578,7 +578,9 @@ const screenLabels: Partial<Record<Screen, string>> = {
  * =========================================================================== */
 
 /** The server mints one practice record per advisor, all sharing this id prefix. */
-const PRACTICE_ID_PREFIX = "eng_demo_";
+// Must match isDemoEngagement() in lib/demo.ts. A looser prefix here would badge an
+// unrelated engagement as practice data, or miss one the server considers practice.
+const PRACTICE_ID_PREFIX = "eng_demo_practice";
 const PRACTICE_CLIENT = "Meridian Millwork";
 const PRACTICE_TOUR_KEY = "tier4:practice-walkthrough";
 

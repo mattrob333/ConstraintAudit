@@ -6,7 +6,7 @@ okf_version: "0.1"
 
 This repository wiki describes the shipped application, its governing workflow, evidence model, integrations, operating procedures, verification gates, and production-readiness roadmap.
 
-Every page separates shipped behavior from target behavior. Verified against source on 2026-07-26, after the gap-closure change; see [log](log.md).
+Every page separates shipped behavior from target behavior. Verified against source on 2026-07-27, at `5f50feb`, after model-assisted synthesis, metric-direction inference, Cloudflare Access, Practice mode, and the Workers deployment path landed; see [log](log.md).
 
 ## Start here
 
@@ -14,10 +14,10 @@ Every page separates shipped behavior from target behavior. Verified against sou
 
 ## Areas
 
-- [Architecture](architecture/) — runtime, tenancy, canonical Canvas, intent execution
-- [Workflows](workflows/) — the two-call audit through sprint, outcome, and catalog
-- [Domain and evidence](domain/) — provenance, research contract, Canvas rules, delta rules
+- [Architecture](architecture/) — runtime, tenancy, canonical Canvas, intent execution, identity and access
+- [Workflows](workflows/) — the two-call audit through sprint, outcome, and catalog, plus Practice mode
+- [Domain and evidence](domain/) — provenance, research contract, Canvas rules, model grounding, metric direction
 - [Integrations](integrations/) — what executes, what is intent-only, what does not exist
-- [Operations](operations/) — setup, identity configuration, migration, deployment
-- [Testing](testing/) — automated gates and remaining coverage gaps
-- [Roadmap](roadmap/) — what is done and what remains
+- [Operations](operations/) — setup, identity configuration, migrations, Cloudflare Workers deployment
+- [Testing](testing/) — the 43-test suite and the coverage that is still missing
+- [Roadmap](roadmap/) — what is done and what genuinely remains

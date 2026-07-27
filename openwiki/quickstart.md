@@ -73,7 +73,7 @@ npx tsc --noEmit
 npm test
 ```
 
-`npm test` builds the application, runs `tests/rendered-html.test.mjs` under `node --test` (2 tests), then runs `tests/backend-workflow.test.mjs`, `tests/gap-closure.test.mjs`, `tests/reasoning.test.mjs`, and `tests/practice-mode.test.mjs` under `tsx --test` (15 + 11 + 7 + 7 = 40 tests). **42 tests in total.**
+`npm test` builds the application, runs `tests/rendered-html.test.mjs` under `node --test` (2 tests), then runs `tests/backend-workflow.test.mjs`, `tests/gap-closure.test.mjs`, `tests/reasoning.test.mjs`, and `tests/practice-mode.test.mjs` under `tsx --test` (15 + 11 + 7 + 7 = 40 tests). **43 tests in total.**
 
 The application runs with no credentials at all. Without `OPENAI_API_KEY` research stays deterministic and still produces a flow and questions, transcript synthesis stays deterministic and says so on screen, and metric direction falls back to its three deterministic tiers. Without a provider credential an approved intent returns `not-configured`, performs no network call, and remains approved so it can be retried later.
 

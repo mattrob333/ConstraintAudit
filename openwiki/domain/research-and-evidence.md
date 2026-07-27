@@ -11,7 +11,7 @@ tags: [evidence, provenance, research, canvas, constraints, value-flow, metrics]
 
 | Display status | Stored provenance | Meaning |
 | --- | --- | --- |
-| Known | `client-stated` or `doc` | Direct client statement or authoritative supplied document |
+| Known | `client-stated` or `doc` | Direct client statement, or an authoritative supplied document. `doc` is what `POST /api/engagements/:id/sources` writes for advisor-supplied material — it is never promoted to `client-stated`, because nobody said it on a recorded call |
 | Inferred | `public-research` | Public source not yet confirmed by the client |
 | Assumed | `advisor-note` | Working hypothesis that must be confirmed or killed |
 | Missing | `gap` | Required information not yet established |
@@ -85,11 +85,13 @@ Not yet implemented: an explicit `canvasRevision` version number, and a `researc
 
 The domain supports `capacity`, `latency`, `quality`, `knowledge`, and `policy`.
 
-`lib/transcript.ts` selects one type from client-stated lines and maps it to a Canvas block. The analyzer is now considerably deeper than a single keyword pass — it also derives contradictions, Canvas updates, flow confirmations, decisions, tasks, roles, and a broader set of metrics — but it remains **deterministic**, reporting `analysisMode: "deterministic"`. Model-assisted transcript synthesis is specified and not implemented.
+`lib/transcript.ts` selects one type from client-stated lines and maps it to a Canvas block. The deterministic analyzer derives contradictions, Canvas updates, flow confirmations, decisions, tasks, roles, and metrics, and reports `analysisMode: "deterministic"`.
+
+**Model-assisted synthesis is now shipped and runs on top of it.** `lib/openai-transcript.ts` gives a reasoning model the transcript and the full business context, `groundModelSynthesis()` in `lib/openai-transcript-schema.ts` re-checks every citation against a real `client-stated` line, and the two readings are merged as a union. The result reports `analysisMode: "model-assisted"` and `modelStatus: "used"`. With no API key or on any failure the deterministic reading stands unchanged and the UI says so. See [Model-assisted synthesis and metric direction](model-assisted-synthesis.md) for the grounding contract, the merge rules, and what the model is and is not allowed to decide.
 
 ## Transcript evidence
 
-All of the following are derived only from lines whose provenance is `client-stated`:
+All of the following are derived only from lines whose provenance is `client-stated` — in the deterministic pass by construction, and in the model pass because `groundModelSynthesis()` rejects any citation that resolves to an advisor or unknown line:
 
 - **Contradictions** — a research statement the client corrected, confirmed, or left unresolved, matched by content-word overlap and recorded with the client's quote, speaker, and timestamp.
 - **Canvas updates** — a client statement that supersedes or adds to a Canvas block, carrying `replacesResearchStatement` when it displaces a research claim.
@@ -98,7 +100,9 @@ All of the following are derived only from lines whose provenance is `client-sta
 - **Roles** — a `RoleMapEntry` per person traced through the flow, recording who does the task, who is accountable, judgment versus grind, approval authority, and single-point dependency.
 - **Metrics** — value, unit, period, quote, speaker, and timestamp.
 
-Call 2 reconciles against Call 1: `synthesizeTranscript` receives `priorSynthesis` and raises an explicit gap when the new constraint candidate conflicts with the prior one, rather than silently overwriting it.
+Call 2 reconciles against Call 1: both passes receive `priorSynthesis`, and a prior constraint type that conflicts with the new one blocks `client-verified` verification rather than being silently overwritten.
+
+The model pass adds two fields that are **not** evidence and are labelled as such on screen: `narrative`, the model's own reading of the call, carried at advisor-note provenance and never quotable back to the client; and `groundingRejections`, everything the model returned that failed grounding, kept so a silent drop is never mistaken for the model having found nothing.
 
 ## Baseline rule
 
@@ -113,14 +117,20 @@ No benchmark may substitute for client evidence. The projected delta remains a f
 The distinction that matters most:
 
 - `direction` is arithmetic only: `increased`, `decreased`, or `unchanged`.
-- `interpretation` stays `not-interpreted` unless the advisor supplies `improvedWhen: "higher" | "lower"`.
+- `interpretation` stays `not-interpreted` unless `computeMetricDelta()` is given `improvedWhen: "higher" | "lower"`.
 
-The app must never guess whether a change is good. A shorter turnaround is a win; a smaller throughput is not. Only the advisor can say which way is better for a given metric.
+**Who supplies `improvedWhen` has changed.** `measureOutcome()` now calls `resolveMetricDirection()` from `lib/metric-direction.ts`, which infers a direction from the metric's unit and name and, only where those are silent or contradict each other, asks a model. So an outcome can read `improved` without the advisor having declared anything.
+
+The invariant that survives is narrower and still load-bearing: the app never guesses *silently*. `OutcomeMeasurement.directionInference` records the source (`advisor`, `unit-table`, `metric-semantics`, `model`, `none`), a plain-language basis, a confidence, and an `ambiguous` flag; the outcome screen labels an inferred reading "Proposed, not decided" against an advisor choice's "You set this direction"; an ambiguous reading is never pre-selected; and `PATCH /api/engagements/:id/outcome` lets the advisor overrule it, recomputing the delta from the unchanged readings.
+
+A shorter turnaround is a win; a smaller throughput is not. The app now has a documented, tiered, overrulable opinion about which is which — it does not have permission to hide how it formed one.
 
 ## Speaker provenance
 
-Client-attributed lines may support evidence. Advisor lines remain notes. Unknown-speaker lines remain gaps unless a human maps the speaker role. No analyzer may promote an unknown or advisor line into client evidence.
+Client-attributed lines may support evidence. Advisor lines remain notes. Unknown-speaker lines remain gaps unless a human maps the speaker role. No analyzer may promote an unknown or advisor line into client evidence — and that now includes the model analyzer, which has an explicit rejection reason for exactly this case so it can never be confused with "no match found".
 
 ## Provider policy
 
-OpenAI is the active research provider; deterministic website research is the no-key and provider-failure fallback and is never merely a stub. Exa (retrieval fallback), Firecrawl (targeted extraction), and Apollo (paid enrichment) are **not implemented**. Provider identity never changes evidence status: the underlying source determines provenance.
+OpenAI is the active provider for both research (`OPENAI_RESEARCH_MODEL`, default `gpt-5.6-sol`) and transcript synthesis (`OPENAI_TRANSCRIPT_MODEL`, falling back to the research model). Both use the same `OPENAI_API_KEY`. Deterministic website research and deterministic transcript synthesis are the no-key and provider-failure fallbacks, and neither is merely a stub.
+
+Exa (retrieval fallback), Firecrawl (targeted extraction), and Apollo (paid enrichment) are **not implemented**. Provider identity never changes evidence status: the underlying source determines provenance.

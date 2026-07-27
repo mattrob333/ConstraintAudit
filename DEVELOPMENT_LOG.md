@@ -1,6 +1,54 @@
 # Tier 4 Advisor Cockpit Development Log
 
-This is a durable, append-oriented log for implementation decisions, verification evidence, and handoffs. It is not a substitute for Git history or the canonical workflow specification.
+This is a durable, append-oriented log for implementation decisions, verification evidence, and handoffs. It is not a substitute for Git history or the canonical workflow specification. Entries are newest first.
+
+## 2026-07-27 — Documentation reconciled with the reasoning, tenancy, Access, and practice-mode work
+
+### Source or request
+
+Repository owner asked for the top-level documentation to be brought back in line with the source after several sessions of shipping. The previous docs described a product that no longer exists: they listed model-assisted transcript synthesis, metric-direction inference, Cloudflare Access, live-call coaching and practice mode as absent or future, and they still described transcript synthesis as deterministic-only. Work was scoped by file ownership: this entry covers `README.md`, `DEVELOPER_HANDOFF.md`, `DEVELOPMENT_LOG.md`, `INTEGRATIONS.md`, and `public/docs/{current-state,integrations,architecture}.md` plus `public/docs/index.json`. No application code, wiki page, `docs/DEPLOYMENT.md`, or configuration was touched.
+
+### Durable decisions
+
+- **Every documented claim is verified against source, not against another document.** Where the old docs and the code disagreed, the code won. Test counts were taken by reading the test files, not by repeating a prior number.
+- **Partial capabilities are described as partial.** The Escape panic key is documented as one-way and same-window; screen-share safety is documented as advisor-asserted because the app cannot detect a share; practice mode is documented as unsuitable for rehearsing with a live audience because the practice bar deliberately survives the client-facing screens.
+- **What is still missing stays written down.** Gmail has no adapter; Apollo and PandaDoc are connector-first; there is no native DOCX or PDF generator; Exa and Firecrawl are not implemented; there is no outreach or prospecting funnel; there is still no in-call value-flow editor.
+- **Practice mode is the documented entry point for a new advisor**, because it needs no credential and exercises the whole arc.
+- **The README now states the Cloudflare Workers move and the self-hosting warning together.** Off OpenAI Sites there is no injected identity header, so without Cloudflare Access every visitor is the single local advisor.
+- **`INTEGRATIONS.md` and `public/docs/integrations.md` are byte-identical by intent**, and each now says so, so a future edit updates both.
+
+### Files or behavior changed
+
+- Rewritten: `README.md` (capability truth table updated row by row, Practice mode section added, Cloudflare hosting section replacing the Sites-portability section, transcript architecture section added, identity-mode table added, configuration table extended with `CF_ACCESS_TEAM_DOMAIN`, `CF_ACCESS_AUD` and `OPENAI_TRANSCRIPT_MODEL`, API surface extended to the 25 committed routes).
+- Rewritten: `DEVELOPER_HANDOFF.md`. Its "Still open" item 1, "transcript synthesis is deterministic, not model-assisted", was fixed and removed. Its "Deliberately constrained" entry "improvement is never inferred" was wrong and became "direction inference never overrides a human". Its stale verification header (a 2026-07-26 pass, 25 backend tests) was replaced with an honest statement that this handoff was written from source reading. The outstanding list is now: the in-call flow editor, DOCX/PDF, the missing adapters, the absent funnel, single-advisor Google credentials, advisor-asserted screen-share safety, the two different practice-id prefix tests, the stale Step 6a in `docs/DEPLOYMENT.md`, the remote Google Fonts import, and Fireflies being unverified live.
+- Updated: `public/docs/current-state.md`, `public/docs/architecture.md` (its "Current Build Boundary" section listed eight limitations, seven of which are fixed), `public/docs/integrations.md` and `INTEGRATIONS.md` (status header, the connector-first framing in section 1, the environment-variable table, and the integration matrix now separate implemented adapters from connector-only lanes).
+- `public/docs/index.json`: descriptions refreshed; shape, ids, filenames and URLs unchanged, since `app/api/documents/route.ts` imports it as the static manifest.
+- No source, test, config, or wiki file was modified.
+
+### Tests and live verification performed
+
+- **None.** This session was documentation-only and was explicitly instructed not to run `npm run build` or `npm test` while other agents were working in parallel.
+- Verification was by source reading: `package.json` and all five test files (42 checks: 15 + 11 + 7 + 7 backend, 2 rendered-frontend, after a production build); `lib/auth.ts` and `lib/access-jwt.ts`; `lib/openai-transcript.ts` and `lib/openai-transcript-schema.ts`; `lib/metric-direction.ts`; `lib/demo.ts` and `app/api/demo/route.ts`; `lib/transcript-files.ts`; `lib/store.ts` and `db/schema.ts`; `lib/actions.ts`; `lib/deliverables.ts`; `lib/integrations/**`; `app/api/**` (all 25 committed routes confirmed to use `requirePrincipalAsync`); and the coaching layer in `app/components/AdvisorCockpit.tsx`.
+- Untracked work in progress by other agents (a `.github/` directory, `app/api/health/route.ts`, `app/error.tsx`, `NEXT_STEPS.md`) was deliberately left undocumented, because it is not committed and may still change.
+
+### Failures or limitations that remain
+
+- No in-call value-flow editor; `flowConfirmations` reach the generated documents but are never rendered in the cockpit.
+- No native DOCX or PDF generator; Markdown plus printable HTML, with Google Docs conversion or print-to-PDF as the route to a formal document.
+- Gmail has no adapter; Apollo and PandaDoc remain connector-first; Exa and Firecrawl are not implemented; there is no outreach or prospecting funnel.
+- `GOOGLE_REFRESH_TOKEN` is a single environment variable, so approved Google writes act as one identity no matter which advisor approved them.
+- Screen-share protection depends on the advisor pressing Escape or tapping the toggle before sharing; the app cannot detect a share.
+- `docs/DEPLOYMENT.md` Step 6a still tells the reader to migrate the API routes to the async resolver, which is already done. That file is owned elsewhere and was not edited.
+- `app/globals.css` still imports Google Fonts from a remote stylesheet.
+- Fireflies has never been verified against a live workspace.
+
+### Production deployment identity
+
+Not deployed as part of this change. The app has not yet been deployed to Cloudflare Workers; `wrangler.jsonc` and `docs/DEPLOYMENT.md` exist, and `.wrangler/` contains local development state only. Before exposing the app beyond a single advisor, set `CF_ACCESS_TEAM_DOMAIN`, `CF_ACCESS_AUD` and `REQUIRE_ADVISOR_AUTH=1`, set `LEGACY_OWNER_EMAIL` to the real advisor address before the first boot that adds `owner_id`, and turn `workers_dev` off once the app is served from an owned domain.
+
+### Next uncompleted milestone
+
+An in-call editor for value-flow steps that writes corrections back with `client-stated` provenance, and a real Cloudflare Workers deployment behind verified Access.
 
 ## 2026-07-26 — Gap closure: research-driven workflow, canonical Canvas, tenancy, real external writes
 

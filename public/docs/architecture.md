@@ -1,8 +1,8 @@
 # Tier 4 Advisor Cockpit
 ## Research, Document, and Interface Architecture Decisions
 
-**Status:** Implemented single-advisor prototype; production-hardening and adaptive-workflow work remain  
-**Last reconciled with code:** 2026-07-25  
+**Status:** Implemented, tenanted, single-advisor deployment; formal-document rendering and the in-call flow editor remain  
+**Last reconciled with code:** 2026-07-27  
 **Governing workflow:** `public/docs/workflow.md`
 
 ---
@@ -88,7 +88,9 @@ For Tier 4, the free-first stack is usually as good or better for diagnosis beca
 
 ### Active and planned provider routing
 
-The shipped application currently uses deterministic website extraction and optional OpenAI Responses API web search. The returned facts are parsed through a strict schema, facts without retained sources are discarded, and provider failure falls back to deterministic gaps.
+The shipped application currently uses deterministic website extraction and optional OpenAI Responses API web search. The returned facts are parsed through a strict schema, facts without retained sources are discarded, and provider failure falls back to deterministic gaps. Research also derives that company's value flow and its anchored discovery questions, and writes the canonical Business Model Canvas.
+
+The same provider now serves a second, separate purpose: model-assisted transcript synthesis, where the model reasons over the call and a grounding parser verifies every citation against a real client-attributed transcript line. See `INTEGRATIONS.md` §4.
 
 The planned routing is:
 
@@ -111,10 +113,11 @@ Documents are approved renderings of that model.
 
 ```text
 Engagement model
-    ├── Google Docs renderer
-    ├── PandaDoc renderer
-    ├── DOCX/PDF renderer
-    └── Catalog write-back renderer
+    ├── Google Docs renderer          (implemented, from an approved publication intent)
+    ├── printable HTML renderer       (implemented; self-contained, print-to-PDF)
+    ├── PandaDoc renderer             (not implemented)
+    ├── DOCX/PDF renderer             (not implemented)
+    └── Catalog write-back renderer   (implemented)
 ```
 
 This prevents facts, transcript evidence, or approval status from drifting between formats.
@@ -334,7 +337,7 @@ The entry screen supports:
 2. External migration.
 3. Update an existing engagement.
 
-The interface emits reviewed write-back intents through Codex. It does not embed Google credentials or write to Sheets directly from untrusted browser code.
+The interface emits reviewed write-back intents. Since the Google Sheets adapter shipped, an approved `crm_write_back` intent is executed by the application's own trusted server runtime, which appends or updates the matched row. The browser still never holds a Google credential and never writes to Sheets itself, and creating the intent remains a separate decision from approving it.
 
 Supabase is a later migration when concurrency, row-level permissions, event volume, relational reporting, or external client access make Sheets insufficient.
 
@@ -346,34 +349,33 @@ The advisor-cockpit UI has been implemented and deployed. The approved visual di
 
 ### Shipped control surface
 
-- Client intake, external migration, and engagement resume
-- Research review with a correctly shaped nine-block Business Model Canvas
-- Pre-Call Readiness Brief preview and approval
-- Large-type Call 1 screen with recording-consent gate
-- Transcript intake and synthesis review
-- Findings Call with missing-baseline provisional handling
-- Deliverable generation and CRM write-back intent
-- Documents menu and Integration Center
+- Client intake with the primary contact's role, source-document ingestion, external migration, and engagement resume
+- Research review with a correctly shaped nine-block canonical Business Model Canvas, a per-company value flow, and per-company discovery questions
+- Pre-Call Readiness Brief preview, approval, and approved send
+- Large-type Call 1 screen with recording-consent gate, plus an advisor-only coaching layer with an Escape panic key
+- Transcript intake (paste, file, Fireflies) and synthesis review, model-assisted with a grounding check and a deterministic fallback
+- Findings Call presentation with no advisor-only half, and missing-baseline provisional handling
+- Deliverable generation across 14 artifact kinds, CRM write-back and document-publication intents
+- Sprint activation, outcome measurement with metric-direction inference, and catalog write-back
+- Documents menu and an Integration Center that renders the live server status, including which identity mode is in force
+- Practice mode: a complete fictional engagement plus a walkthrough that docks beside the real screens
 
 ### Current architectural limitations
 
-- Value Flow and live-call topics are frontend scaffolds rather than engagement data.
-- The research record and final-document Canvas are not yet one canonical versioned object.
-- Transcript file upload does not ingest the selected file's contents.
-- Transcript synthesis is deterministic keyword matching rather than full evidence reconciliation.
-- Most connectors create intents or report setup state but do not execute external actions.
-- The Integration Center does not render the complete backend integration-status response.
-- No app-layer identity, tenant ownership, or route authorization exists.
-- Sprint measurement and catalog write-back are not implemented.
+- There is no in-call editor for a value-flow step; `flowConfirmations` reach the generated documents but are not rendered in the cockpit.
+- There is no native DOCX or PDF renderer. Printable HTML and Google Docs conversion are the routes to a formal document.
+- Gmail, Apollo and PandaDoc have no adapters; Exa and Firecrawl are not implemented.
+- Google access uses a single refresh token, so approved writes act as one identity regardless of which advisor approved them.
+- Screen-share safety on the call screen is advisor-asserted: the app cannot detect a share, and Escape only helps if pressed first.
+- There is no outreach or prospecting funnel; the product starts at an engagement that already exists.
+- Type is loaded from a remote Google Fonts stylesheet, so it degrades where outbound access is blocked.
 
 ### Next architecture milestone
 
-1. Extend `ResearchSynthesis` with source-grounded `valueFlow` and `discoveryQuestions`.
-2. Persist a versioned canonical Canvas and bind all UI and document renderers to it.
-3. Bind Call 1 to the engagement's editable discovery plan.
-4. Implement real transcript file ingestion and structured transcript reconciliation.
-5. Add tenancy before widening production access.
-6. Implement external adapters in the order Fireflies, Google Sheets, Google Docs, email, PandaDoc.
-7. Add Exa only after an evaluation shows a measurable retrieval gap; use Firecrawl for targeted extraction failures.
+1. Give the advisor an in-call value-flow editor that writes corrections back with `client-stated` provenance, and surface `flowConfirmations` in the cockpit.
+2. Decide the formal-document path: a Workers-compatible DOCX writer, or an explicit decision that Google Docs plus print-to-PDF is the answer.
+3. Deploy to Cloudflare Workers behind verified Access, and record what the deployment guide got wrong.
+4. Replace the single Google refresh token with per-advisor encrypted token storage before a second advisor is added.
+5. Implement the remaining adapters in the order PandaDoc, Exa, Firecrawl, Apollo — Exa only after an evaluation shows a measurable retrieval gap.
 
 Connector mutations remain behind explicit, reviewed, idempotent approval actions rather than untrusted browser state.

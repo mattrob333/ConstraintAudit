@@ -1,8 +1,28 @@
 # Tier 4 Advisor Cockpit Integration Contract
 
 **Status:** Research and implementation boundary  
-**Verified:** 2026-07-25
-**Governing documents:** `Tier4_Throughput_Audit_Codex_Workflow_v1.md` and `Tier4_Advisor_Cockpit_Architecture_Decisions.md`
+**Verified against source:** 2026-07-27  
+**Governing documents:** `public/docs/workflow.md` and `public/docs/architecture.md`
+
+> This file and `public/docs/integrations.md` are the same document, kept byte-identical: the repository root copy is for developers, the `public/docs/` copy is served by the application. Edit both together.
+
+## 0. What is actually implemented today
+
+The sections below describe the full provider contract, including lanes that are not built. This is the shipped state, read from `lib/integrations/**`, `lib/fireflies.ts`, `lib/openai-research.ts`, `lib/openai-transcript.ts` and `app/api/integrations/route.ts`:
+
+| Provider | Deployed-app adapter in this repository | What it does |
+| --- | --- | --- |
+| OpenAI Responses API | **Yes** | Public web research, and model-assisted transcript synthesis whose every citation is verified against a real client-attributed transcript line |
+| Resend | **Yes** | Sends the approved readiness brief from an approved intent, with the intent id as the idempotency key |
+| Google Sheets | **Yes** | Appends or updates the matched CRM row from an approved intent |
+| Google Drive / Docs | **Yes** | Creates the Google Doc from an approved publication intent, using the narrow `drive.file` scope |
+| Fireflies | **Yes**, unverified live | Server-side transcript import; needs `FIREFLIES_API_KEY`. No run against a real workspace is recorded |
+| Gmail | No | Intent-only. Resend is the implemented sender |
+| Apollo | No | Connector-first. Setting `APOLLO_API_KEY` reports `configured_not_implemented` and changes nothing |
+| PandaDoc | No | Connector-first. Setting `PANDADOC_API_KEY` reports `configured_not_implemented` and changes nothing |
+| Exa, Firecrawl | No | Not implemented in any form |
+
+An adapter never decides whether it may act (`lib/integrations/types.ts`). It receives an already-approved payload, performs exactly one external write, and reports what happened. Approval and execution are two separate decisions, recorded on the intent.
 
 ## 1. Non-negotiable boundary
 
@@ -13,11 +33,11 @@ There are two different integration lanes:
 
 Never place provider keys, OAuth client secrets, access tokens, or refresh tokens in browser code, `NEXT_PUBLIC_*` variables, rendered HTML, client logs, or connector-action payloads. The browser should submit an action intent to the trusted server. The server should enforce workflow state, advisor approval, idempotency, and audit logging before any external write or send.
 
-For this build, the architecture remains connector-first:
+The build is no longer uniformly connector-first. Where it stands now:
 
-- Fireflies, Apollo, PandaDoc, Google Drive/Sheets, and Gmail are available through installed Codex connectors.
-- Resend has no installed connector in the current environment and is a deployed-app API only.
-- OpenAI web research is a deployed-app API. It runs server-side, uses the Responses API web-search tool, and falls back to deterministic website extraction.
+- **Deployed-app adapters, implemented:** OpenAI (research and transcript synthesis), Resend, Google Sheets, Google Drive/Docs, Fireflies import.
+- **Connector-first, no adapter:** Apollo and PandaDoc. Gmail is connector-first too; Resend is the sender this app actually uses.
+- Fireflies, Apollo, PandaDoc, Google Drive/Sheets, and Gmail also remain available through installed Codex connectors, which the deployed app cannot call or borrow tokens from.
 
 Connector availability above is an observation of the current Codex environment, not a promise that the same connectors exist in every Codex account, workspace, or future release.
 
@@ -27,8 +47,9 @@ These names are reserved for **server-side direct API adapters only**. A variabl
 
 | Variable | Required when | Notes |
 | --- | --- | --- |
-| `OPENAI_API_KEY` | OpenAI web research is enabled | Project-scoped server secret; never exposed to the browser |
+| `OPENAI_API_KEY` | OpenAI web research or model-assisted transcript synthesis is enabled | Project-scoped server secret; never exposed to the browser. The same key serves both paths |
 | `OPENAI_RESEARCH_MODEL` | A model override is required | Optional; defaults to `gpt-5.6-sol` |
+| `OPENAI_TRANSCRIPT_MODEL` | Transcript synthesis should use a different model from research | Optional; falls back to `OPENAI_RESEARCH_MODEL`. With no key at all, synthesis falls back to the deterministic reading and the UI says so |
 | `FIREFLIES_API_KEY` | A deployed server fetches Fireflies transcripts directly | Secret bearer token; not needed for the Codex connector |
 | `APOLLO_API_KEY` | A deployed server calls Apollo directly | Secret API key; not needed for the Codex connector |
 | `PANDADOC_API_KEY` | A single-workspace deployed server calls PandaDoc directly | Secret; use only one PandaDoc auth mode |
@@ -43,19 +64,22 @@ These names are reserved for **server-side direct API adapters only**. A variabl
 | `EMAIL_FROM` | Resend sending is enabled | Full sender, for example `Tier 4 <advisor@verified.example>` |
 | `EMAIL_REPLY_TO` | Replies should go somewhere other than `EMAIL_FROM` | Optional |
 
+Advisor identity and tenancy variables (`REQUIRE_ADVISOR_AUTH`, `LOCAL_ADVISOR_EMAIL`, `LEGACY_OWNER_EMAIL`, `CF_ACCESS_TEAM_DOMAIN`, `CF_ACCESS_AUD`) are not integration credentials and are documented in `README.md` and `docs/DEPLOYMENT.md`. They matter here for one reason: `/api/integrations` is advisor-scoped, because which providers a deployment has wired up describes the deployment and is not public information.
+
 ## 3. Integration matrix
 
 | Integration | Purpose in the approved workflow | Codex connector lane | Deployed-app lane |
 | --- | --- | --- | --- |
-| OpenAI Responses API | Public company research with structured source-backed Canvas facts | Secure Platform setup provisions the key; connector tokens are not reused | Implemented with `store: false`, web search, strict JSON schema, source filtering, and deterministic fallback |
-| Fireflies | Retrieve full Call 1 and Call 2 transcripts, speakers, timestamps, and source URLs | Preferred now: search meetings, then fetch the complete transcript | Optional read-only server adapter using `FIREFLIES_API_KEY` |
-| Apollo | Fill a named company or roster evidence gap after cost disclosure and approval | Preferred now: connector exposes search, usage, and credit-gated enrichment actions | Optional server adapter using `APOLLO_API_KEY`; the app must reproduce the credit gate |
-| PandaDoc | Create reviewed proposal/SOW drafts and, only after a second approval, send for signature | Preferred now: create from Markdown or a selected template, inspect status, and send behind approval | Optional server adapter using template or file upload; the public API is not a raw-Markdown endpoint |
-| Google Sheets/Drive | V1 CRM, engagement record, approved working artifacts | Preferred now: connector-managed Sheets/Drive/Docs actions | Optional OAuth server adapter using the app's own Google Cloud credentials |
-| Gmail | Read prior context; create reviewed drafts; send only after explicit confirmation | Preferred now: connector-managed search/read/draft/send | Optional OAuth server adapter using the app's own Google Cloud credentials |
-| Resend | Transactional email when Gmail is intentionally not the sender | No installed connector in the current environment | Backend-only `POST /emails` |
+| OpenAI Responses API | Public company research with structured source-backed Canvas facts, and model-assisted transcript synthesis | Secure Platform setup provisions the key; connector tokens are not reused | **Implemented.** `store: false`, web search, strict JSON schema, source filtering, deterministic fallback. Transcript synthesis adds a grounding parser that discards any citation it cannot match to a client-attributed line |
+| Fireflies | Retrieve full Call 1 and Call 2 transcripts, speakers, timestamps, and source URLs | Available: search meetings, then fetch the complete transcript | **Implemented, unverified live.** Read-only server adapter using `FIREFLIES_API_KEY` (`lib/fireflies.ts`) |
+| Apollo | Fill a named company or roster evidence gap after cost disclosure and approval | Preferred now: connector exposes search, usage, and credit-gated enrichment actions | **Not implemented.** A future server adapter using `APOLLO_API_KEY` must reproduce the credit gate |
+| PandaDoc | Create reviewed proposal/SOW drafts and, only after a second approval, send for signature | Preferred now: create from Markdown or a selected template, inspect status, and send behind approval | **Not implemented.** A future adapter must use a native template or file upload; the public API is not a raw-Markdown endpoint |
+| Google Sheets | V1 CRM and engagement registry | Available: connector-managed Sheets actions | **Implemented.** `appendOrUpdateRow` writes the matched row from an approved `crm_write_back` intent |
+| Google Drive / Docs | Approved working artifacts as native Google Docs | Available: connector-managed Drive/Docs actions | **Implemented.** `createDocument` creates the Doc from an approved `document_publish` intent using `drive.file` |
+| Gmail | Read prior context; create reviewed drafts; send only after explicit confirmation | Preferred now: connector-managed search/read/draft/send | **Not implemented.** No adapter; the app never sends through Gmail |
+| Resend | Transactional email when Gmail is intentionally not the sender | No installed connector in the current environment | **Implemented.** Backend-only `POST /emails` from an approved `readiness_brief_send` intent |
 
-## 4. OpenAI Responses API — active public-research enhancement
+## 4. OpenAI Responses API — active public research and transcript synthesis
 
 ### Purpose
 
@@ -79,11 +103,22 @@ The local verification uses a public company website, not a client transcript. A
 - **Firecrawl:** add when the known company site cannot be read reliably, requires JavaScript rendering, or needs a controlled multi-page crawl. Use it as a retrieval layer for named URLs, not as the default search engine.
 - Do not run OpenAI, Exa, and Firecrawl on every engagement. Route by need, cap results/pages, show the selected provider, and preserve source URLs.
 
+### Transcript synthesis
+
+The same key drives model-assisted transcript synthesis (`lib/openai-transcript.ts`). The request sets `store: false`, a strict JSON schema, `reasoning.effort: "medium"`, a 16,000-token output ceiling and a 60-second timeout, and the model is given the research, the canonical Canvas, the value flow, the discovery questions and prior-call summaries alongside the numbered transcript.
+
+Every claim it returns is then checked by `groundModelSynthesis` (`lib/openai-transcript-schema.ts`) against the actual transcript lines. A quote, metric, Canvas correction or flow confirmation survives only if it matches a line whose provenance is `client-stated`; an advisor or unknown-speaker line is rejected, and the rejection is recorded rather than silently dropped. The model's narrative and interpretation stay `advisor-note`. The two readings are merged as a union so neither pass loses what the other found; the constraint candidate is the single-winner decision, and any disagreement is written into the gaps for the advisor to settle.
+
+With no key configured, or on any HTTP, timeout, parse, or schema failure, the deterministic synthesis stands and the record carries `analysisMode: "deterministic"` with `modelStatus: "not-configured"` or `"failed"`, which the UI states on screen.
+
+`OPENAI_TRANSCRIPT_MODEL` overrides the model for this path only.
+
 ### Limitations
 
 - Model output is interpretation, not evidence.
 - A human must be able to inspect the source transcript or document supporting every generated finding.
-- Cost, rate limits, model availability, and retention policy must be re-verified when the integration is authorized.
+- Grounding is exact, not semantic: a correct paraphrase that does not appear verbatim in a client line is rejected. That is the intended trade.
+- Cost, rate limits, model availability, and retention policy must be re-verified when the integration is authorized. Transcript synthesis is the larger of the two request types.
 
 **Official sources:** [Responses API overview and migration](https://developers.openai.com/api/docs/guides/migrate-to-responses), [API platform endpoint example](https://developers.openai.com/api/docs), [production key practices](https://developers.openai.com/api/docs/guides/production-best-practices), [human-in-the-loop safety guidance](https://developers.openai.com/api/docs/guides/safety-best-practices)
 
@@ -256,9 +291,11 @@ The public API does not document raw Markdown as a document-creation format. Tha
 
 ### Purpose
 
-- **Sheets:** V1 engagement registry and activity log.
-- **Drive/Docs:** canonical engagement record and approved collaborative artifacts.
-- **Gmail:** read prior client context, create reviewed drafts, and send only after explicit confirmation.
+- **Sheets:** V1 engagement registry and activity log. **Implemented** (`lib/integrations/google-sheets.ts`).
+- **Drive/Docs:** canonical engagement record and approved collaborative artifacts. **Implemented** (`lib/integrations/google-docs.ts`); the Markdown is also rendered to HTML so headings, lists and tables survive the conversion.
+- **Gmail:** read prior client context, create reviewed drafts, and send only after explicit confirmation. **Not implemented** — there is no Gmail adapter, and the scope guidance below is for a future one.
+
+`GOOGLE_REFRESH_TOKEN` is a single environment variable, so every approved Google write acts as one identity no matter which advisor approved it. This is acceptable for the single-advisor deployment and must be replaced with per-user encrypted token storage before a second advisor expects writes to land in their own Drive.
 
 ### Authentication
 
@@ -323,6 +360,8 @@ Direct API equivalents:
 
 Send transactional emails from a verified Tier 4 domain when Gmail is intentionally not the sender. Resend must not become a shortcut around the workflow's reviewed-draft and explicit-send gates.
 
+**Implemented** (`lib/integrations/resend.ts`). It is reachable from exactly one place: executing an approved `readiness_brief_send` intent. The intent id is the `Idempotency-Key`, and the send intent is bound to an immutable approved artifact, so a regenerated brief cannot be sent under an old approval.
+
 ### Authentication and minimum access
 
 - **Direct API only in the current environment.**
@@ -363,6 +402,10 @@ The idempotency key prevents duplicate email creation for 24 hours. Store the re
 
 ## 10. Approval and audit requirements
 
+This is implemented for the three adapters that write externally. Intents are rows in the D1 `intents` table, scoped by `owner_id` like every other record. An intent is created `pending_review`, must be separately approved, and only then may be executed (`reviewIntent` in `lib/actions.ts`). Three intent types execute today: `readiness_brief_send`, `crm_write_back`, and `document_publish`; anything else is a 400.
+
+One detail worth preserving: an unconfigured provider returns `not-configured`, performs no network call, and leaves the intent **approved** so it can be executed again once the credential exists. A genuine failure marks the intent `failed` and needs a fresh approval, because the app cannot know whether the write landed.
+
 Every deployed adapter and connector action should emit the same reviewed intent envelope:
 
 ```yaml
@@ -396,6 +439,8 @@ Rules:
 2. Confirm the PandaDoc production plan, template availability, and effective file-upload ceiling. Official pages currently conflict between 50 MB and 100 MB.
 3. Decide whether the Google integration remains single-advisor or becomes multi-user before implementing token storage.
 4. Confirm whether Gmail prior-context retrieval is required in the deployed app. If not, omit `gmail.readonly` and keep reads in the Codex connector lane.
-5. Decide whether Resend is necessary at all while reviewed Gmail drafts satisfy the workflow.
+5. Decide whether a Gmail adapter is wanted at all, now that Resend is the implemented sender.
 6. Decide whether Exa should be the first optional search fallback after representative audits reveal a discovery-recall gap.
 7. Decide whether Firecrawl is necessary only after measuring failures on JavaScript-heavy or multi-page client sites.
+8. Verify the Fireflies adapter against a real workspace, including a live meeting (`is_live == true`) so the "do not synthesize from a live transcript" rule is exercised rather than assumed.
+9. Agree a per-engagement OpenAI budget now that transcript synthesis is a second, larger request type alongside research.

@@ -8,7 +8,7 @@
   {
     "id": "architecture",
     "title": "Advisor Cockpit Architecture",
-    "description": "Research sources, document routing, interface boundaries, and the lightweight CRM decision.",
+    "description": "Research and transcript provider routing, document rendering, interface boundaries, the lightweight CRM decision, and the current build boundary.",
     "url": "/docs/architecture.md"
   },
   {
@@ -20,13 +20,13 @@
   {
     "id": "integrations",
     "title": "Integration and Authorization Guide",
-    "description": "Connector boundaries, account authorization, environment settings, health checks, and operational limitations.",
+    "description": "Which adapters are implemented, connector boundaries, account authorization, environment settings, health checks, and operational limitations.",
     "url": "/docs/integrations.md"
   },
   {
     "id": "current-state",
     "title": "Current Build State and Developer Handoff",
-    "description": "What is working, what is still scaffolded, the integration status, and the next implementation milestone.",
+    "description": "Practice mode as the starting point, what is real, what is still missing or partial, the integration order, and the next implementation milestone.",
     "url": "/docs/current-state.md"
   }
 ]

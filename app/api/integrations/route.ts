@@ -8,7 +8,12 @@ import { ensureDatabase } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
 
-const CRM_URL = "https://docs.google.com/spreadsheets/d/1ANLc7vhkhkJBtkvoeLDeuXJw4yIlCJcyz3j6B_69GX8";
+/** Follows whatever workbook is configured; a baked-in id points every deployment at one team's CRM. */
+function crmUrl(): string {
+  const bindings = env as unknown as Record<string, unknown>;
+  const id = typeof bindings.GOOGLE_SHEETS_ID === "string" ? bindings.GOOGLE_SHEETS_ID.trim() : "";
+  return id ? `https://docs.google.com/spreadsheets/d/${id}` : "";
+}
 
 function hasAll(...names: string[]): boolean {
   const bindings = env as unknown as Record<string, unknown>;
@@ -100,7 +105,7 @@ export async function GET(request: Request) {
             "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REDIRECT_URI",
             "GOOGLE_REFRESH_TOKEN", "GOOGLE_SHEETS_ID",
           ],
-          resource: { name: "Tier 4 Engagement CRM", url: CRM_URL },
+          ...(crmUrl() ? { resource: { name: "Tier 4 Engagement CRM", url: crmUrl() } } : {}),
           storesSecrets: false,
         },
         {

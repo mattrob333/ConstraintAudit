@@ -234,19 +234,20 @@ PIN), and then forwards the request with two extra headers:
 `lib/access-jwt.ts` verifies that signature against your team's published keys and checks the
 issuer, audience and expiry. The app trusts the signed token, never the plain header.
 
-### 6a. Migrate the API routes to the async resolver first
-
-**Do this before setting `CF_ACCESS_TEAM_DOMAIN` and `CF_ACCESS_AUD`.**
+### 6a. Nothing to migrate — the routes are already async
 
 Verifying a signature requires a network fetch, so it cannot be done synchronously. `lib/auth.ts`
-exposes `resolvePrincipalAsync` / `requirePrincipalAsync` for it, alongside the original synchronous
-`resolvePrincipal` / `requirePrincipal`, which deliberately ignore the Access header rather than
-trust it unverified.
+exposes `resolvePrincipalAsync` / `requirePrincipalAsync` for that, alongside the original
+synchronous `resolvePrincipal` / `requirePrincipal`, which deliberately ignore the Access header
+rather than trust it unverified.
 
-The API routes under `app/api/` still call the synchronous versions. Until they are switched over,
-a deployment with `CF_ACCESS_*` set and `REQUIRE_ADVISOR_AUTH=1` answers **401 to every API
-request** — the safe failure, but a broken app. Switch the routes to `requirePrincipalAsync`
-(`const principal = await requirePrincipalAsync(request);`) first, then continue.
+Every route under `app/api/` already calls `requirePrincipalAsync`, so there is no migration step
+here. The synchronous exports remain only so nothing outside the routes breaks; they have no
+callers. If you add a route, use the async resolver — a route on the synchronous one silently
+ignores Access and would fall through to whatever the next identity source allows.
+
+Verify after deploying with `npm run smoke -- https://your-domain`, which fails loudly if an
+anonymous request is handed a list of engagements.
 
 ### 6b. Serve the app from a domain you own
 
