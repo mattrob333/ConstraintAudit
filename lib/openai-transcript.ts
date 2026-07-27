@@ -6,6 +6,7 @@ import {
   type GroundedSynthesis,
   type GroundedTranscriptQuote,
 } from "./openai-transcript-schema";
+import type { Credentials } from "./secrets";
 import { baselineStatusFor } from "./transcript";
 import {
   makeId,
@@ -55,17 +56,20 @@ function bindings(): Record<string, unknown> {
   return env as unknown as Record<string, unknown>;
 }
 
-function configuredValue(name: string): string {
+/** With credentials the resolver owns precedence (server secret wins); without, env only. */
+function configuredValue(name: string, credentials?: Credentials): string {
+  if (credentials) return credentials.get(name).trim();
   const value = bindings()[name];
   return typeof value === "string" ? value.trim() : "";
 }
 
-export function openAITranscriptConfigured(): boolean {
-  return configuredValue("OPENAI_API_KEY").length > 0;
+export function openAITranscriptConfigured(credentials?: Credentials): boolean {
+  return configuredValue("OPENAI_API_KEY", credentials).length > 0;
 }
 
-export function openAITranscriptModel(): string {
-  return configuredValue("OPENAI_TRANSCRIPT_MODEL") || openAIResearchModel();
+export function openAITranscriptModel(credentials?: Credentials): string {
+  return configuredValue("OPENAI_TRANSCRIPT_MODEL", credentials)
+    || openAIResearchModel(credentials);
 }
 
 function outputText(response: OpenAIResponse): string {
@@ -303,9 +307,10 @@ export async function synthesizeTranscriptWithOpenAI(
   base: TranscriptSynthesis,
   input: TranscriptModelInput,
   fetcher: typeof fetch = fetch,
+  credentials?: Credentials,
 ): Promise<TranscriptSynthesis> {
-  const key = configuredValue("OPENAI_API_KEY");
-  const model = openAITranscriptModel();
+  const key = configuredValue("OPENAI_API_KEY", credentials);
+  const model = openAITranscriptModel(credentials);
   if (!key) {
     return { ...base, analysisMode: "deterministic", modelStatus: "not-configured" };
   }

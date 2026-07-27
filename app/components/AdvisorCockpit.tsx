@@ -108,6 +108,16 @@ type AdvisorSettings = { crmSpreadsheetId: string; crmSheetTab: string; driveFol
 type SettingsTestProvider = "openai" | "resend" | "google_sheets" | "google_docs" | "fireflies";
 /** The `result` POST /api/settings/test returns. `detail` is human-readable and never contains a secret. */
 type SettingsTestResult = { ok?: boolean; status?: string; provider?: string; detail?: string };
+/**
+ * Where a credential's current value comes from. `server-secret` is set in the deployment
+ * environment and always wins over anything saved in the app; `saved-in-app` lives encrypted
+ * in the database.
+ */
+type CredentialSource = "server-secret" | "saved-in-app" | "none";
+/** One row from /api/settings/keys. A raw value is NEVER returned — `hint` is a masked tail only. */
+type CredentialState = { field: string; set: boolean; source: CredentialSource; hint: string };
+/** The whole /api/settings/keys payload, returned identically by GET, PUT and DELETE. */
+type CredentialsPayload = { credentials: CredentialState[]; encryptionMode: "app-key" | "generated-key" };
 type TranscriptFile = { name: string; mimeType: string; content: string; encoding: "utf8" | "base64" };
 
 type ResearchPayload = {
@@ -3137,15 +3147,6 @@ function IntegrationCenter({ onBack }: { onBack: () => void }) {
   </section>;
 }
 
-/** Which live integration ids can be verified, and the provider name POST /api/settings/test expects for each. */
-const TESTABLE_PROVIDERS: Partial<Record<string, SettingsTestProvider>> = {
-  openai: "openai",
-  resend: "resend",
-  google_sheets: "google_sheets",
-  google_drive_docs: "google_docs",
-  fireflies: "fireflies",
-};
-
 /** Reads a test result into a tone and label. ok → pass, not-configured → not set up, anything else → fail. */
 function testResultView(result: SettingsTestResult | undefined): { tone: Tone; label: string } | null {
   if (!result) return null;
@@ -3156,17 +3157,77 @@ function testResultView(result: SettingsTestResult | undefined): { tone: Tone; l
 
 type SettingsTestState = { running: boolean; result?: SettingsTestResult; error?: string };
 
-/** One selectable, copyable shell command. The command is always visible, so a manual copy works even without clipboard access. */
-function CopyLine({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false);
-  return <div className="copy-line">
-    <code>{text}</code>
-    <button aria-label={`Copy command: ${text}`} className="copy-button" onClick={() => {
-      if (typeof navigator.clipboard?.writeText !== "function") return;
-      navigator.clipboard.writeText(text).then(() => { setCopied(true); window.setTimeout(() => setCopied(false), 1600); }).catch(() => setCopied(false));
-    }} type="button">{copied ? <><Icon name="check" size={13} />Copied</> : <><Icon name="document" size={13} />Copy</>}</button>
-  </div>;
+/** Plain-language description of one savable credential. `secret` decides password-vs-text input. */
+type CredentialFieldMeta = { label: string; secret: boolean; placeholder: string; note?: string };
+
+/**
+ * Every field /api/settings/keys accepts, in plain words. The server's response is still the
+ * source of truth for which fields exist — anything it returns that is missing here falls back
+ * to `fallbackFieldMeta`, so a server-side addition shows up rather than disappearing.
+ */
+const CREDENTIAL_FIELDS: Record<string, CredentialFieldMeta> = {
+  OPENAI_API_KEY: { label: "OpenAI API key", secret: true, placeholder: "sk-…" },
+  OPENAI_RESEARCH_MODEL: { label: "Research model", secret: false, placeholder: "gpt-4.1", note: "Optional. Leave empty to use the server's default model." },
+  OPENAI_TRANSCRIPT_MODEL: { label: "Transcript model", secret: false, placeholder: "gpt-4.1-mini", note: "Optional. Leave empty to use the server's default model." },
+  FIREFLIES_API_KEY: { label: "Fireflies API key", secret: true, placeholder: "Paste your Fireflies key" },
+  RESEND_API_KEY: { label: "Resend API key", secret: true, placeholder: "re_…" },
+  EMAIL_FROM: { label: "Send from", secret: false, placeholder: "advisor@yourdomain.com", note: "Must be an address on a domain you have verified with Resend." },
+  EMAIL_REPLY_TO: { label: "Replies go to", secret: false, placeholder: "you@yourdomain.com", note: "Optional. Where a client's reply lands." },
+  GOOGLE_CLIENT_ID: { label: "Google client ID", secret: true, placeholder: "…apps.googleusercontent.com" },
+  GOOGLE_CLIENT_SECRET: { label: "Google client secret", secret: true, placeholder: "Paste the client secret" },
+  GOOGLE_REFRESH_TOKEN: { label: "Google refresh token", secret: true, placeholder: "Paste the refresh token" },
+};
+
+/** A readable label and a safe default for a field the server knows about but this build does not. */
+function fallbackFieldMeta(field: string): CredentialFieldMeta {
+  const label = field.toLowerCase().replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
+  return { label, secret: /KEY|SECRET|TOKEN|PASSWORD/.test(field), placeholder: `Paste the ${label.toLowerCase()}` };
 }
+
+function fieldMeta(field: string): CredentialFieldMeta {
+  return CREDENTIAL_FIELDS[field] ?? fallbackFieldMeta(field);
+}
+
+/** One provider's box: what its keys unlock, where to get them, its fields, and its tests. */
+type CredentialGroup = {
+  id: string; name: string; icon: IconName; unlocks: string; where: string;
+  fields: string[]; tests: Array<{ provider: SettingsTestProvider; label: string }>;
+};
+
+const CREDENTIAL_GROUPS: CredentialGroup[] = [
+  {
+    id: "openai", name: "OpenAI", icon: "spark",
+    unlocks: "Web research on the recon brief, and model-assisted reading of a call transcript. Without a key both still run, just on the plain deterministic path.",
+    where: "Go to platform.openai.com, open API keys, and create a new secret key. It begins with sk- and is only shown to you once.",
+    fields: ["OPENAI_API_KEY", "OPENAI_RESEARCH_MODEL", "OPENAI_TRANSCRIPT_MODEL"],
+    tests: [{ provider: "openai", label: "Test" }],
+  },
+  {
+    id: "fireflies", name: "Fireflies", icon: "mic",
+    unlocks: "Pulling a recorded call transcript straight into the audit instead of pasting it in by hand.",
+    where: "Go to app.fireflies.ai, open Settings, then Developer settings, and copy the API key.",
+    fields: ["FIREFLIES_API_KEY"],
+    tests: [{ provider: "fireflies", label: "Test" }],
+  },
+  {
+    id: "resend", name: "Email (Resend)", icon: "mail",
+    unlocks: "Sending an approved readiness brief by email. Every send still needs your explicit approval first.",
+    where: "Go to resend.com, open API Keys, and create one. The two addresses below must be on a domain you have verified with Resend.",
+    fields: ["RESEND_API_KEY", "EMAIL_FROM", "EMAIL_REPLY_TO"],
+    tests: [{ provider: "resend", label: "Test" }],
+  },
+  {
+    id: "google", name: "Google Sheets & Drive", icon: "folder",
+    unlocks: "Writing engagement rows into your Google Sheet CRM, and filing generated documents in your Drive folder.",
+    where: "Go to console.cloud.google.com, open APIs & Services then Credentials, and create an OAuth client to get the ID and secret. The refresh token comes from the one-time Google consent step.",
+    fields: ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REFRESH_TOKEN"],
+    tests: [{ provider: "google_sheets", label: "Test CRM sheet" }, { provider: "google_docs", label: "Test Drive & Docs" }],
+  },
+];
+
+/** Per-field UI state. `busy` is the in-flight guard: while it is set, Save and Clear are both disabled. */
+type CredentialFieldState = { busy: "save" | "clear" | null; saved: boolean; error: string; reveal: boolean; confirmClear: boolean };
+const EMPTY_FIELD_STATE: CredentialFieldState = { busy: null, saved: false, error: "", reveal: false, confirmClear: false };
 
 /** The pass / not set up / fail line under a Test button. `detail` is shown verbatim — the server promises it never carries a secret. */
 function TestOutcome({ test }: { test: SettingsTestState | undefined }) {
@@ -3180,15 +3241,20 @@ function TestOutcome({ test }: { test: SettingsTestState | undefined }) {
 
 /**
  * The advisor-only Settings screen. Two sections:
- *  1. API keys — live status, what each unlocks, the required env-var NAMES, the exact
- *     `wrangler secret put` command, and a Test button. No key is ever entered or displayed.
+ *  1. API keys — one real input per credential. You paste a key, press Save, and the server
+ *     stores it encrypted. A saved key is never sent back: only a masked tail (`hint`) is.
+ *     A field held in the deployment environment is shown as server-managed and has no input,
+ *     because saving over it would silently do nothing.
  *  2. My connections — the non-secret, per-advisor connection settings behind GET/PUT /api/settings.
  * Reachable only from the top nav, which is hidden on the client-facing call and presentation views.
  */
 function SettingsScreen({ onBack, onIntegrations }: { onBack: () => void; onIntegrations: () => void }) {
-  const [integrations, setIntegrations] = useState<IntegrationItem[]>([]);
-  const [integrationsLoading, setIntegrationsLoading] = useState(true);
-  const [integrationsError, setIntegrationsError] = useState("");
+  const [credentials, setCredentials] = useState<CredentialState[] | null>(null);
+  const [encryptionMode, setEncryptionMode] = useState<CredentialsPayload["encryptionMode"] | null>(null);
+  const [keysLoading, setKeysLoading] = useState(true);
+  const [keysError, setKeysError] = useState("");
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [fieldStates, setFieldStates] = useState<Record<string, CredentialFieldState>>({});
   const [tests, setTests] = useState<Partial<Record<SettingsTestProvider, SettingsTestState>>>({});
 
   const [settings, setSettings] = useState<AdvisorSettings | null>(null);
@@ -3203,10 +3269,14 @@ function SettingsScreen({ onBack, onIntegrations }: { onBack: () => void; onInte
 
   useEffect(() => {
     let active = true;
-    api<{ integrations: IntegrationItem[] }>("/api/integrations")
-      .then((result) => { if (active) setIntegrations(result.integrations ?? []); })
-      .catch((reason: Error) => { if (active) { setIntegrations([]); setIntegrationsError(`Integration status could not be read: ${reason.message}`); } })
-      .finally(() => { if (active) setIntegrationsLoading(false); });
+    api<CredentialsPayload>("/api/settings/keys")
+      .then((result) => {
+        if (!active) return;
+        setCredentials(result.credentials ?? []);
+        setEncryptionMode(result.encryptionMode ?? null);
+      })
+      .catch((reason: Error) => { if (active) { setCredentials(null); setKeysError(`Your saved keys could not be read: ${reason.message}`); } })
+      .finally(() => { if (active) setKeysLoading(false); });
     return () => { active = false; };
   }, []);
 
@@ -3226,6 +3296,50 @@ function SettingsScreen({ onBack, onIntegrations }: { onBack: () => void; onInte
       .finally(() => { if (active) setSettingsLoading(false); });
     return () => { active = false; };
   }, []);
+
+  function fieldState(field: string): CredentialFieldState {
+    return fieldStates[field] ?? EMPTY_FIELD_STATE;
+  }
+
+  function patchField(field: string, patch: Partial<CredentialFieldState>) {
+    setFieldStates((prev) => ({ ...prev, [field]: { ...(prev[field] ?? EMPTY_FIELD_STATE), ...patch } }));
+  }
+
+  /**
+   * Saves one credential. Guarded against double-submit: while `busy` is set, this field's
+   * Save and Clear are both disabled and a second call returns immediately. The typed value is
+   * dropped from state as soon as the server confirms, so no plaintext key survives the save.
+   */
+  async function saveField(field: string) {
+    if (fieldState(field).busy) return;
+    const value = (drafts[field] ?? "").trim();
+    if (!value) return;
+    patchField(field, { busy: "save", error: "", saved: false, confirmClear: false });
+    try {
+      const result = await api<CredentialsPayload>("/api/settings/keys", { method: "PUT", body: JSON.stringify({ field, value }) });
+      setCredentials(result.credentials ?? []);
+      setEncryptionMode(result.encryptionMode ?? null);
+      setDrafts((prev) => ({ ...prev, [field]: "" }));
+      patchField(field, { busy: null, saved: true, error: "", reveal: false });
+    } catch (reason) {
+      patchField(field, { busy: null, saved: false, error: `Not saved: ${reason instanceof Error ? reason.message : "unknown request failure"}` });
+    }
+  }
+
+  /** Removes a credential saved in the app. Same in-flight guard as `saveField`. */
+  async function clearField(field: string) {
+    if (fieldState(field).busy) return;
+    patchField(field, { busy: "clear", error: "", saved: false });
+    try {
+      const result = await api<CredentialsPayload>("/api/settings/keys", { method: "DELETE", body: JSON.stringify({ field }) });
+      setCredentials(result.credentials ?? []);
+      setEncryptionMode(result.encryptionMode ?? null);
+      setDrafts((prev) => ({ ...prev, [field]: "" }));
+      patchField(field, { busy: null, saved: false, error: "", reveal: false, confirmClear: false });
+    } catch (reason) {
+      patchField(field, { busy: null, confirmClear: false, error: `Not cleared: ${reason instanceof Error ? reason.message : "unknown request failure"}` });
+    }
+  }
 
   /** Guarded against double-submit: a second click while a provider is in flight is ignored. */
   async function runTest(provider: SettingsTestProvider) {
@@ -3275,43 +3389,104 @@ function SettingsScreen({ onBack, onIntegrations }: { onBack: () => void; onInte
     : dirty ? "Unsaved changes" : "Up to date";
   const sheetsTest = tests.google_sheets;
 
+  // The server's list decides which fields exist; the local catalog only supplies wording and order.
+  // Anything the server returns that this build does not recognise still gets a row, in a trailing group.
+  const credentialByField = new Map((credentials ?? []).map((item) => [item.field, item]));
+  const catalogued = new Set(CREDENTIAL_GROUPS.flatMap((group) => group.fields));
+  const unrecognised = (credentials ?? []).filter((item) => !catalogued.has(item.field)).map((item) => item.field);
+  const groups: CredentialGroup[] = [
+    ...CREDENTIAL_GROUPS
+      .map((group) => ({ ...group, fields: group.fields.filter((field) => credentialByField.has(field)) }))
+      .filter((group) => group.fields.length > 0),
+    ...(unrecognised.length ? [{
+      id: "other", name: "Other credentials", icon: "integration" as IconName,
+      unlocks: "The server accepts these as well.",
+      where: "Check with whoever set this deployment up for where each value comes from.",
+      fields: unrecognised, tests: [],
+    }] : []),
+  ];
+
   return <section className="guided wide settings"><Back onClick={onBack}>Start</Back>
-    <PageHead eyebrow="Advisor setup" side={<Button icon="integration" onClick={onIntegrations} variant="secondary">Integration Center</Button>} title="Settings">Two things live here: the API keys your server holds (status and a test, never the key itself), and the connections stored against your advisor account. This screen is advisor-only and is not reachable from a client call.</PageHead>
+    <PageHead eyebrow="Advisor setup" side={<Button icon="integration" onClick={onIntegrations} variant="secondary">Integration Center</Button>} title="Settings">Two things live here: the API keys the app uses, which you paste in and save below, and the connections stored against your advisor account. This screen is advisor-only and is not reachable from a client call.</PageHead>
 
-    <div className="settings-keys-banner"><Icon name="lock" size={20} /><div><strong>API keys are server secrets — you never type one here.</strong><p>Keys are set on the server with <code>wrangler secret put</code> and are never sent to the browser or written to the database. This screen shows only whether each key is present and lets you test it.</p></div></div>
+    <div className="settings-keys-banner"><Icon name="lock" size={20} /><div>
+      <strong>Paste a key, press Save. It is stored encrypted in your database.</strong>
+      <p>That is deliberate so you can get set up and test in minutes. It is still weaker than holding a key in the deployment environment itself, so before you run this for real, move these keys to server secrets. A key set on the server always wins over one saved here.</p>
+      {encryptionMode === "generated-key" ? <p className="settings-keys-extra"><Icon name="info" size={14} />The encryption key was generated for you automatically and is stored alongside the data, so anyone who can read the database can read both. Setting <code>APP_ENCRYPTION_KEY</code> in the deployment environment is the stronger option.</p> : null}
+    </div></div>
 
-    <div className="settings-section"><header className="settings-section-head"><p className="eyebrow">Section 1 · API keys</p><h2>Status &amp; test — no key entry</h2><p>Read live from the server. For each provider you can see what it unlocks, the exact command to set its secret, and — where supported — a test that reports pass, not set up, or fail.</p></header>
-      {integrationsLoading ? <p className="registry-empty" role="status">Reading connector status…</p> : null}
-      {integrationsError ? <p className="ops-error" role="alert"><Icon name="info" size={15} />{integrationsError}</p> : null}
-      {!integrationsLoading && !integrationsError && integrations.length === 0 ? <p className="registry-empty">The server returned no integrations.</p> : null}
-      <div className="settings-providers">{integrations.map((item) => {
-        const provider = TESTABLE_PROVIDERS[item.id];
-        const test = provider ? tests[provider] : undefined;
-        return <article className="settings-provider" key={item.id}>
-          <span className="settings-provider-icon"><Icon name={modeIcon(item.mode)} size={21} /></span>
-          <div className="settings-provider-body">
-            <header><h3>{item.name}</h3><Pill tone={statusTone[item.status] ?? "neutral"}>{item.status.replace(/_/g, " ")}</Pill>{item.model ? <Pill tone="inferred">{item.model}</Pill> : null}</header>
-            <p className="settings-provider-unlocks">{item.setup || `Unlocks the ${(item.mode || "declared").replace(/_/g, " ")} mode.`}</p>
-            {item.environmentVariables?.length ? <div className="settings-secret">
-              <p className="settings-secret-lead"><Icon name="lock" size={14} />Required env var names — set each as a server secret. This keeps the key out of the database and out of this browser.</p>
-              <div className="copy-lines">{item.environmentVariables.map((name) => <CopyLine key={name} text={`wrangler secret put ${name}`} />)}</div>
-            </div> : <p className="settings-nokeys"><Icon name="check" size={14} />No credential is required for this provider.</p>}
-            {provider ? <div className="settings-test">
-              <Button disabled={Boolean(test?.running)} icon="refresh" onClick={() => runTest(provider)} variant="secondary">{test?.running ? "Testing…" : "Test"}</Button>
+    <div className="settings-section"><header className="settings-section-head"><p className="eyebrow">Section 1 · API keys</p><h2>Paste your keys and save them</h2><p>One box per key. Each shows whether it is saved, what it unlocks, and where to get it. Nothing you save is ever shown back to you — only the last few characters, so you can tell which key is in there.</p></header>
+      {keysLoading ? <p className="registry-empty" role="status">Reading your saved keys…</p> : null}
+      {keysError ? <p className="ops-error" role="alert"><Icon name="info" size={15} />{keysError}</p> : null}
+      {!keysLoading && !keysError && groups.length === 0 ? <p className="registry-empty">The server returned no credential fields.</p> : null}
+      <div className="settings-providers">{groups.map((group) => <article className="settings-provider" key={group.id}>
+        <span className="settings-provider-icon"><Icon name={group.icon} size={21} /></span>
+        <div className="settings-provider-body">
+          <header><h3>{group.name}</h3></header>
+          <p className="settings-provider-unlocks">{group.unlocks}</p>
+          <p className="cred-where"><Icon name="search" size={14} /><span>Where to get it: {group.where}</span></p>
+          <div className="cred-fields">{group.fields.map((field) => {
+            const meta = fieldMeta(field);
+            const credential = credentialByField.get(field);
+            const state = fieldState(field);
+            const draft = drafts[field] ?? "";
+            const managed = credential?.source === "server-secret";
+            const savedInApp = credential?.set === true && credential.source === "saved-in-app";
+            const busy = state.busy !== null;
+            const inputId = `credential-${field}`;
+            return <div className="cred-field" key={field}>
+              <div className="cred-field-head">
+                <label htmlFor={inputId}><span>{meta.label}</span></label>
+                {managed ? <Pill tone="known">Set on the server</Pill> : savedInApp ? <Pill tone="success">Saved</Pill> : <Pill tone="neutral">Not set</Pill>}
+                {savedInApp && credential?.hint ? <span className="cred-hint">ends in {credential.hint}</span> : null}
+                <code className="cred-name">{field}</code>
+              </div>
+              {managed
+                ? <p className="cred-managed"><Icon name="lock" size={14} /><span>This one is already set in the deployment environment, so there is nothing to paste. A key set on the server takes priority over anything saved in the app — saving one here would have no effect.</span></p>
+                : <>
+                  <div className="cred-row">
+                    <div className="cred-input">
+                      <input autoCapitalize="none" autoComplete="off" disabled={busy} id={inputId}
+                        onChange={(event) => {
+                          const next = event.target.value;
+                          setDrafts((prev) => ({ ...prev, [field]: next }));
+                          if (state.saved || state.error) patchField(field, { saved: false, error: "" });
+                        }}
+                        placeholder={savedInApp ? "Paste a new value to replace the saved one" : meta.placeholder}
+                        spellCheck={false} type={meta.secret && !state.reveal ? "password" : "text"} value={draft} />
+                      {meta.secret ? <button aria-label={state.reveal ? `Hide ${meta.label}` : `Show ${meta.label}`} aria-pressed={state.reveal} className="cred-reveal" disabled={busy} onClick={() => patchField(field, { reveal: !state.reveal })} type="button">{state.reveal ? "Hide" : "Show"}</button> : null}
+                    </div>
+                    <Button disabled={busy || draft.trim() === ""} icon="check" onClick={() => saveField(field)}>{state.busy === "save" ? "Saving…" : "Save"}</Button>
+                    {savedInApp ? state.confirmClear
+                      ? <><Button disabled={busy} icon="close" onClick={() => clearField(field)} variant="secondary">{state.busy === "clear" ? "Clearing…" : "Confirm clear"}</Button><Button disabled={busy} onClick={() => patchField(field, { confirmClear: false })} variant="quiet">Cancel</Button></>
+                      : <Button disabled={busy} onClick={() => patchField(field, { confirmClear: true })} variant="quiet">Clear</Button>
+                    : null}
+                  </div>
+                  {meta.note ? <small className="cred-note">{meta.note}</small> : null}
+                  {state.saved ? <p className="cred-feedback" role="status"><Icon name="check" size={14} />{meta.secret ? "Saved. It is stored encrypted and will not be shown back to you." : "Saved."}</p> : null}
+                  {state.error ? <p className="upload-state error" role="alert"><Icon name="info" size={15} />{state.error}</p> : null}
+                </>}
+            </div>;
+          })}</div>
+          {group.tests.map((entry) => {
+            const test = tests[entry.provider];
+            return <div className="settings-test" key={entry.provider}>
+              <Button disabled={Boolean(test?.running)} icon="refresh" onClick={() => runTest(entry.provider)} variant="secondary">{test?.running ? "Testing…" : entry.label}</Button>
+              <small>Checks the key the app would actually use. Save first, then test.</small>
               <TestOutcome test={test} />
-            </div> : null}
-          </div>
-        </article>;
-      })}</div>
+            </div>;
+          })}
+        </div>
+      </article>)}</div>
     </div>
 
-    <div className="settings-section"><header className="settings-section-head"><p className="eyebrow">Section 2 · My connections</p><h2>Stored against your advisor account</h2><p>Non-secret connection settings only. None of these fields is a key — they are saved to your account and can be changed at any time.</p></header>
+    <div className="settings-section"><header className="settings-section-head"><p className="eyebrow">Section 2 · My connections</p><h2>Stored against your advisor account</h2><p>Where your work is written, not how the app authenticates. None of these fields is a key — the keys are in Section 1 above. These are saved to your account and can be changed at any time.</p></header>
       {settingsLoading ? <p className="registry-empty" role="status">Reading your connection settings…</p> : null}
       {settingsError ? <p className="ops-error" role="alert"><Icon name="info" size={15} />{settingsError}</p> : null}
       {!settingsLoading && !settingsError ? <form className="panel settings-connections" onSubmit={saveConnections}>
         <div className="settings-crm">
           <h3>Connect your CRM — bring your own Google Sheet</h3>
-          <p className="settings-sub">The app writes engagement rows through the Google identity configured on the server. You share a sheet with it and paste the link here — you never paste a key.</p>
+          <p className="settings-sub">The app writes engagement rows through the Google identity configured on the server. You share a sheet with it and paste the link here — this field is the sheet, not a key.</p>
           <ol className="settings-guide">
             <li><span>1</span><div><strong>Download the CRM template</strong><p>Start from the exact columns the app writes back.</p><a className="button secondary settings-download" download href="/api/crm-template">Download CRM template<Icon name="download" size={15} /></a></div></li>
             <li><span>2</span><div><strong>Import it into Google Sheets</strong><p>In Sheets, File → Import → Upload, and keep it as a new spreadsheet.</p></div></li>
@@ -3333,12 +3508,12 @@ function SettingsScreen({ onBack, onIntegrations }: { onBack: () => void; onInte
           <label className="field-note"><span>Drive folder id <small>Optional</small></span><input autoCapitalize="none" onChange={(e) => setFolder(e.target.value)} placeholder="Google Drive folder id" spellCheck={false} value={folder} /><small>Where generated Google Docs are filed.</small></label>
           <label className="field-note"><span>From name <small>Optional</small></span><input onChange={(e) => setFromName(e.target.value)} placeholder="Tier 4 Advisors" value={fromName} /><small>The display name on outgoing email.</small></label>
         </div>
-        <p className="settings-nosecret"><Icon name="lock" size={15} />These are the only editable fields, and not one of them is a secret. Set API keys with the <code>wrangler secret put</code> commands in Section 1.</p>
+        <p className="settings-nosecret"><Icon name="lock" size={15} />Nothing on this section is a key — these are just pointers to your sheet, folder and sender name. API keys go in Section 1.</p>
         {saveError ? <p className="upload-state error" role="alert"><Icon name="info" size={15} />{saveError}</p> : null}
         <div className="action-row"><p aria-live="polite" className={`settings-save-state ${saveState}`}>{saveLabel}</p><Button disabled={saveState === "saving" || settingsLoading} icon="check" type="submit">{saveState === "saving" ? "Saving…" : "Save connections"}</Button></div>
       </form> : null}
     </div>
 
-    <div className="security"><Icon name="lock" size={18} /><div><strong>Authorization boundary</strong><p>No secret is ever entered or displayed here. External writes, connector imports, paid enrichment, and customer sends still require explicit review and approval.</p></div></div>
+    <div className="security"><Icon name="lock" size={18} /><div><strong>Authorization boundary</strong><p>A key you save here is stored encrypted and is never displayed again — only its last few characters. External writes, connector imports, paid enrichment, and customer sends still require explicit review and approval.</p></div></div>
   </section>;
 }

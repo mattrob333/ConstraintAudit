@@ -147,12 +147,13 @@ function multipartBody(boundary: string, metadata: unknown, html: string): strin
 export async function createDocument(
   input: CreateDocumentInput,
 ): Promise<AdapterResult<CreateDocumentData>> {
-  if (!googleDriveConfigured()) {
+  const credentials = input.credentials;
+  if (!googleDriveConfigured(credentials)) {
     return {
       ok: false,
       status: "not-configured",
       provider: PROVIDER,
-      detail: `Google Drive is not configured. Missing: ${missingGoogleVars().join(", ")}.`,
+      detail: `Google Drive is not configured. Missing: ${missingGoogleVars(credentials).join(", ")}.`,
     };
   }
 
@@ -164,7 +165,7 @@ export async function createDocument(
     : markdownToHtml(input.markdown ?? "");
   if (!html) return fail("Refusing to create an empty document: supply `html` or `markdown`.");
 
-  const token = await getAccessTokenResult([DRIVE_FILE_SCOPE]);
+  const token = await getAccessTokenResult([DRIVE_FILE_SCOPE], credentials);
   if (!token.ok) {
     return {
       ok: false,
@@ -174,7 +175,7 @@ export async function createDocument(
     };
   }
 
-  const folderId = (input.folderId ?? defaultDriveFolderId()).trim();
+  const folderId = (input.folderId ?? defaultDriveFolderId(credentials)).trim();
   const metadata: Record<string, unknown> = { name: title, mimeType: GOOGLE_DOC_MIME };
   if (folderId) metadata.parents = [folderId];
 

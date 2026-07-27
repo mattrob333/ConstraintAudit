@@ -1,3 +1,4 @@
+import type { Credentials } from "./secrets";
 import type { BaselineMetric, ConstraintType, DirectionInference } from "./workflow";
 
 /**
@@ -482,8 +483,12 @@ type OpenAIResponse = {
   }>;
 };
 
-/** Imported lazily so the pure tiers stay importable outside the Worker runtime. */
-async function configuredValue(name: string): Promise<string> {
+/**
+ * Imported lazily so the pure tiers stay importable outside the Worker runtime. With
+ * credentials the resolver owns precedence (server secret wins) and no binding is touched.
+ */
+async function configuredValue(name: string, credentials?: Credentials): Promise<string> {
+  if (credentials) return credentials.get(name).trim();
   const { env } = await import("cloudflare:workers");
   const value = (env as unknown as Record<string, unknown>)[name];
   return typeof value === "string" ? value.trim() : "";
@@ -519,11 +524,12 @@ async function askModel(
   metric: BaselineMetric | undefined,
   context: MetricDirectionContext | undefined,
   fetcher: typeof fetch,
+  credentials?: Credentials,
 ): Promise<DirectionInference | null> {
   try {
-    const key = await configuredValue("OPENAI_API_KEY");
+    const key = await configuredValue("OPENAI_API_KEY", credentials);
     if (!key) return null;
-    const model = (await configuredValue("OPENAI_RESEARCH_MODEL")) || DEFAULT_MODEL;
+    const model = (await configuredValue("OPENAI_RESEARCH_MODEL", credentials)) || DEFAULT_MODEL;
     const response = await fetcher(OPENAI_RESPONSES_URL, {
       method: "POST",
       headers: {
@@ -610,6 +616,7 @@ export async function resolveMetricDirection(
   metric: BaselineMetric,
   context?: MetricDirectionContext,
   fetcher: typeof fetch = fetch,
+  credentials?: Credentials,
 ): Promise<DirectionInference> {
   let local: Analysis;
   try {
@@ -618,6 +625,6 @@ export async function resolveMetricDirection(
     local = { inference: undecided("", ""), consultModel: false };
   }
   if (!local.consultModel) return local.inference;
-  const settled = await askModel(metric, context, fetcher);
+  const settled = await askModel(metric, context, fetcher, credentials);
   return settled ?? local.inference;
 }

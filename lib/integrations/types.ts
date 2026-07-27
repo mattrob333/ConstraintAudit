@@ -1,9 +1,19 @@
+import type { Credentials } from "../secrets";
+
 /**
  * Shared shapes for deployed-app integration adapters.
  *
  * An adapter never decides whether it may act. It receives an already-approved
  * payload, performs exactly one external write, and reports what happened.
+ *
+ * Every adapter input carries an optional `credentials`, resolved for one advisor.
+ * Omitted, the adapter reads the Cloudflare environment exactly as it always has.
  */
+
+/** Credentials resolved for one advisor. Values are read, never stored or echoed. */
+export interface WithCredentials {
+  credentials?: Credentials;
+}
 
 export type AdapterStatus = "sent" | "written" | "created" | "not-configured" | "failed";
 
@@ -18,7 +28,7 @@ export interface AdapterResult<T = unknown> {
 
 /** Resend */
 
-export interface SendEmailInput {
+export interface SendEmailInput extends WithCredentials {
   to: string | readonly string[];
   subject: string;
   /** Plain-text/Markdown body. Always sent as the `text` part. */
@@ -40,7 +50,7 @@ export interface SendEmailData {
 /** Anything a caller can hand a cell. Everything is written as a RAW string. */
 export type CellValue = string | number | boolean | null | undefined;
 
-export interface AppendOrUpdateRowInput {
+export interface AppendOrUpdateRowInput extends WithCredentials {
   /** Defaults to GOOGLE_SHEETS_ID. */
   spreadsheetId?: string;
   /** Tab name, e.g. "Engagements". */
@@ -69,7 +79,7 @@ export interface AppendOrUpdateRowData {
 
 /** Google Docs (via Drive upload + conversion) */
 
-export interface CreateDocumentInput {
+export interface CreateDocumentInput extends WithCredentials {
   title: string;
   /** Converted locally with a minimal renderer when `html` is absent. */
   markdown?: string;
