@@ -17,6 +17,20 @@ test("build contains the Tier 4 audit entry point", async () => {
   assert.doesNotMatch(cockpit, /SkeletonPreview|Your site is taking shape|react-loading-skeleton/);
 });
 
+test("the crash screen never shows a client the internals", async () => {
+  const crash = await readFile(new URL("../app/error.tsx", import.meta.url), "utf8");
+  const rendered = crash.slice(crash.indexOf("return ("));
+  // An advisor may be screen-sharing when a render fails. A stack trace, an exception message
+  // or a digest on that screen is both alarming to a client and useless to the advisor.
+  for (const leak of ["error.message", "error.digest", "error.stack", "{error}", "String(error)"]) {
+    assert.equal(rendered.includes(leak), false, `crash screen renders ${leak} to the client`);
+  }
+  assert.match(crash, /console\.error/);
+  // Styles must not depend on the stylesheet that may itself be what failed.
+  assert.doesNotMatch(rendered, /className=/);
+  assert.match(crash, /reset\(\)|onClick=\{reset\}/);
+});
+
 test("keeps frontend workflow gates and accessibility in the owned client surface", async () => {
   const [page, layout, cockpit, css] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
