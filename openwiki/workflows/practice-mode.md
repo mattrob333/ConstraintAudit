@@ -53,7 +53,7 @@ The practice bar's text is explicit: *"Meridian Millwork is not a real company. 
 
 ## The walkthrough
 
-`PracticeTour` is a 15-stop docked panel: intake → research-canvas → research-flow → research-questions → prepare → call → transcript → synthesis → canvas-commit → findings → diagnosis → deliver → sprint → measure → catalog. Each stop carries "On this screen", "With a real client", and "Worth a look". Position persists in `localStorage`, and on completion the advisor can walk it again, reset the data, leave practice mode, or delete the practice engagement.
+`PracticeTour` is an 8-stop docked panel: intake → research-canvas → call-kit → transcript → synthesis → diagnosis → deliver → report. Each stop carries a one-paragraph `blurb` and a short `points` list — an operating manual, not a training course. The tour deliberately skips the Prepare and Call screens, which remain reachable outside it. While the tour is running, the research screen renders its canvas tab from `research.facts` only (`firstPass`), because at that point in the story no call has happened yet. Position persists in `localStorage`, and on completion the advisor can walk it again, reset the data, leave practice mode, or delete the practice engagement.
 
 The tour is wrapped in `AdvisorOnly` and additionally hidden whenever the Findings Call presentation view is open or the advisor is presenting during Call 1 — a client watching a screen share never sees the training scaffolding, only the practice bar warning them that what they are looking at is fictional.
 

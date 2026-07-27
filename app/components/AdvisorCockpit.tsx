@@ -341,32 +341,6 @@ const glossaryTerms: Array<{ term: string; plain: string; say: string }> = [
   },
 ];
 
-/** The shape of the hour, so an advisor knows where they should be and when. */
-const callArc: Array<[string, string, string]> = [
-  ["0–2 min", "Consent and framing", "Ask to record. Say what the hour is for: understanding how the work actually moves. You are not selling anything today."],
-  ["2–10 min", "How demand comes in, what you promise", "Easy ground on purpose. Let them talk. You are learning their words for things, not testing them."],
-  ["10–30 min", "Trace one real job, end to end", "The heart of the call. One real job, last week if possible, from first contact to paid. Every handoff, every wait."],
-  ["30–42 min", "Where it waits or loops", "Now hunt. Where does work pile up, come back, or wait on one person?"],
-  ["42–50 min", "The numbers that anchor it", "Rough is fine. Volume in a normal month, typical turnaround, what is waiting right now, what got turned away."],
-  ["50–58 min", "Who owns it, what could change", "Get a name. Find out what they are allowed to change without a board meeting."],
-  ["58–60 min", "Close", "Say what happens next and when. Do not diagnose on the call — you have not looked at the transcript yet."],
-];
-
-/** The three things that make the call a success. Everything else is a bonus. */
-const mustLeaveWith: Array<[string, string]> = [
-  ["A traced flow", "One real job, start to finish, in their words — with the handoffs and the waits actually in it."],
-  ["A candidate constraint", "One step you can point at and say “everything seems to wait here”. A candidate, not a verdict."],
-  ["A named owner", "A real person, by name, who owns that step. Not a department."],
-];
-
-/** What to do when the call gets away from you. Read one of these out and carry on. */
-const ifYouGetLost: string[] = [
-  "“Can I just check I’ve got this right?” — then say their flow back to them, slightly wrong, on purpose. They will correct you, and the correction is the good bit.",
-  "“Take me to the last real one.” A specific job from last week beats any general answer, every time.",
-  "“What’s the bit about this that annoys you most?” That question gets you back to the constraint from anywhere in the conversation.",
-  "If you have completely lost the thread: open the next question and say “let me come back to that in a minute”. Nobody has ever minded.",
-];
-
 /** The advisor's own open questions from the guided call. Advisor notes — never client evidence. */
 type GapFlag = {
   questionId: string; question: string; section: DiscoverySection;
@@ -655,12 +629,10 @@ type TourStop = {
   callNumber?: 1 | 2;
   stage: string;
   title: string;
-  /** Plain language for what is actually on the screen in front of them. */
-  looking: string;
-  /** What the advisor would be doing here with a real client. */
-  real: string;
-  /** Specific things to go and look at, in this record, right now. */
-  watch: string[];
+  /** One short paragraph: what this screen is for. */
+  blurb: string;
+  /** The operating notes for this screen. Terse, one line each. */
+  points: string[];
 };
 
 /**
@@ -671,228 +643,94 @@ const practiceTour: TourStop[] = [
   {
     id: "intake",
     screen: "intake",
-    stage: "Step one · Client",
-    title: "Where every engagement starts",
-    looking:
-      "The intake form, already filled in for Meridian Millwork — a 22-person shop that builds custom cabinetry and store fixtures. A company, a website, one contact, and an email is all it takes to begin.",
-    real:
-      "Fill this in right after your first phone call and press “Research this business”. Everything that follows — the questions, the brief, the diagnosis — builds on it, so get the contact's name and role right.",
-    watch: [
-      "The contact's name and role later become the named owner of whatever gets prescribed.",
-      "The email is where the pre-call brief goes — that is why it is required.",
-      "Nothing on this screen is sent anywhere. Research uses public sources only.",
+    stage: "Step 1 · Start",
+    title: "Enter a company",
+    blurb: "Type the company name and website, then press “Research this business”. That is the entire first step.",
+    points: [
+      "Contact details are optional here — you can add them later, before anything is sent.",
+      "Nothing leaves the app. Research reads public sources only.",
     ],
   },
   {
     id: "research-canvas",
     screen: "research",
     focusTab: "canvas",
-    stage: "Step two · Research",
-    title: "What we learned without asking",
-    looking:
-      "A one-page picture of how the business works, drafted from Meridian's public website before anyone spoke to them, then corrected by what Dana and Rosa said on the calls. Green is the client's own words. Everything else is public research or an honest gap.",
-    real:
-      "Read this the day before the call and look for the thin blocks. It does not need to be right — it needs to be specific enough for the client to correct, because a correction is the most valuable thing an hour can produce.",
-    watch: [
-      "Under Value Propositions, “quote turnaround is about nine days” is marked Client stated — it corrected the website's 48-hour promise, on the record.",
-      "Cost Structure was empty until Dana said “payroll is the whole thing”. An empty block is normal, not a failure.",
-      "Where nothing is known it says Missing. No block is ever filled with a plausible guess.",
+    stage: "Step 2 · Research",
+    title: "The research comes back",
+    blurb: "A one-page model of the business, drafted from public sources. This is the pre-call draft — nothing is confirmed yet.",
+    points: [
+      "Anything the research could not find is marked Missing. The gaps are the point — they become your call questions.",
+      "The tool never fills a gap with a guess.",
     ],
   },
   {
-    id: "research-flow",
+    id: "call-kit",
     screen: "research",
     focusTab: "flow",
-    stage: "Step two · Research",
-    title: "How the work actually moves",
-    looking:
-      "The route one job takes from a contractor's email to installed millwork, in six steps — each with who does it, where it lives, and a ready-made question to confirm it on the call.",
-    real:
-      "Walk this on the call one step at a time and invite the client to correct you. Being slightly wrong out loud is a technique — people correct a specific claim far more readily than they answer an open question.",
-    watch: [
-      "Step 2, Quote pricing, is marked as a gap — nothing public said who prices a job. That gap turned out to be the entire engagement.",
-      "Every step has its own confirmation question, so you never improvise the next thing to say.",
-      "No step counts as confirmed until the client traces a real job through it.",
-    ],
-  },
-  {
-    id: "research-questions",
-    screen: "research",
-    focusTab: "questions",
-    stage: "Step two · Research",
-    title: "The questions the research produced",
-    looking:
-      "Ten discovery questions built from the research gaps, each showing what was found publicly so you never assert a guess. Beneath them, three competing hypotheses about where the constraint is.",
-    real:
-      "Skim this the morning of the call — there is nothing to memorise. The guided call puts each question on screen, in order, with follow-ups beside it.",
-    watch: [
-      "Every question exists because of a specific gap. A different company produces a different list — there is no generic script.",
-      "The hypotheses are yours alone, never read to a client as fact. Arrive with three, leave with one.",
-      "The ones marked Required are what the diagnosis cannot be built without.",
-    ],
-  },
-  {
-    id: "prepare",
-    screen: "prepare",
-    stage: "Step three · Prepare",
-    title: "The brief the client sees",
-    looking:
-      "On the right, the pre-call brief exactly as the client receives it. Above it, your private briefing: the shape of the hour, the three things you must leave with, and what to say if you lose the thread.",
-    real:
-      "Send the brief a few days ahead so the client has rough numbers handy and the right people in the room. Approving it here only queues the send — the email itself is a second, deliberate step in Reviewed actions.",
-    watch: [
-      "The Canvas, your questions, and your hypotheses are all left out of the client's copy, on purpose.",
-      "The dashed “Advisor only” box never reaches the client. Read it once before your first real call.",
-      "The brief asks for rough numbers only. Sending a client hunting through spreadsheets is the fastest way to lose the hour.",
-    ],
-  },
-  {
-    id: "call",
-    screen: "call",
-    stage: "Step four · The discovery call",
-    title: "The call, one question at a time",
-    looking:
-      "The guided call. One question fills the screen so you can share it. Beside it, a coaching rail the client never sees: follow-ups, answers to pushback, and plain English for every bit of jargon.",
-    real:
-      "Open this at the top of the hour, confirm recording consent out loud, and work down the questions. “We don't know yet” gets flagged as a gap to chase — it never quietly passes as an answer.",
-    watch: [
-      "Press Escape now. Every word of coaching vanishes — not hidden, gone. Practice it before you ever need it live.",
-      "The practice bar above stays. The one thing that must never disappear is the warning that this data is invented.",
-      "You are not there to diagnose on the call. Get the flow, the waiting, and a name — the diagnosis comes later, from the transcript.",
+    stage: "Step 2 · Research",
+    title: "Your call kit",
+    blurb: "The flow of work and the call questions were generated from the same research. This is what you bring to the call.",
+    points: [
+      "Flow of work: how a job moves through the business, with one confirmation question per step.",
+      "Call questions: built from the gaps — a different company gets a different list.",
+      "On the call, just talk. Share your screen if it helps. No buttons to press.",
     ],
   },
   {
     id: "transcript",
     screen: "transcript",
     callNumber: 1,
-    stage: "Step five · Evidence",
-    title: "The call becomes evidence",
-    looking:
-      "Where the recording becomes quotable evidence. Paste the text, upload the file, or pull it from Fireflies — always the full transcript, never a summary, so every finding can point to a line somebody actually said.",
-    real:
-      "Do this the same afternoon, while you still remember the room. Consent must be confirmed for this specific call first — the analyse button stays locked otherwise.",
-    watch: [
-      "The sentence the whole engagement rests on is Rosa's, at 04:43: “It is more like 9 days per quote.”",
-      "Your own lines are recorded as advisor notes. They can never become client evidence, however quotable they sound.",
-      "A summary would have lost the nine days — Dana said four or five. Only the full transcript carries the correction.",
+    stage: "Step 3 · After the call",
+    title: "Paste the transcript",
+    blurb: "The one step that matters most: get the call transcript back into the tool.",
+    points: [
+      "Paste the text, upload the file, or pull it from Fireflies — the full transcript, not a summary.",
+      "Confirm recording consent, then press Analyse.",
+      "Everything from here on is built from lines the client actually said.",
     ],
   },
   {
     id: "synthesis",
     screen: "synthesis",
-    stage: "Step six · Synthesis",
-    title: "What the transcript actually supports",
-    looking:
-      "Every client quote that carries weight, with speaker and timestamp — plus the baseline, the open gaps, and one proposed constraint.",
-    real:
-      "Read it line by line and argue with it where it is wrong. It is a proposal, not a verdict — the tool would rather show nothing than something the transcript does not support.",
-    watch: [
-      "Baseline reads Confirmed because Rosa read it off her own log — not because anything was assumed.",
-      "One constraint. Not a ranked list of nine opportunities, and not a score.",
-      "Anything that could not be tied to a real quote is shown as discarded, never silently dropped.",
-    ],
-  },
-  {
-    id: "canvas-commit",
-    screen: "synthesis",
-    stage: "Step six · Checkpoint",
-    title: "The first thing you have to approve",
-    looking:
-      "The bottom of this same screen. “Approve Canvas commit” is a human checkpoint: nothing is written into the official Canvas until you say so.",
-    real:
-      "Press it only after reading the quotes above it. It approves the evidence — not the diagnosis. That is a separate decision, after a second call with the client.",
-    watch: [
-      "Two approvals, two calls, in that order. That is what stands between a confident guess and a client-facing finding.",
-      "If you change your mind later, every quote is still here with a name and timestamp against it.",
-    ],
-  },
-  {
-    id: "findings",
-    screen: "findings",
-    stage: "Step seven · The findings call",
-    title: "Reconcile first. Reveal second.",
-    looking:
-      "The second call, in two halves. First read the business back to them and let them correct you. Only then show the constraint, the prescription, the metric and the owner.",
-    real:
-      "Share your screen and press “Enter presentation view”: one section per screen, their own words quoted exactly, nothing internal on show.",
-    watch: [
-      "Try the presentation view now. The walkthrough disappears — and the practice bar stays. You cannot screen-share this believing it is real.",
-      "Dana's correction about who draws shop drawings came out of the read-back half. It is the half people skip, and it is where a finding gets stress-tested.",
-      "Numbers are only allowed here because the baseline is confirmed. No baseline, no numeric claims.",
+    stage: "Step 4 · Review",
+    title: "Approve what it found",
+    blurb: "The analysis proposes one constraint, backed by client quotes with timestamps. Read it, then approve it at the bottom of the screen.",
+    points: [
+      "Wrong or weak? Nothing is saved until you press Approve.",
+      "Quotes it could not verify are discarded and shown as discarded.",
     ],
   },
   {
     id: "diagnosis",
     screen: "findings",
-    stage: "Step seven · Checkpoint",
-    title: "Approving the diagnosis",
-    looking:
-      "The second and final checkpoint: the constraint, the prescription, the evidence, and the named human owner, with the approval beneath them.",
-    real:
-      "You cannot approve without a named person. For Meridian that is Dana Whitfield, Owner — she said on the record that a bad price-book number is hers, not Rosa's. That is what ownership means.",
-    watch: [
-      "Nine days is a client number from a client log. The tool will not invent a baseline, so no delta can ever rest on one.",
-      "The prescription is deliberately small: write down the six or seven assemblies she already prices the same way. No hire, no software, and she can stop any Monday.",
-      "The next constraint — shop drawings — is predicted here, before the sprint, so when it shows up nobody thinks the sprint failed.",
+    stage: "Step 5 · The finding",
+    title: "The diagnosis",
+    blurb: "The constraint, the recommended fix, the metric, and the person who owns it. Approving this unlocks the documents.",
+    points: [
+      "“Enter presentation view” gives you a clean, client-facing version for the follow-up call.",
+      "Every number traces to the client’s own words — that is what makes you credible in the room.",
     ],
   },
   {
     id: "deliver",
     screen: "deliver",
-    stage: "Step eight · Deliver",
-    title: "The documents",
-    looking:
-      "Six documents generated from the approved record — diagnosis, audit report, sprint proposal, roadmap, developer spec, and roles map. Each carries the same evidence labels and the same named owner.",
-    real:
-      "Generate the suite, read it, then queue what the client should see. Sending is two steps on purpose: “Send to client” only queues it, and nothing leaves this app until you approve it in Reviewed actions.",
-    watch: [
-      "No document contains a number nobody said. The proposal shows the formula rather than a projected return.",
-      "Open any document from the Documents menu and read the last line — every practice document says on its own face that it is fictional.",
-      "The roles map is the one clients react to hardest. It is where “everything waits on one person” stops being a feeling.",
+    stage: "Step 6 · Deliverables",
+    title: "Generate the documents",
+    blurb: "One press generates the full set — diagnosis, report, proposal, roadmap, and roles map.",
+    points: [
+      "Read them, then queue what the client should see. Nothing sends until you approve it in Reviewed actions.",
+      "No document contains a number nobody said.",
     ],
   },
   {
-    id: "sprint",
+    id: "report",
     screen: "sprint",
-    stage: "Step nine · Operate",
-    title: "The sprint",
-    looking:
-      "The prescription turned into five tasks with owners, and a measurement clock started against the confirmed nine-day baseline.",
-    real:
-      "Activate it in front of the client, agree the review date, then largely get out of the way. Meridian's sprint cost Dana two evenings — one to write the price book, one to sit with Rosa while she used it.",
-    watch: [
-      "The last task is the kill condition, in the client's own words: if quotes go out in three days and the win rate does not move, speed was never the constraint.",
-      "Agreeing in writing, before you start, how you would be proved wrong is the whole discipline.",
-      "Nothing here is scheduled or emailed externally. The sprint lives in the record.",
-    ],
-  },
-  {
-    id: "measure",
-    screen: "measure",
-    stage: "Step ten · Operate",
-    title: "What actually changed",
-    looking:
-      "The before and the after. Nine days to three — read as an improvement because shorter is better, with the reason for that judgement written out beside it.",
-    real:
-      "Take the ending reading from the same log, kept the same way, and read it back to the client before recording it. If the log had changed, the comparison would be worthless — and this screen would say so.",
-    watch: [
-      "Every number here came from the server, including which direction counts as better — and you can correct that direction if it reads wrong.",
-      "The constraint moved to shop drawings, exactly where Dana predicted. That is what success looks like — not a fix that failed.",
-      "If no direction can be established, the result reads “not interpreted” rather than being quietly called a win.",
-    ],
-  },
-  {
-    id: "catalog",
-    screen: "catalog",
-    stage: "Step eleven · Catalog",
-    title: "What you keep",
-    looking:
-      "The reusable pattern: one person's knowledge behaving as a queue, the smallest change that moved it, and the measured result — attached to this engagement and no other.",
-    real:
-      "Add where you think the pattern transfers, and where it does not. The result stays tied to the engagement that produced it and is never quoted to a prospect as a benchmark.",
-    watch: [
-      "One engagement, one pattern. This is how a practice compounds without anybody inventing a case study.",
-      "The next Meridian is not another millwork shop. It is any business where one person's judgement is the queue.",
+    stage: "Step 7 · The report",
+    title: "The plan and the scoreboard",
+    blurb: "The fix as a short task list — who does what, the number being moved, and where it started.",
+    points: [
+      "The Measure tab shows before and after: Meridian went from nine days to three.",
+      "That before-and-after is the report your client keeps.",
     ],
   },
 ];
@@ -1634,7 +1472,8 @@ export default function AdvisorCockpit() {
     if (saved?.mode === "done") {
       setTourStep(practiceTour.length - 1);
       setTourMode("done");
-      go("catalog");
+      // Land where the walkthrough actually ended, not on a screen it never visited.
+      go(practiceTour[practiceTour.length - 1].screen);
       return;
     }
     goToStop(saved?.step ?? 0);
@@ -2202,7 +2041,7 @@ export default function AdvisorCockpit() {
         go("intake");
       }} /> : null}
       {screen === "engagements" ? <Engagements engagements={engagements} loading={registryLoading} onBack={() => go("home")} onFresh={() => go("intake")} onResume={resume} /> : null}
-      {screen === "research" ? <Research canvas={canvas} company={displayCompany} focusTab={researchTab} onAddSource={addResearchSource} onBack={() => go("intake")} onPrepare={() => go("prepare")} research={researchResult} script={script} sourceState={researchSourceState} /> : null}
+      {screen === "research" ? <Research canvas={canvas} company={displayCompany} firstPass={practiceActive && tourMode !== "off"} focusTab={researchTab} onAddSource={addResearchSource} onBack={() => go("intake")} onPrepare={() => go("prepare")} research={researchResult} script={script} sourceState={researchSourceState} /> : null}
       {screen === "prepare" ? <Prepare briefSent={briefSent} call1At={call1At} call2At={call2At} contact={contact || "Primary contact"} email={email} onBack={() => go("research")} onCall={() => { setCallIndex(0); go("call"); }} onSaveSchedule={saveSchedule} onSend={() => { setConfirmed(false); setConfirmSend(true); }} savedAt={scheduleSavedAt} scheduleBusy={scheduleBusy} scheduleError={scheduleError} /> : null}
       {screen === "call" && callQuestion ? <Call answer={answers[callQuestion.id] ?? ""} company={displayCompany} consent={consent} gapError={gapError} gaps={gapFlags} gapSave={gapSave} generic={script.generic} index={Math.min(callIndex, script.questions.length - 1)} notes={notes[callQuestion.id] ?? ""} onAnswer={(value) => setAnswers((all) => ({ ...all, [callQuestion.id]: value }))} onConsent={setConsent} onExit={() => go("prepare")} onFlagGap={flagGap} onNext={() => callIndex < script.questions.length - 1 ? setCallIndex(callIndex + 1) : go("transcript")} onNotes={(value) => setNotes((all) => ({ ...all, [callQuestion.id]: value }))} onPresenting={setPresenting} onPrevious={() => setCallIndex(Math.max(0, callIndex - 1))} onSaveGaps={saveGaps} onUnflagGap={unflagGap} onValue={(value) => setValues((all) => ({ ...all, [callQuestion.id]: value }))} practice={practiceActive} presenting={presenting} question={callQuestion} scheduledAt={call1At} total={script.questions.length} value={values[callQuestion.id] ?? ""} /> : null}
       {screen === "transcript" ? <Transcript busy={analyzing} callNumber={transcriptCallNumber} company={displayCompany} fileError={fileError} fileName={fileName} fileReading={fileReading} fileSummary={fileSummary} method={transcriptMethod} onAnalyze={analyze} onBack={() => transcriptCallNumber === 2 ? go("findings") : go("call")} onFile={selectTranscriptFile} onMethod={setTranscriptMethod} onSpeakerRole={(speaker, roleValue) => setSpeakerRoles((prev) => ({ ...prev, [speaker]: roleValue }))} onText={setTranscript} ready={Boolean(transcriptFile)} scheduledAt={transcriptCallNumber === 1 ? call1At : call2At} speakerNote={speakerNote} speakerRoles={speakerRoles} speakers={detectedSpeakers} text={transcript} /> : null}
@@ -2379,8 +2218,14 @@ function claimsForBlock(canvas: CanvasRecord | null, facts: EvidenceClaim[], tit
   return [...claims].sort((a, b) => Number(b.provenance === "client-stated") - Number(a.provenance === "client-stated")).slice(0, 3);
 }
 
-function Research({ canvas, company, focusTab, onAddSource, onBack, onPrepare, research, script, sourceState }: {
+function Research({ canvas, company, firstPass, focusTab, onAddSource, onBack, onPrepare, research, script, sourceState }: {
   canvas: CanvasRecord | null; company: string;
+  /**
+   * True while the practice walkthrough is running. At that point in the story no call has
+   * happened, so the canvas tab must show the pre-call draft rather than the committed,
+   * client-corrected Canvas that already exists on the finished practice record.
+   */
+  firstPass?: boolean;
   /** Lets the practice walkthrough open this screen on the tab its current stop is about. */
   focusTab?: ResearchTab;
   onAddSource: (file: File) => void; onBack: () => void; onPrepare: () => void;
@@ -2400,9 +2245,12 @@ function Research({ canvas, company, focusTab, onAddSource, onBack, onPrepare, r
   const gaps = research?.gaps?.length ? research.gaps : ["Customer and demand profile", "End-to-end workflow", "Monthly volume", "Cycle time", "Queue size", "Rework", "Missed demand", "Cost of delay"];
   const flow = [...(research?.valueFlow ?? [])].sort((a, b) => a.order - b.order);
   const openAIUsed = research?.researchMode === "openai-web-search";
+  // The walkthrough sits before the call, so the committed Canvas is deliberately ignored
+  // and the canvas tab falls back to public research facts only.
+  const canonicalCanvas = firstPass ? null : canvas;
   return <section className="guided wide"><Back onClick={onBack}>Client intake</Back><PageHead eyebrow="Research · Canvas v0" side={<div className="research-progress"><span><Icon name="check" size={13} />Website read</span><span><Icon name={openAIUsed ? "check" : "info"} size={13} />{openAIUsed ? "Web search" : "Local research"}</span><span><Icon name="check" size={13} />Canvas drafted</span><span><Icon name="check" size={13} />Gaps found</span></div>} title="Here’s what we understand so far.">This first pass separates public evidence from interpretation. The gaps—not a generic script—guide the call with {company}.</PageHead>
     <div className="tabs">{(["canvas", "flow", "questions"] as const).map((item) => <button aria-selected={tab === item} className={tab === item ? "active" : ""} key={item} onClick={() => setTab(item)} role="tab" type="button">{item === "canvas" ? "Business model" : item === "flow" ? "Flow of work" : "Call questions"}</button>)}</div>
-    {tab === "canvas" ? <><div className="legend"><Pill tone="known">Client stated</Pill><span>the client’s own words</span><Pill tone="inferred">Public research</Pill><span>source-linked, not client-verified</span><Pill tone="assumed">Advisor note</Pill><span>hypothesis</span><Pill tone="missing">Missing</Pill><span>required gap</span></div>{openAIUsed ? <div className="research-source-note"><Icon name="spark" size={17} /><span><strong>OpenAI web search used</strong>{research?.providerModel} · {research?.sourceCount ?? 0} public source(s) retained</span></div> : research?.providerStatus === "failed" ? <div className="research-source-note warning"><Icon name="info" size={17} /><span><strong>Web search was unavailable</strong>Deterministic website research was retained; no claims were invented.</span></div> : null}<p className="canvas-origin"><Icon name={canvas ? "check" : "info"} size={15} />{canvas ? "Showing the canonical Canvas, including client-stated corrections captured on the call." : "No committed Canvas yet — showing first-pass public research facts only."}</p><div aria-label="Business Model Canvas" className="canvas">{canvasBlocks.map(({ title, area }) => { const blockClaims = claimsForBlock(canvas, research?.facts ?? [], title); return <article className={`canvas-block canvas-${area}`} key={area}><h3>{title}</h3><ul>{blockClaims.length ? blockClaims.map((claim) => <li className={claim.provenance === "client-stated" ? "client-stated" : ""} key={`${claim.statement}${claim.sourceUrl ?? ""}`}><span>{claim.statement}</span><Pill tone={evidenceTone[claim.provenance] ?? "neutral"}>{evidenceLabel[claim.provenance] ?? claim.provenance}</Pill></li>) : <li><span>Client confirmation needed for {title.toLowerCase()}.</span><Pill tone="missing">Missing</Pill></li>}</ul></article>; })}</div></> : null}
+    {tab === "canvas" ? <><div className="legend"><Pill tone="known">Client stated</Pill><span>the client’s own words</span><Pill tone="inferred">Public research</Pill><span>source-linked, not client-verified</span><Pill tone="assumed">Advisor note</Pill><span>hypothesis</span><Pill tone="missing">Missing</Pill><span>required gap</span></div>{openAIUsed ? <div className="research-source-note"><Icon name="spark" size={17} /><span><strong>OpenAI web search used</strong>{research?.providerModel} · {research?.sourceCount ?? 0} public source(s) retained</span></div> : research?.providerStatus === "failed" ? <div className="research-source-note warning"><Icon name="info" size={17} /><span><strong>Web search was unavailable</strong>Deterministic website research was retained; no claims were invented.</span></div> : null}<p className="canvas-origin"><Icon name={canonicalCanvas ? "check" : "info"} size={15} />{firstPass ? "Pre-call draft — public research only. The client has not corrected it yet." : canonicalCanvas ? "Showing the canonical Canvas, including client-stated corrections captured on the call." : "No committed Canvas yet — showing first-pass public research facts only."}</p><div aria-label="Business Model Canvas" className="canvas">{canvasBlocks.map(({ title, area }) => { const blockClaims = claimsForBlock(canonicalCanvas, research?.facts ?? [], title); return <article className={`canvas-block canvas-${area}`} key={area}><h3>{title}</h3><ul>{blockClaims.length ? blockClaims.map((claim) => <li className={claim.provenance === "client-stated" ? "client-stated" : ""} key={`${claim.statement}${claim.sourceUrl ?? ""}`}><span>{claim.statement}</span><Pill tone={evidenceTone[claim.provenance] ?? "neutral"}>{evidenceLabel[claim.provenance] ?? claim.provenance}</Pill></li>) : <li><span>Client confirmation needed for {title.toLowerCase()}.</span><Pill tone="missing">Missing</Pill></li>}</ul></article>; })}</div></> : null}
     {tab === "flow" ? <div className="flow-panel"><div className="legend"><p className="eyebrow">Flow to trace live</p><Pill tone="inferred">Public research</Pill><Pill tone="assumed">Advisor note</Pill><Pill tone="missing">Gap</Pill><span>no step is client-confirmed until the client traces a real case</span></div>
       {flow.length ? <ol className="value-flow">{flow.map((step) => <li key={step.id}><header><span>{step.order}</span><div><strong>{step.name}</strong><small>{step.description}</small></div><Pill tone={evidenceTone[step.evidenceStatus] ?? "neutral"}>{evidenceLabel[step.evidenceStatus] ?? step.evidenceStatus}</Pill></header>
         <dl><div><dt>Actor</dt><dd>{step.actor || "Not established"}</dd></div><div><dt>System</dt><dd>{step.system || "Not established"}</dd></div><div><dt>Input</dt><dd>{step.input || "Not established"}</dd></div><div><dt>Output</dt><dd>{step.output || "Not established"}</dd></div></dl>
@@ -2517,7 +2365,7 @@ function PracticeTour(props: {
     <AdvisorOnly hidden={false} label="Advisor only · practice walkthrough">
       <div className="tour-slim">
         <span className="tour-slim-step"><Icon name="shield" size={13} />{done ? "Complete" : `Step ${index + 1} of ${total}`}</span>
-        <strong className="tour-slim-title">{done ? "That is the whole arc." : stop.title}</strong>
+        <strong className="tour-slim-title">{done ? "That’s the whole loop." : stop.title}</strong>
         {done ? null : <span className="tour-slim-nav">
           <button aria-label="Previous step" disabled={index === 0} onClick={props.onPrevious} type="button"><Icon name="back" size={15} /></button>
           <button aria-label={last ? "Finish the walkthrough" : "Next step"} onClick={last ? props.onFinish : props.onNext} type="button"><Icon name={last ? "check" : "arrow"} size={15} /></button>
@@ -2540,7 +2388,7 @@ function PracticeTour(props: {
         {/* Pinned: the step, the title and the navigation stay reachable however long the body runs. */}
         <header className="tour-head">
           <div className="tour-head-top"><p className="eyebrow">{done ? "Practice walkthrough · complete" : stop.stage}</p>{tools}</div>
-          <h2>{done ? "That is the whole arc." : stop.title}</h2>
+          <h2>{done ? "That’s the whole loop." : stop.title}</h2>
           {done ? null : <>
             <div className="tour-head-meter">
               <button aria-expanded={listOpen} className="tour-count" onClick={() => setListOpen(!listOpen)} type="button">Step {index + 1} of {total}<Icon name="chevron" size={13} /></button>
@@ -2559,9 +2407,8 @@ function PracticeTour(props: {
             </button>
           </li>)}</ol> : null}
           {done ? <>
-            <p className="tour-lead">You have now seen every screen you will use with a real client — and nothing left this app without a second, deliberate press.</p>
-            <p className="tour-lead">Carry the shape, not the detail: one constraint, one smallest change, one number from the client’s own record, one name against it. If your first real call gets you a traced flow, a step everything waits at, and a name — the call worked.</p>
-            <p className="tour-note"><Icon name="info" size={15} />{PRACTICE_CLIENT} stays here as long as you want. Walk it again, reset it, or delete it — it can always be rebuilt exactly as it was.</p>
+            <p className="tour-lead">Company in, research out. Call, transcript in, diagnosis out. You have now seen every screen it takes.</p>
+            <p className="tour-note"><Icon name="info" size={15} />{PRACTICE_CLIENT} stays here as long as you want — walk it again, reset it, or delete it.</p>
             <div className="tour-actions">
               <Button icon="refresh" onClick={props.onRestart} variant="secondary">Walk it again</Button>
               <Button disabled={Boolean(props.busy)} onClick={props.onReset} variant="secondary">{props.busy === "reset" ? "Resetting…" : "Reset practice data"}</Button>
@@ -2571,9 +2418,8 @@ function PracticeTour(props: {
           </> : <>
             {!props.onScreen ? <p className="tour-note" role="status"><Icon name="info" size={15} />You have moved off this step. <button className="call-link" onClick={() => props.onJump(index)} type="button">Take me back</button>, or keep looking around — the walkthrough will wait.</p> : null}
             <div className="tour-body">
-              <section><p className="eyebrow">On this screen</p><p>{stop.looking}</p></section>
-              <section><p className="eyebrow">With a real client</p><p>{stop.real}</p></section>
-              <section><p className="eyebrow">Worth a look</p><ul>{stop.watch.map((line) => <li key={line}>{line}</li>)}</ul></section>
+              <p>{stop.blurb}</p>
+              <ul>{stop.points.map((line) => <li key={line}>{line}</li>)}</ul>
             </div>
             <p className="tour-foot"><Icon name="info" size={13} />Wander anywhere — your place is saved. Collapse this to a bar when you want the screen to yourself.</p>
           </>}
@@ -2607,26 +2453,6 @@ function GlossaryPanel({ variant }: { variant: "rail" | "page" }) {
       </li>;
     })}</ul>
   </div>;
-}
-
-/** The pre-call briefing. Read once, feel ready. Advisor guidance — it is not in the client brief. */
-function CallBriefing() {
-  return <details className="briefing" open>
-    <summary><span className="briefing-mark"><Icon name="people" size={19} /></span><span><strong>How this call goes</strong><small>The arc of the hour, the three things you must leave with, and what to do if you get lost.</small></span><Icon name="chevron" size={15} /></summary>
-    <div className="briefing-body">
-      <section><p className="eyebrow">The arc of the hour</p>
-        <ol className="briefing-arc">{callArc.map(([when, title, detail]) => <li key={title}><b>{when}</b><div><strong>{title}</strong><span>{detail}</span></div></li>)}</ol>
-      </section>
-      <section><p className="eyebrow">Leave with these three things</p>
-        <div className="briefing-musts">{mustLeaveWith.map(([title, detail], index) => <article key={title}><b>{index + 1}</b><strong>{title}</strong><p>{detail}</p></article>)}</div>
-        <p className="briefing-note"><Icon name="check" size={15} />Get all three and the call worked. Everything else is a bonus, and the transcript will catch what you missed.</p>
-      </section>
-      <section><p className="eyebrow">If you get lost</p>
-        <ul className="briefing-lost">{ifYouGetLost.map((line) => <li key={line}>{line}</li>)}</ul>
-      </section>
-      <p className="briefing-note"><Icon name="shield" size={15} />You are not expected to have the answer on the call. Your job is to get the flow, the waiting, and a name. The diagnosis happens afterwards with the transcript in front of you.</p>
-    </div>
-  </details>;
 }
 
 /**
@@ -2724,7 +2550,6 @@ function Prepare({ briefSent, call1At, call2At, contact, email, onBack, onCall, 
   return <section className="guided document-page"><Back onClick={onBack}>Research review</Back><PageHead eyebrow="Prepare · Client-facing brief" side={<Pill tone={briefSent ? "success" : "assumed"}>{briefSent ? "Send intent recorded" : "Draft · no send intent"}</Pill>} title="Put the right facts within reach.">Review exactly what the client will see. Internal research, questions, and constraint hypotheses stay private.</PageHead>
     {/* Advisor preparation. Never part of the client brief and never sent — see AdvisorOnly. */}
     <AdvisorOnly hidden={false} label="Advisor only · not in the client brief, not sent to anyone">
-      <CallBriefing />
       <details className="briefing glossary-study"><summary><span className="briefing-mark"><Icon name="document" size={19} /></span><span><strong>Plain English for the words we use</strong><small>Constraint, throughput, cycle time, baseline and the rest — with the line to say if a client asks.</small></span><Icon name="chevron" size={15} /></summary>
         <div className="briefing-body"><GlossaryPanel variant="page" /></div>
       </details>
