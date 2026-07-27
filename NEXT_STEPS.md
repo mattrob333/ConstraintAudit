@@ -67,6 +67,13 @@ record.
 Local: create `.env.local` beside `package.json` (gitignored, never committed).
 Production: the same names via `wrangler secret put`.
 
+The **Settings** screen in the app now shows per-provider status, the exact
+`wrangler secret put` command for each, and a **Test** button that makes a real
+verification call so you can confirm a key works before relying on it. Keys are
+never entered in the app — they stay in server secrets. Connecting your own
+Google Sheet as the CRM is self-serve there too; see
+`docs/CONNECT_A_GOOGLE_SHEET.md`.
+
 | Key | Without it | With it |
 | --- | --- | --- |
 | **`OPENAI_API_KEY`** | Research is keyword extraction from the website; transcript synthesis is regex pattern matching | Source-cited web research, a reasoned value flow and discovery questions, and model-assisted transcript synthesis. **This is the one that makes the product what it claims to be.** |
