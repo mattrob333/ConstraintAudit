@@ -11,9 +11,9 @@ test("build contains the Tier 4 audit entry point", async () => {
 
   assert.match(layout, /title:\s*"Tier 4 Advisor Cockpit"/);
   assert.match(cockpit, /Fresh engagement/);
-  assert.match(cockpit, /External migration/);
-  assert.match(cockpit, /Update an engagement/);
-  assert.match(cockpit, /Deterministic local mode is ready/);
+  assert.match(cockpit, /Bring in existing work/);
+  assert.match(cockpit, /Continue an engagement/);
+  assert.match(cockpit, /Works without setup/);
   assert.doesNotMatch(cockpit, /SkeletonPreview|Your site is taking shape|react-loading-skeleton/);
 });
 

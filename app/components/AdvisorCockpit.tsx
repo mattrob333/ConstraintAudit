@@ -662,13 +662,13 @@ const practiceTour: TourStop[] = [
     stage: "Step one · Client",
     title: "Where every engagement starts",
     looking:
-      "The intake form, holding what was captured for Meridian Millwork — a twenty-two person architectural millwork shop that builds custom casework and store fixtures for commercial contractors. A company, a website, one named person and an email address is genuinely all it takes to begin.",
+      "The intake form, already filled in for Meridian Millwork — a 22-person shop that builds custom cabinetry and store fixtures. A company, a website, one contact, and an email is all it takes to begin.",
     real:
-      "With a real client you would fill this in during or just after the first phone call and press “Research this business”. Everything downstream — the questions, the brief, the diagnosis — hangs off that one press, so it is worth getting the contact's name and role right.",
+      "Fill this in right after your first phone call and press “Research this business”. Everything that follows — the questions, the brief, the diagnosis — builds on it, so get the contact's name and role right.",
     watch: [
-      "The contact's name and role are their own fields, not a line in the notes. The audit reuses them later as the named human owner of whatever gets prescribed.",
-      "The email is required because the readiness brief has nowhere to go without one.",
-      "Nothing is sent anywhere by this screen. Intake is private, and research runs on public sources only.",
+      "The contact's name and role later become the named owner of whatever gets prescribed.",
+      "The email is where the pre-call brief goes — that is why it is required.",
+      "Nothing on this screen is sent anywhere. Research uses public sources only.",
     ],
   },
   {
@@ -678,13 +678,13 @@ const practiceTour: TourStop[] = [
     stage: "Step two · Research",
     title: "What we learned without asking",
     looking:
-      "The Business Model Canvas — one page describing how the business works. It was drafted from Meridian's public website before anyone spoke to them, and then corrected by what Dana and Rosa actually said on the two calls. Green is the client's own words. Everything else is public research or an honest gap.",
+      "A one-page picture of how the business works, drafted from Meridian's public website before anyone spoke to them, then corrected by what Dana and Rosa said on the calls. Green is the client's own words. Everything else is public research or an honest gap.",
     real:
-      "You would read this the day before the call and hunt for the blocks that look thin. The first pass is not trying to be right — it is trying to be specific enough to be corrected, because a correction is the most valuable thing you can get out of an hour.",
+      "Read this the day before the call and look for the thin blocks. It does not need to be right — it needs to be specific enough for the client to correct, because a correction is the most valuable thing an hour can produce.",
     watch: [
-      "Under Value Propositions, “quote turnaround is about nine days” is marked Client stated. It replaced the 48-hour promise on the website — corrected on the record, not quietly overwritten.",
-      "Cost Structure had nothing public behind it at all until Dana said “payroll is the whole thing”. A block with no public source is normal and is not a failure.",
-      "No block is ever filled in with a plausible guess. Where nothing is known it says Missing and stays Missing.",
+      "Under Value Propositions, “quote turnaround is about nine days” is marked Client stated — it corrected the website's 48-hour promise, on the record.",
+      "Cost Structure was empty until Dana said “payroll is the whole thing”. An empty block is normal, not a failure.",
+      "Where nothing is known it says Missing. No block is ever filled with a plausible guess.",
     ],
   },
   {
@@ -694,13 +694,13 @@ const practiceTour: TourStop[] = [
     stage: "Step two · Research",
     title: "How the work actually moves",
     looking:
-      "The value flow: the route one job takes from a contractor's email to installed millwork. Six steps, each with the person who does it, the system it lives in, and a question written for this business that you can ask on the call to confirm it.",
+      "The route one job takes from a contractor's email to installed millwork, in six steps — each with who does it, where it lives, and a ready-made question to confirm it on the call.",
     real:
-      "You would walk this on the call one step at a time and invite the client to tell you where you have it wrong. Being slightly wrong out loud is a technique, not an accident — people correct a specific claim far more readily than they answer an open question.",
+      "Walk this on the call one step at a time and invite the client to correct you. Being slightly wrong out loud is a technique — people correct a specific claim far more readily than they answer an open question.",
     watch: [
-      "Step 2, Quote pricing, is marked as a gap. Nothing public said who prices a job — and that step turned out to be the entire engagement.",
-      "Every step carries its own confirmation question, so you are never improvising the next thing to say.",
-      "Nothing here is client-confirmed until a client traces a real job through it. The labels are honest about that.",
+      "Step 2, Quote pricing, is marked as a gap — nothing public said who prices a job. That gap turned out to be the entire engagement.",
+      "Every step has its own confirmation question, so you never improvise the next thing to say.",
+      "No step counts as confirmed until the client traces a real job through it.",
     ],
   },
   {
@@ -710,13 +710,13 @@ const practiceTour: TourStop[] = [
     stage: "Step two · Research",
     title: "The questions the research produced",
     looking:
-      "Ten discovery questions grouped by what they hunt for, each tied to a Canvas block or a flow step, each saying plainly what was found publicly so you never assert something you only assumed. Beneath them, three competing hypotheses about where the constraint is — with the condition that would kill each one.",
+      "Ten discovery questions built from the research gaps, each showing what was found publicly so you never assert a guess. Beneath them, three competing hypotheses about where the constraint is.",
     real:
-      "You would skim this the morning of the call. There is nothing to memorise: the guided call puts these on screen one at a time, in order, with the follow-ups beside them.",
+      "Skim this the morning of the call — there is nothing to memorise. The guided call puts each question on screen, in order, with follow-ups beside it.",
     watch: [
-      "Every question exists because of a specific gap in the research. There is no generic script here — a different company produces a different list.",
-      "The hypotheses are internal and are never read to a client as fact. The job is to arrive with three and leave with one.",
-      "Notice how many are marked Required. Those are the ones the diagnosis cannot be built without.",
+      "Every question exists because of a specific gap. A different company produces a different list — there is no generic script.",
+      "The hypotheses are yours alone, never read to a client as fact. Arrive with three, leave with one.",
+      "The ones marked Required are what the diagnosis cannot be built without.",
     ],
   },
   {
@@ -725,13 +725,13 @@ const practiceTour: TourStop[] = [
     stage: "Step three · Prepare",
     title: "The brief the client sees",
     looking:
-      "On the right, the pre-call readiness brief exactly as the client receives it. Above it, the advisor briefing that never leaves this app: the arc of the hour, the three things you must leave with, and what to say if you lose the thread.",
+      "On the right, the pre-call brief exactly as the client receives it. Above it, your private briefing: the shape of the hour, the three things you must leave with, and what to say if you lose the thread.",
     real:
-      "You would send this a few days ahead so the client has rough numbers within reach and the right people in the room. Approving it records a reviewed send intent — the email itself is a second, deliberate step you take from Reviewed actions.",
+      "Send the brief a few days ahead so the client has rough numbers handy and the right people in the room. Approving it here only queues the send — the email itself is a second, deliberate step in Reviewed actions.",
     watch: [
-      "The Canvas, your discovery questions and your constraint hypotheses are all excluded from the client's copy, on purpose.",
-      "The advisor briefing sits in a dashed box flagged “Advisor only”. That is the same boundary the call view uses, and it is worth reading once before your first real call.",
-      "The brief asks for approximate numbers. Sending a client hunting through spreadsheets before a call is the fastest way to lose the hour.",
+      "The Canvas, your questions, and your hypotheses are all left out of the client's copy, on purpose.",
+      "The dashed “Advisor only” box never reaches the client. Read it once before your first real call.",
+      "The brief asks for rough numbers only. Sending a client hunting through spreadsheets is the fastest way to lose the hour.",
     ],
   },
   {
@@ -740,13 +740,13 @@ const practiceTour: TourStop[] = [
     stage: "Step four · The discovery call",
     title: "The call, one question at a time",
     looking:
-      "The guided call. One question fills the screen so you can share it, and a coaching rail sits beside it that the client never sees: follow-ups written for this client, what to say when they do not know, how to steer back from a tangent, answers to predictable pushback, and plain English for every bit of jargon.",
+      "The guided call. One question fills the screen so you can share it. Beside it, a coaching rail the client never sees: follow-ups, answers to pushback, and plain English for every bit of jargon.",
     real:
-      "You would open this at the top of the hour, confirm recording consent out loud, and work down the questions. Answers are captured as “That’s right”, “Correct it”, or “We don’t know yet” — and an “I don’t know” gets flagged as a gap to chase rather than quietly passing as an answer.",
+      "Open this at the top of the hour, confirm recording consent out loud, and work down the questions. “We don't know yet” gets flagged as a gap to chase — it never quietly passes as an answer.",
     watch: [
-      "Press Escape, or tap the bar at the top of this screen, and every word of the coaching vanishes from the page. Not hidden — gone. Try it now, before you ever need it live.",
-      "The practice bar above does not vanish with it. That is deliberate: the one thing that must never disappear is the warning that this is invented data.",
-      "You are not expected to diagnose anything on the call. Your job is the flow, the waiting, and a name. The diagnosis happens afterwards with the transcript in front of you.",
+      "Press Escape now. Every word of coaching vanishes — not hidden, gone. Practice it before you ever need it live.",
+      "The practice bar above stays. The one thing that must never disappear is the warning that this data is invented.",
+      "You are not there to diagnose on the call. Get the flow, the waiting, and a name — the diagnosis comes later, from the transcript.",
     ],
   },
   {
@@ -756,13 +756,13 @@ const practiceTour: TourStop[] = [
     stage: "Step five · Evidence",
     title: "The call becomes evidence",
     looking:
-      "Where a recording turns into quotable evidence. Paste the text, upload the file, or pull it from Fireflies — always the full transcript rather than a summary, so that every finding can point back at a line somebody actually said.",
+      "Where the recording becomes quotable evidence. Paste the text, upload the file, or pull it from Fireflies — always the full transcript, never a summary, so every finding can point to a line somebody actually said.",
     real:
-      "You would do this the same afternoon, while you still remember the room. Consent has to be confirmed for this specific call before anything can be captured; the analyse button stays shut otherwise, and it is recorded separately for call one and call two.",
+      "Do this the same afternoon, while you still remember the room. Consent must be confirmed for this specific call first — the analyse button stays locked otherwise.",
     watch: [
-      "Meridian's two transcripts are already processed. The sentence the whole engagement rests on is Rosa's, at 04:43: “It is more like 9 days per quote.”",
-      "Speaker roles matter more than they look. Your own lines are recorded as advisor notes and can never become client evidence, however quotable they sound.",
-      "A summary would have lost the nine days. Dana said four or five; the log said nine. Only the full transcript carries the correction.",
+      "The sentence the whole engagement rests on is Rosa's, at 04:43: “It is more like 9 days per quote.”",
+      "Your own lines are recorded as advisor notes. They can never become client evidence, however quotable they sound.",
+      "A summary would have lost the nine days — Dana said four or five. Only the full transcript carries the correction.",
     ],
   },
   {
@@ -771,13 +771,13 @@ const practiceTour: TourStop[] = [
     stage: "Step six · Synthesis",
     title: "What the transcript actually supports",
     looking:
-      "The evidence diff. Every client-attributed line that carries weight, with the speaker and the timestamp, plus the baseline status, the open gaps, and one provisional constraint candidate.",
+      "Every client quote that carries weight, with speaker and timestamp — plus the baseline, the open gaps, and one proposed constraint.",
     real:
-      "You would read this line by line and argue with it where it is wrong. It is a proposal, not a verdict, and the tool would rather show you nothing than fill the screen with something the transcript does not support.",
+      "Read it line by line and argue with it where it is wrong. It is a proposal, not a verdict — the tool would rather show nothing than something the transcript does not support.",
     watch: [
-      "Baseline reads Confirmed — because Rosa read it off her own log, not because anything here assumed a number.",
-      "The candidate is one constraint. Not a ranked list of nine opportunities, and not a score.",
-      "Anything the analysis could not tie to a real quote is discarded and shown as discarded. A silent drop would be worse than a visible rejection.",
+      "Baseline reads Confirmed because Rosa read it off her own log — not because anything was assumed.",
+      "One constraint. Not a ranked list of nine opportunities, and not a score.",
+      "Anything that could not be tied to a real quote is shown as discarded, never silently dropped.",
     ],
   },
   {
@@ -786,12 +786,12 @@ const practiceTour: TourStop[] = [
     stage: "Step six · Checkpoint",
     title: "The first thing you have to approve",
     looking:
-      "The same screen, at its bottom edge. “Approve Canvas commit” is a human checkpoint: nothing the transcript proposed is written into the canonical Canvas until a person says so.",
+      "The bottom of this same screen. “Approve Canvas commit” is a human checkpoint: nothing is written into the official Canvas until you say so.",
     real:
-      "You would press this only after reading the quotes above it. It approves the evidence and the Canvas — it does not approve the diagnosis. That is a separate decision, later, after a second call with the client.",
+      "Press it only after reading the quotes above it. It approves the evidence — not the diagnosis. That is a separate decision, after a second call with the client.",
     watch: [
-      "Two approvals, two calls, in that order. It is the main thing standing between a confident guess and a client-facing finding.",
-      "If you approve this and later change your mind, the evidence is still all here with names and timestamps against it. Nothing becomes anonymous.",
+      "Two approvals, two calls, in that order. That is what stands between a confident guess and a client-facing finding.",
+      "If you change your mind later, every quote is still here with a name and timestamp against it.",
     ],
   },
   {
@@ -800,13 +800,13 @@ const practiceTour: TourStop[] = [
     stage: "Step seven · The findings call",
     title: "Reconcile first. Reveal second.",
     looking:
-      "The second call, in two halves. First you read the business back to them and let them correct you. Only then — in part B — do you show the constraint, the prescription, the metric and the owner.",
+      "The second call, in two halves. First read the business back to them and let them correct you. Only then show the constraint, the prescription, the metric and the owner.",
     real:
-      "You would share your screen and walk the client through the client-facing version of this. Press “Enter presentation view” and look at it: one section per screen, their own words quoted exactly, nothing internal on show.",
+      "Share your screen and press “Enter presentation view”: one section per screen, their own words quoted exactly, nothing internal on show.",
     watch: [
-      "Go into the presentation view now. The walkthrough disappears exactly like the coaching does — and the practice bar stays. That is the guarantee: you cannot screen-share this believing it is real.",
-      "Dana's correction about who draws shop drawings came out of this half of the call. Reconciliation is where a finding gets stress-tested, and it is the half people skip.",
-      "Nothing numeric can be claimed while a baseline is missing. Here it is confirmed, so the numbers are allowed.",
+      "Try the presentation view now. The walkthrough disappears — and the practice bar stays. You cannot screen-share this believing it is real.",
+      "Dana's correction about who draws shop drawings came out of the read-back half. It is the half people skip, and it is where a finding gets stress-tested.",
+      "Numbers are only allowed here because the baseline is confirmed. No baseline, no numeric claims.",
     ],
   },
   {
@@ -815,13 +815,13 @@ const practiceTour: TourStop[] = [
     stage: "Step seven · Checkpoint",
     title: "Approving the diagnosis",
     looking:
-      "The second and final checkpoint. The constraint, the prescription, the evidence count, the Canvas block and the named human owner, with the approval beneath them.",
+      "The second and final checkpoint: the constraint, the prescription, the evidence, and the named human owner, with the approval beneath them.",
     real:
-      "You cannot approve without a named person and a supported candidate. For Meridian that person is Dana Whitfield, Owner — she said on the record that a bad number off her own price book is hers and not Rosa's, which is what ownership actually means.",
+      "You cannot approve without a named person. For Meridian that is Dana Whitfield, Owner — she said on the record that a bad price-book number is hers, not Rosa's. That is what ownership means.",
     watch: [
-      "Nine days is a client number from a client log. No delta can ever be claimed against a baseline the tool invented, because it will not invent one.",
-      "The prescription is deliberately small: write down the six or seven assemblies she already prices the same way every time. No hire, no software, no new system, and she can stop using it on any Monday.",
-      "The predicted next constraint — shop drawings — is named here, before the sprint, so that when it shows up nobody thinks the sprint failed.",
+      "Nine days is a client number from a client log. The tool will not invent a baseline, so no delta can ever rest on one.",
+      "The prescription is deliberately small: write down the six or seven assemblies she already prices the same way. No hire, no software, and she can stop any Monday.",
+      "The next constraint — shop drawings — is predicted here, before the sprint, so when it shows up nobody thinks the sprint failed.",
     ],
   },
   {
@@ -830,12 +830,12 @@ const practiceTour: TourStop[] = [
     stage: "Step eight · Deliver",
     title: "The documents",
     looking:
-      "Six documents generated from the approved record: the diagnosis package, the audit report, a fixed-sprint proposal, an implementation roadmap, a developer specification, and a roles map. Every one carries the same evidence labels and the same named owner.",
+      "Six documents generated from the approved record — diagnosis, audit report, sprint proposal, roadmap, developer spec, and roles map. Each carries the same evidence labels and the same named owner.",
     real:
-      "You would generate the suite, read it, then queue the ones the client should see. Sending is two steps on purpose — “Send to client” queues a reviewed intent and nothing leaves this app until you approve it in Reviewed actions, so nothing can go out mid-call by accident.",
+      "Generate the suite, read it, then queue what the client should see. Sending is two steps on purpose: “Send to client” only queues it, and nothing leaves this app until you approve it in Reviewed actions.",
     watch: [
-      "None of these documents contains a number nobody said. The proposal shows the formula rather than a projected return.",
-      "Every practice document says so on its own face. Open one from the Documents menu and read the last line.",
+      "No document contains a number nobody said. The proposal shows the formula rather than a projected return.",
+      "Open any document from the Documents menu and read the last line — every practice document says on its own face that it is fictional.",
       "The roles map is the one clients react to hardest. It is where “everything waits on one person” stops being a feeling.",
     ],
   },
@@ -847,10 +847,10 @@ const practiceTour: TourStop[] = [
     looking:
       "The prescription turned into five tasks with owners, and a measurement clock started against the confirmed nine-day baseline.",
     real:
-      "You would activate this in front of the client, agree the review date, and then largely get out of the way. Meridian's sprint cost Dana two evenings — one to write the price book, one to sit with Rosa while she used it.",
+      "Activate it in front of the client, agree the review date, then largely get out of the way. Meridian's sprint cost Dana two evenings — one to write the price book, one to sit with Rosa while she used it.",
     watch: [
-      "The last task is the kill condition in the client's own words: if quotes go out in three days and the win rate does not move, speed was never the constraint.",
-      "Agreeing how you would be proved wrong, in writing, before you start, is the whole discipline. In four weeks one of you will be tempted to explain the number away.",
+      "The last task is the kill condition, in the client's own words: if quotes go out in three days and the win rate does not move, speed was never the constraint.",
+      "Agreeing in writing, before you start, how you would be proved wrong is the whole discipline.",
       "Nothing here is scheduled or emailed externally. The sprint lives in the record.",
     ],
   },
@@ -860,13 +860,13 @@ const practiceTour: TourStop[] = [
     stage: "Step ten · Operate",
     title: "What actually changed",
     looking:
-      "The before and the after. Nine days to three days — a delta of minus six, read as an improvement because shorter elapsed time is better, with the reason for that judgement written out beside it.",
+      "The before and the after. Nine days to three — read as an improvement because shorter is better, with the reason for that judgement written out beside it.",
     real:
-      "You would take the ending reading from the same log, kept the same way, and read it back to the client before recording it. If the log had changed, the comparison would be worthless and this screen would say so.",
+      "Take the ending reading from the same log, kept the same way, and read it back to the client before recording it. If the log had changed, the comparison would be worthless — and this screen would say so.",
     watch: [
-      "The browser never calculates any of this. Every number came back from the server, including the judgement about which direction is better — and you can correct that direction if it reads wrong.",
-      "The constraint moved to shop drawings, exactly where Dana predicted on the first call. That is what success looks like, not a fix that failed.",
-      "If no direction can be established, the result is shown as “not interpreted” rather than being quietly called a win.",
+      "Every number here came from the server, including which direction counts as better — and you can correct that direction if it reads wrong.",
+      "The constraint moved to shop drawings, exactly where Dana predicted. That is what success looks like — not a fix that failed.",
+      "If no direction can be established, the result reads “not interpreted” rather than being quietly called a win.",
     ],
   },
   {
@@ -875,9 +875,9 @@ const practiceTour: TourStop[] = [
     stage: "Step eleven · Catalog",
     title: "What you keep",
     looking:
-      "The reusable pattern: owner-held pricing knowledge behaving as a queue, the smallest change that moved it, and the measured result — attached to this engagement and no other.",
+      "The reusable pattern: one person's knowledge behaving as a queue, the smallest change that moved it, and the measured result — attached to this engagement and no other.",
     real:
-      "You would add where you think the pattern transfers and where it probably does not. The measured result is never detached from the engagement that produced it and never quoted to a prospect as a benchmark.",
+      "Add where you think the pattern transfers, and where it does not. The result stays tied to the engagement that produced it and is never quoted to a prospect as a benchmark.",
     watch: [
       "One engagement, one pattern. This is how a practice compounds without anybody inventing a case study.",
       "The next Meridian is not another millwork shop. It is any business where one person's judgement is the queue.",
@@ -2199,25 +2199,25 @@ function Home({ engagements, loading, onFresh, onMigration, onPractice, onResume
   const opening = practiceBusy === "open";
   return <section className="home">
     <div className="ambient one" /><div className="ambient two" />
-    <div className="home-copy"><Pill tone="known"><Icon name="spark" size={12} /> Guided throughput audit</Pill><h1>Find the constraint.<br />Measure what changes.</h1><p>Begin a new client conversation or continue an evidence-grounded audit. One constraint, one prescription, one metric, one named human owner.</p></div>
+    <div className="home-copy"><Pill tone="known"><Icon name="spark" size={12} /> Guided throughput audit</Pill><h1>Find the constraint.<br />Measure what changes.</h1><p>Every audit ends the same way: one constraint, one prescription, one metric, one named owner.</p></div>
     <div className="entry-grid">
-      <button className="entry primary" onClick={onFresh} type="button"><span className="entry-icon"><Icon name="plus" size={25} /></span><span><small>Start here</small><strong>Fresh engagement</strong><p>Give us a client starting point. We’ll research publicly, draft the operating model, and prepare the questions that matter.</p></span><b>Start a new audit <Icon name="arrow" size={17} /></b></button>
+      <button className="entry primary" onClick={onFresh} type="button"><span className="entry-icon"><Icon name="plus" size={25} /></span><span><small>Real client</small><strong>Fresh engagement</strong><p>Name the client. We research the business from public sources and prepare the questions for your call.</p></span><b>Start a new audit <Icon name="arrow" size={17} /></b></button>
       <div className="secondary-entries">
-        <button className="entry secondary" onClick={onMigration} type="button"><span className="entry-icon"><Icon name="upload" size={21} /></span><span><strong>External migration</strong><p>Bring an existing audit, transcript, notes, or workspace into the same guided structure.</p></span><Icon name="chevron" size={17} /></button>
-        <button className="entry secondary" onClick={onUpdate} type="button"><span className="entry-icon"><Icon name="refresh" size={21} /></span><span><strong>Update an engagement</strong><p>Continue from the current stage in your inspectable engagement registry.</p></span><Icon name="chevron" size={17} /></button>
+        <button className="entry secondary" onClick={onMigration} type="button"><span className="entry-icon"><Icon name="upload" size={21} /></span><span><strong>Bring in existing work</strong><p>Import a past audit, transcript, or notes into the same guided structure.</p></span><Icon name="chevron" size={17} /></button>
+        <button className="entry secondary" onClick={onUpdate} type="button"><span className="entry-icon"><Icon name="refresh" size={21} /></span><span><strong>Continue an engagement</strong><p>Pick up any client from their current stage.</p></span><Icon name="chevron" size={17} /></button>
         <button className="entry secondary practice-entry" disabled={opening} onClick={onPractice} type="button"><span className="entry-icon"><Icon name="people" size={21} /></span>
-          <span><small>No client involved</small><strong>{practiceProbe === "ready" && practiceExists ? "Practice mode · pick up where you left off" : "Practice mode · walk a worked example"}</strong>
-            <p>Walk one complete engagement end to end before you run a real one — the research, both calls, the diagnosis, the sprint and the measured result, with a short note at every screen explaining what you are looking at. The company is invented, nothing can reach a client, and you can reset it as often as you like.</p></span>
+          <span><small>{practiceProbe === "ready" && practiceExists ? "Pick up where you left off" : "New here? Start with this"}</small><strong>Practice mode</strong>
+            <p>Walk one complete engagement on an invented client — research, both calls, the diagnosis, the sprint, the measured result — with a short note explaining every screen. Nothing can reach a real client, and you can reset it anytime.</p></span>
           {opening ? <span className="entry-busy" role="status">Opening…</span> : <Icon name="chevron" size={17} />}</button>
       </div>
     </div>
     {practice.length ? <div className="practice-recent">
-      <div className="practice-recent-head"><PracticeMark /><span>Kept apart from your client work. Nothing in this record describes a real company.</span></div>
+      <div className="practice-recent-head"><PracticeMark /><span>Kept apart from your client work — nothing in it describes a real company.</span></div>
       <div className="recent-list">{practice.map((item) => <RecentRow item={item} key={item.id} onResume={onResume} />)}</div>
     </div> : null}
     <div className="recent-head"><div><p className="eyebrow">Continue the work</p><h2>Recent engagements</h2></div><button onClick={onUpdate} type="button">View all engagements <Icon name="arrow" size={14} /></button></div>
     <div className="recent-list">{loading ? <p className="registry-empty" role="status">Loading the engagement registry…</p> : null}{!loading && clients.length === 0 ? <p className="registry-empty">{practice.length ? "No client engagements yet — only the practice record above. Start a fresh engagement to create your first real one." : "No engagements yet. Start a fresh engagement to create the first record."}</p> : null}{clients.map((item) => <RecentRow item={item} key={item.id} onResume={onResume} />)}</div>
-    <div className="local-note"><Icon name="shield" size={18} /><span><strong>Deterministic local mode is ready.</strong> No OpenAI key or paid enrichment is required. External connectors run only after explicit setup and approval.</span></div>
+    <div className="local-note"><Icon name="shield" size={18} /><span><strong>Works without setup.</strong> No API keys required. External connections run only after you set them up and approve each one.</span></div>
   </section>;
 }
 
@@ -2238,14 +2238,14 @@ function Intake(props: {
   const busy = props.apiState === "saving" || props.fileState?.tone === "reading";
   return <section className="guided narrow"><Back onClick={props.onBack}>Entry options</Back><PageHead eyebrow="Client · Starting point" title="Who are we learning about?">Give us a starting point. We’ll research the business, draft a first-pass business model, and prepare the questions that matter for your call.</PageHead>
     <form className="intake-form" onSubmit={props.locked ? (event) => event.preventDefault() : props.onSubmit}>
-      <div className="field-row"><label><span>Company name <em>Required</em></span><input autoFocus onChange={(e) => props.onCompany(e.target.value)} placeholder="Acme Industrial" required value={props.company} /></label><label className="field-note"><span>Company website <em>Required</em></span><input autoCapitalize="none" inputMode="url" onBlur={(e) => props.onWebsite(normalizeWebsiteInput(e.target.value))} onChange={(e) => props.onWebsite(e.target.value)} placeholder="tier4advisors.com" spellCheck={false} type="text" value={props.website} /><small>Research runs on the public website, so we need one before we can start. Without it the engagement has nothing to research.</small></label></div>
-      <div className="field-row"><label><span>Primary contact name</span><input onChange={(e) => props.onContact(e.target.value)} placeholder="Maya Chen" value={props.contact} /></label><label className="field-note"><span>Primary contact role</span><input onChange={(e) => props.onRole(e.target.value)} placeholder="Chief Operating Officer" value={props.role} /><small>Stored as its own field, not buried in notes. Diagnosis approval reuses the name and role as the named human owner.</small></label></div>
+      <div className="field-row"><label><span>Company name <em>Required</em></span><input autoFocus onChange={(e) => props.onCompany(e.target.value)} placeholder="Acme Industrial" required value={props.company} /></label><label className="field-note"><span>Company website <em>Required</em></span><input autoCapitalize="none" inputMode="url" onBlur={(e) => props.onWebsite(normalizeWebsiteInput(e.target.value))} onChange={(e) => props.onWebsite(e.target.value)} placeholder="tier4advisors.com" spellCheck={false} type="text" value={props.website} /><small>Research starts from the public website, so we need one to begin.</small></label></div>
+      <div className="field-row"><label><span>Primary contact name</span><input onChange={(e) => props.onContact(e.target.value)} placeholder="Maya Chen" value={props.contact} /></label><label className="field-note"><span>Primary contact role</span><input onChange={(e) => props.onRole(e.target.value)} placeholder="Chief Operating Officer" value={props.role} /><small>This person becomes the named owner when the diagnosis is approved.</small></label></div>
       <label className="field-note"><span>Primary contact email <em>Required</em></span><input autoCapitalize="none" className={emailTouched && !emailValid ? "invalid" : ""} inputMode="email" onChange={(e) => props.onEmail(e.target.value)} placeholder="maya@acmeindustrial.com" spellCheck={false} type="email" value={props.email} />
-        <small>{emailTouched && !emailValid ? "That does not look like an email address yet." : "We’ll send the pre-call readiness brief here. Without it the brief has nowhere to go and cannot be sent."}</small></label>
+        <small>{emailTouched && !emailValid ? "That does not look like an email address yet." : "The pre-call brief is sent here."}</small></label>
       <label><span>What prompted this conversation? <small>Optional</small></span><textarea onChange={(e) => props.onContext(e.target.value)} placeholder="What is changing, stuck, or important right now?" rows={5} value={props.context} /></label>
       <label className="upload"><input accept={sourceAccept} onChange={(e) => props.onFile(e.target.files?.[0] ?? null)} type="file" /><span><Icon name="upload" size={20} /></span><span><strong>{props.fileName || "Add an email, notes, proposal, or prior document"}</strong><small>Optional · TXT, Markdown, CSV, DOCX, VTT, SRT, or JSON. PDF cannot be read — export it first.</small></span></label>
       {props.fileState ? <p className={`upload-state ${props.fileState.tone === "error" ? "error" : props.fileState.tone === "reading" ? "" : "ready"}`} role={props.fileState.tone === "error" ? "alert" : "status"}><Icon name={props.fileState.tone === "error" ? "info" : props.fileState.tone === "reading" ? "refresh" : "check"} size={15} />{props.fileState.message}</p> : null}
-      {props.locked ? <p className="upload-state ready" role="status"><Icon name="shield" size={15} />You are walking the practice example, so this form is here to read rather than to submit. Creating a new engagement is switched off until you leave practice mode — nothing you do on this screen can create a record.</p> : null}
+      {props.locked ? <p className="upload-state ready" role="status"><Icon name="shield" size={15} />This is the practice example, so the form is here to read, not submit. Leave practice mode to create a real engagement.</p> : null}
       <div className="action-row"><p><Icon name="shield" size={18} /><span><strong>Public sources first.</strong> Nothing is sent to the client, and paid enrichment never runs automatically.</span></p><Button disabled={props.locked || !props.company.trim() || !websiteValid || !emailValid || busy} icon="arrow" type="submit">{props.locked ? "Creating engagements is off in practice mode" : props.apiState === "saving" ? "Preparing research…" : "Research this business"}</Button></div>
     </form>
   </section>;
@@ -2278,7 +2278,7 @@ function Migration({ onBack, onStage }: {
     }
   }
   const blocked = fileState?.tone === "reading" || fileState?.tone === "error";
-  return <section className="guided narrow"><Back onClick={onBack}>Entry options</Back><PageHead eyebrow="Client · External migration" title="Bring the existing work with you.">Import an audit, transcript, notes, or workspace export. It is attached to the new engagement’s source register once you add the client anchor.</PageHead>
+  return <section className="guided narrow"><Back onClick={onBack}>Entry options</Back><PageHead eyebrow="Client · Existing work" title="Bring the existing work with you.">Import an audit, transcript, notes, or workspace export. It is attached to the new engagement’s sources once you add the client details.</PageHead>
     <div className="panel"><label className="upload large"><input accept={sourceAccept} onChange={(e) => choose(e.target.files?.[0] ?? null)} type="file" /><span><Icon name="upload" size={23} /></span><span><strong>{fileName || "Choose a source file"}</strong><small>TXT, Markdown, CSV, DOCX, VTT, SRT, or JSON. PDF cannot be read — export it first.</small></span></label>
       {fileState ? <p className={`upload-state ${fileState.tone === "error" ? "error" : fileState.tone === "reading" ? "" : "ready"}`} role={fileState.tone === "error" ? "alert" : "status"}><Icon name={fileState.tone === "error" ? "info" : fileState.tone === "reading" ? "refresh" : "check"} size={15} />{fileState.message}</p> : null}
       <div className="or"><span>or paste source material</span></div><label><span>Existing notes or transcript</span><textarea onChange={(e) => setText(e.target.value)} placeholder="Paste the material exactly as received…" rows={9} value={text} /></label>
@@ -2304,7 +2304,7 @@ function Engagements({ engagements, loading, onBack, onFresh, onResume }: { enga
     {!loading && engagements.length === 0 ? <p className="registry-empty">No engagement records were returned.</p> : null}
     {engagements.length ? <div className="table-wrap"><table className="registry"><thead><tr><th>Client</th><th>Stage</th><th>Status & next action</th><th>Updated</th><th /></tr></thead>
       {practice.length ? <tbody className="registry-practice">
-        <tr className="registry-group"><td colSpan={5}><PracticeMark /><span>Training records. Fictional companies, invented quotes, invented numbers — never client work and never quotable.</span></td></tr>
+        <tr className="registry-group"><td colSpan={5}><PracticeMark /><span>Training records — fictional companies, invented numbers. Never client work, never quotable.</span></td></tr>
         {practice.map(row)}
       </tbody> : null}
       <tbody>
@@ -2419,7 +2419,7 @@ function PracticeBar({ busy, onLeave, onReset }: {
 }) {
   return <div className="practice-bar">
     <strong><Icon name="shield" size={14} />Practice mode</strong>
-    <p><b>{PRACTICE_CLIENT} is not a real company.</b> Everything on screen — the quotes, the numbers, the documents — was written as training material. Never send, quote, paste or screen-share any of it as a client’s.</p>
+    <p><b>{PRACTICE_CLIENT} is not a real company.</b> Every quote, number, and document on screen is training material — never send or share any of it as a client’s.</p>
     <span className="practice-bar-actions">
       <button disabled={Boolean(busy)} onClick={onReset} type="button">{busy === "reset" ? "Resetting…" : "Reset practice data"}</button>
       <button disabled={Boolean(busy)} onClick={onLeave} type="button">Leave practice mode</button>
@@ -2462,9 +2462,9 @@ function PracticeTour(props: {
     <AdvisorOnly hidden={false} label="Advisor only · practice walkthrough, never shown to a client">
       <div className="tour-panel">
         <header><div><p className="eyebrow">Practice walkthrough · complete</p><h2>That is the whole arc.</h2></div></header>
-        <p className="tour-lead">You have now seen every screen you will use with a real client: what you can learn before you speak to them, how the call is driven, where the two approvals sit, what gets written, and how the result is measured. None of it needed an API key, and nothing left this app without a second, deliberate press.</p>
-        <p className="tour-lead">The thing worth carrying out of here is the shape, not the detail. One constraint. One smallest change. One number, taken from the client’s own record. One person’s name against it. If your first real call gets you a traced flow, a step everything waits at, and a name — the call worked.</p>
-        <p className="tour-note"><Icon name="info" size={15} />{PRACTICE_CLIENT} stays here for as long as you want it. Reset it and walk it again, leave it and start a real engagement, or delete it entirely — it can always be rebuilt exactly as it was.</p>
+        <p className="tour-lead">You have now seen every screen you will use with a real client — and nothing left this app without a second, deliberate press.</p>
+        <p className="tour-lead">Carry the shape, not the detail: one constraint, one smallest change, one number from the client’s own record, one name against it. If your first real call gets you a traced flow, a step everything waits at, and a name — the call worked.</p>
+        <p className="tour-note"><Icon name="info" size={15} />{PRACTICE_CLIENT} stays here as long as you want. Walk it again, reset it, or delete it — it can always be rebuilt exactly as it was.</p>
         <div className="tour-actions">
           <Button icon="refresh" onClick={props.onRestart} variant="secondary">Walk it again</Button>
           <Button disabled={Boolean(props.busy)} onClick={props.onReset} variant="secondary">{props.busy === "reset" ? "Resetting…" : "Reset practice data"}</Button>
@@ -2488,9 +2488,9 @@ function PracticeTour(props: {
             <b>{position + 1}</b><span><strong>{item.title}</strong><small>{item.stage}</small></span>
           </button>
         </li>)}</ol> : null}
-        {!props.onScreen ? <p className="tour-note" role="status"><Icon name="info" size={15} />You have moved off this step. <button className="call-link" onClick={() => props.onJump(index)} type="button">Take me back to step {index + 1}</button>, or carry on looking around — the walkthrough will wait.</p> : null}
+        {!props.onScreen ? <p className="tour-note" role="status"><Icon name="info" size={15} />You have moved off this step. <button className="call-link" onClick={() => props.onJump(index)} type="button">Take me back</button>, or keep looking around — the walkthrough will wait.</p> : null}
         <div className="tour-body">
-          <section><p className="eyebrow">What you are looking at</p><p>{stop.looking}</p></section>
+          <section><p className="eyebrow">On this screen</p><p>{stop.looking}</p></section>
           <section><p className="eyebrow">With a real client</p><p>{stop.real}</p></section>
           <section><p className="eyebrow">Worth a look</p><ul>{stop.watch.map((line) => <li key={line}>{line}</li>)}</ul></section>
         </div>
@@ -2500,7 +2500,7 @@ function PracticeTour(props: {
         </div>
         <footer className="tour-foot">
           <button onClick={props.onExplore} type="button"><Icon name="search" size={13} />Explore on my own</button>
-          <small>You can wander anywhere. This panel keeps your place and waits for you.</small>
+          <small>Wander anywhere — your place is saved.</small>
         </footer>
       </div>
     </AdvisorOnly>

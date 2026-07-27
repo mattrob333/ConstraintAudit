@@ -3123,7 +3123,7 @@ blockquote { margin: 0; }
 
 .practice-bar p {
   margin: 0;
-  font-size: .84rem;
+  font-size: .87rem;
   line-height: 1.4;
 }
 
@@ -3397,12 +3397,12 @@ blockquote { margin: 0; }
 .tour-body { display: grid; gap: 13px; }
 .tour-body section { display: grid; gap: 5px; }
 .tour-body .eyebrow { margin: 0; color: var(--forest); }
-.tour-body p { margin: 0; color: var(--ink); font-size: .88rem; line-height: 1.55; }
+.tour-body p { margin: 0; color: var(--ink); font-size: .93rem; line-height: 1.55; }
 
-.tour-body ul { display: grid; gap: 7px; margin: 0; padding: 0 0 0 17px; }
-.tour-body li { color: var(--muted); font-size: .85rem; line-height: 1.5; }
+.tour-body ul { display: grid; gap: 8px; margin: 0; padding: 0 0 0 17px; }
+.tour-body li { color: var(--muted); font-size: .9rem; line-height: 1.5; }
 
-.tour-lead { margin: 0; font-size: .89rem; line-height: 1.55; }
+.tour-lead { margin: 0; font-size: .93rem; line-height: 1.55; }
 
 .tour-note {
   display: flex;
