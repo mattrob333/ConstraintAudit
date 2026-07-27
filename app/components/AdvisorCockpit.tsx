@@ -1101,6 +1101,8 @@ export default function AdvisorCockpit() {
   const [approving, setApproving] = useState<"" | "canvas" | "diagnosis">("");
   const [contactBusy, setContactBusy] = useState(false);
   const [contactError, setContactError] = useState("");
+  const [emailBusy, setEmailBusy] = useState(false);
+  const [emailError, setEmailError] = useState("");
   /** Source-upload feedback for the Research screen's "Add a source" control. */
   const [researchSourceState, setResearchSourceState] = useState<{ tone: "reading" | "ready" | "error"; message: string } | null>(null);
   /** Migration source text carried from the Migration screen into the created engagement. */
@@ -1750,6 +1752,36 @@ export default function AdvisorCockpit() {
     }
   }
 
+  /**
+   * Sets the engagement's primary contact email from the Prepare screen. Intake no longer asks for it,
+   * so this is where the address is captured — on the screen that needs it, immediately before the
+   * readiness brief send intent is approved. It reuses the same `update_metadata` PATCH the Findings
+   * contact editor uses, and re-reads the version immediately before the write to avoid a stale reject.
+   */
+  async function saveEmail(nextEmail: string) {
+    if (!activeId) return setNotice("Action not completed: select or create an engagement first.");
+    if (emailBusy) return;
+    const trimmed = nextEmail.trim();
+    if (!looksLikeEmail(trimmed)) return setEmailError("That does not look like an email address yet.");
+    setEmailBusy(true); setEmailError("");
+    try {
+      const current = await api<{ engagement: BackendEngagement }>(`/api/engagements/${activeId}`);
+      const response = await save<{ engagement: BackendEngagement }>(`/api/engagements/${activeId}`, {
+        command: "update_metadata",
+        expectedVersion: current.engagement.version,
+        fields: { email: trimmed },
+      }, "PATCH");
+      const savedEmail = response.engagement.email ?? trimmed;
+      setEmail(savedEmail);
+      setEngagements((items) => items.map((item) => item.id === activeId ? { ...item, email: savedEmail } : item));
+      setNotice("Contact email saved to the engagement record. The brief can now be sent.");
+    } catch (reason) {
+      setEmailError(`The contact email could not be saved: ${reason instanceof Error ? reason.message : "unknown request failure"}`);
+    } finally {
+      setEmailBusy(false);
+    }
+  }
+
   /** Reads a chosen file and adds it to the engagement's source register from the Research screen. */
   async function addResearchSource(file: File) {
     if (!activeId) return setResearchSourceState({ tone: "error", message: "Open or create an engagement before adding a source." });
@@ -2042,7 +2074,7 @@ export default function AdvisorCockpit() {
       }} /> : null}
       {screen === "engagements" ? <Engagements engagements={engagements} loading={registryLoading} onBack={() => go("home")} onFresh={() => go("intake")} onResume={resume} /> : null}
       {screen === "research" ? <Research canvas={canvas} company={displayCompany} firstPass={practiceActive && tourMode !== "off"} focusTab={researchTab} onAddSource={addResearchSource} onBack={() => go("intake")} onPrepare={() => go("prepare")} research={researchResult} script={script} sourceState={researchSourceState} /> : null}
-      {screen === "prepare" ? <Prepare briefSent={briefSent} call1At={call1At} call2At={call2At} contact={contact || "Primary contact"} email={email} onBack={() => go("research")} onCall={() => { setCallIndex(0); go("call"); }} onSaveSchedule={saveSchedule} onSend={() => { setConfirmed(false); setConfirmSend(true); }} savedAt={scheduleSavedAt} scheduleBusy={scheduleBusy} scheduleError={scheduleError} /> : null}
+      {screen === "prepare" ? <Prepare briefSent={briefSent} call1At={call1At} call2At={call2At} contact={contact || "Primary contact"} email={email} emailBusy={emailBusy} emailError={emailError} onBack={() => go("research")} onCall={() => { setCallIndex(0); go("call"); }} onSaveEmail={saveEmail} onSaveSchedule={saveSchedule} onSend={() => { setConfirmed(false); setConfirmSend(true); }} savedAt={scheduleSavedAt} scheduleBusy={scheduleBusy} scheduleError={scheduleError} /> : null}
       {screen === "call" && callQuestion ? <Call answer={answers[callQuestion.id] ?? ""} company={displayCompany} consent={consent} gapError={gapError} gaps={gapFlags} gapSave={gapSave} generic={script.generic} index={Math.min(callIndex, script.questions.length - 1)} notes={notes[callQuestion.id] ?? ""} onAnswer={(value) => setAnswers((all) => ({ ...all, [callQuestion.id]: value }))} onConsent={setConsent} onExit={() => go("prepare")} onFlagGap={flagGap} onNext={() => callIndex < script.questions.length - 1 ? setCallIndex(callIndex + 1) : go("transcript")} onNotes={(value) => setNotes((all) => ({ ...all, [callQuestion.id]: value }))} onPresenting={setPresenting} onPrevious={() => setCallIndex(Math.max(0, callIndex - 1))} onSaveGaps={saveGaps} onUnflagGap={unflagGap} onValue={(value) => setValues((all) => ({ ...all, [callQuestion.id]: value }))} practice={practiceActive} presenting={presenting} question={callQuestion} scheduledAt={call1At} total={script.questions.length} value={values[callQuestion.id] ?? ""} /> : null}
       {screen === "transcript" ? <Transcript busy={analyzing} callNumber={transcriptCallNumber} company={displayCompany} fileError={fileError} fileName={fileName} fileReading={fileReading} fileSummary={fileSummary} method={transcriptMethod} onAnalyze={analyze} onBack={() => transcriptCallNumber === 2 ? go("findings") : go("call")} onFile={selectTranscriptFile} onMethod={setTranscriptMethod} onSpeakerRole={(speaker, roleValue) => setSpeakerRoles((prev) => ({ ...prev, [speaker]: roleValue }))} onText={setTranscript} ready={Boolean(transcriptFile)} scheduledAt={transcriptCallNumber === 1 ? call1At : call2At} speakerNote={speakerNote} speakerRoles={speakerRoles} speakers={detectedSpeakers} text={transcript} /> : null}
       {screen === "synthesis" ? <Synthesis busy={approving === "canvas"} onApprove={() => approve("canvas")} onBack={() => go("transcript")} synthesis={synthesisResult} /> : null}
@@ -2125,9 +2157,12 @@ function Intake(props: {
   onContact: (v: string) => void; onRole: (v: string) => void; onEmail: (v: string) => void;
   onContext: (v: string) => void; onFile: (file: File | null) => void; onSubmit: (e: FormEvent) => void;
 }) {
-  const emailValid = looksLikeEmail(props.email);
   const emailTouched = props.email.trim().length > 0;
-  // Research runs on the public website, so it is required here — the same way email is — rather than
+  // Intake asks for the minimum needed to start research: company + website. The contact block and
+  // the email are optional here — the email is collected on Prepare, immediately before the brief is
+  // sent, which is where it is actually needed. A typed address still has to look like one.
+  const emailValid = !emailTouched || looksLikeEmail(props.email);
+  // Research runs on the public website, so it is required here — rather than
   // letting the create→research flow 400 after the record already exists and tempt a duplicate submit.
   const websiteValid = props.website.trim().length > 0;
   const busy = props.apiState === "saving" || props.fileState?.tone === "reading";
@@ -2135,8 +2170,8 @@ function Intake(props: {
     <form className="intake-form" onSubmit={props.locked ? (event) => event.preventDefault() : props.onSubmit}>
       <div className="field-row"><label><span>Company name <em>Required</em></span><input autoFocus onChange={(e) => props.onCompany(e.target.value)} placeholder="Acme Industrial" required value={props.company} /></label><label className="field-note"><span>Company website <em>Required</em></span><input autoCapitalize="none" inputMode="url" onBlur={(e) => props.onWebsite(normalizeWebsiteInput(e.target.value))} onChange={(e) => props.onWebsite(e.target.value)} placeholder="tier4advisors.com" spellCheck={false} type="text" value={props.website} /><small>Research starts from the public website, so we need one to begin.</small></label></div>
       <div className="field-row"><label><span>Primary contact name</span><input onChange={(e) => props.onContact(e.target.value)} placeholder="Maya Chen" value={props.contact} /></label><label className="field-note"><span>Primary contact role</span><input onChange={(e) => props.onRole(e.target.value)} placeholder="Chief Operating Officer" value={props.role} /><small>This person becomes the named owner when the diagnosis is approved.</small></label></div>
-      <label className="field-note"><span>Primary contact email <em>Required</em></span><input autoCapitalize="none" className={emailTouched && !emailValid ? "invalid" : ""} inputMode="email" onChange={(e) => props.onEmail(e.target.value)} placeholder="maya@acmeindustrial.com" spellCheck={false} type="email" value={props.email} />
-        <small>{emailTouched && !emailValid ? "That does not look like an email address yet." : "The pre-call brief is sent here."}</small></label>
+      <label className="field-note"><span>Primary contact email</span><input autoCapitalize="none" className={emailTouched && !emailValid ? "invalid" : ""} inputMode="email" onChange={(e) => props.onEmail(e.target.value)} placeholder="maya@acmeindustrial.com" spellCheck={false} type="email" value={props.email} />
+        <small>{emailTouched && !emailValid ? "That does not look like an email address yet." : "Optional here — needed later, when the pre-call brief is sent."}</small></label>
       <label><span>What prompted this conversation? <small>Optional</small></span><textarea onChange={(e) => props.onContext(e.target.value)} placeholder="What is changing, stuck, or important right now?" rows={5} value={props.context} /></label>
       <label className="upload"><input accept={sourceAccept} onChange={(e) => props.onFile(e.target.files?.[0] ?? null)} type="file" /><span><Icon name="upload" size={20} /></span><span><strong>{props.fileName || "Add an email, notes, proposal, or prior document"}</strong><small>Optional · TXT, Markdown, CSV, DOCX, VTT, SRT, or JSON. PDF cannot be read — export it first.</small></span></label>
       {props.fileState ? <p className={`upload-state ${props.fileState.tone === "error" ? "error" : props.fileState.tone === "reading" ? "" : "ready"}`} role={props.fileState.tone === "error" ? "alert" : "status"}><Icon name={props.fileState.tone === "error" ? "info" : props.fileState.tone === "reading" ? "refresh" : "check"} size={15} />{props.fileState.message}</p> : null}
@@ -2539,14 +2574,20 @@ function CoachRail(props: {
   </aside>;
 }
 
-function Prepare({ briefSent, call1At, call2At, contact, email, onBack, onCall, onSaveSchedule, onSend, savedAt, scheduleBusy, scheduleError }: {
+function Prepare({ briefSent, call1At, call2At, contact, email, emailBusy, emailError, onBack, onCall, onSaveEmail, onSaveSchedule, onSend, savedAt, scheduleBusy, scheduleError }: {
   briefSent: boolean; call1At: string | null; call2At: string | null; contact: string; email: string;
+  emailBusy: boolean; emailError: string; onSaveEmail: (email: string) => void;
   onBack: () => void; onCall: () => void; onSend: () => void; savedAt: string; scheduleBusy: boolean; scheduleError: string;
   onSaveSchedule: (fields: { call1At?: string | null; call2At?: string | null }) => void;
 }) {
   const [call1, setCall1] = useState(toLocalInput(call1At));
   const [call2, setCall2] = useState(toLocalInput(call2At));
   const dirty = call1 !== toLocalInput(call1At) || call2 !== toLocalInput(call2At);
+  // Intake stopped asking for the contact email, so it is captured here — on the screen whose only
+  // external action needs it. The send action stays disabled until the record actually holds one.
+  const [draftEmail, setDraftEmail] = useState("");
+  const hasEmail = email.trim().length > 0;
+  const draftValid = looksLikeEmail(draftEmail);
   return <section className="guided document-page"><Back onClick={onBack}>Research review</Back><PageHead eyebrow="Prepare · Client-facing brief" side={<Pill tone={briefSent ? "success" : "assumed"}>{briefSent ? "Send intent recorded" : "Draft · no send intent"}</Pill>} title="Put the right facts within reach.">Review exactly what the client will see. Internal research, questions, and constraint hypotheses stay private.</PageHead>
     {/* Advisor preparation. Never part of the client brief and never sent — see AdvisorOnly. */}
     <AdvisorOnly hidden={false} label="Advisor only · not in the client brief, not sent to anyone">
@@ -2570,7 +2611,16 @@ function Prepare({ briefSent, call1At, call2At, contact, email, onBack, onCall, 
         <section><h3>Have these within reach</h3><ul><li>Monthly volumes such as bids, orders, invoices, or leads</li><li>Typical end-to-end turnaround time</li><li>What is currently waiting in queue</li><li>Anything declined, missed, or turned away last quarter</li><li>Rough cost or revenue figures you would stand behind</li></ul><blockquote>Approximate is fine. No reports, no spreadsheets—we just don’t want you hunting for numbers live.</blockquote></section>
         <section><h3>Recording disclosure</h3><p>With your permission, we’ll record and transcribe the session so we quote you accurately rather than paraphrasing you.</p></section>
       </article></div>
-    <div className="page-actions"><p><Icon name="info" size={16} />This records an approved send intent. It does not send email.</p>{briefSent ? <Button icon="arrow" onClick={onCall}>Enter client call</Button> : <Button icon="mail" onClick={onSend}>Approve send intent</Button>}</div>
+    {!hasEmail ? <div className="owner-editor missing">
+      <div className="owner-editor-head"><p className="eyebrow">Contact email</p><small>Add the contact’s email to send the brief. It is saved on the engagement record — nothing is sent by saving it.</small></div>
+      <div className="owner-editor-fields single">
+        <label><span>Primary contact email</span><input autoCapitalize="none" className={draftEmail.trim() && !draftValid ? "invalid" : ""} inputMode="email" onChange={(event) => setDraftEmail(event.target.value)} placeholder="maya@acmeindustrial.com" spellCheck={false} type="email" value={draftEmail} /></label>
+        <Button disabled={emailBusy || !draftValid} icon="check" onClick={() => onSaveEmail(draftEmail)} variant="secondary">{emailBusy ? "Saving…" : "Save email"}</Button>
+      </div>
+      {emailError ? <p className="upload-state error" role="alert"><Icon name="info" size={15} />{emailError}</p> : null}
+      {!emailError && draftEmail.trim() && !draftValid ? <p className="upload-state" role="status"><Icon name="info" size={15} />That does not look like an email address yet.</p> : null}
+    </div> : null}
+    <div className="page-actions"><p><Icon name="info" size={16} />This records an approved send intent. It does not send email.</p>{briefSent ? <Button icon="arrow" onClick={onCall}>Enter client call</Button> : <Button disabled={!hasEmail} icon="mail" onClick={onSend}>Approve send intent</Button>}</div>
   </section>;
 }
 
@@ -2824,7 +2874,7 @@ function SprintScreen({ busy, error, onActivate, onBack, onNavigate, onTask, spr
     <OpsRail current="sprint" onNavigate={onNavigate} />
     {error ? <p className="ops-error" role="alert"><Icon name="info" size={15} />{error}</p> : null}
     {!sprint ? <div className="panel ops-empty"><h3>No sprint has been activated for this engagement.</h3><p>Activation requires an approved diagnosis with a named human owner. The starting metric is taken from the approved finding — it is never invented here.</p><Button disabled={busy === "sprint"} icon="check" onClick={onActivate}>{busy === "sprint" ? "Activating…" : "Activate sprint"}</Button></div> : <>
-      <div className="ops-summary">{[["Prescription", sprint.prescription || "Not recorded"], ["Human owner", sprint.humanOwner ? `${sprint.humanOwner.name}, ${sprint.humanOwner.role}` : "Not recorded"], ["Starting metric", sprint.startingMetric ? `${sprint.startingMetric.name}: ${sprint.startingMetric.value} ${sprint.startingMetric.unit} · ${sprint.startingMetric.period}` : "Missing"], ["Measurement clock", sprint.measurementClockStartedAt ? new Date(sprint.measurementClockStartedAt).toLocaleString() : "Not started"]].map(([label, text]) => <article key={label}><span>{label}</span><strong>{text}</strong></article>)}</div>
+      <div className="ops-summary sprint-summary">{[["Prescription", sprint.prescription || "Not recorded"], ["Human owner", sprint.humanOwner ? `${sprint.humanOwner.name}, ${sprint.humanOwner.role}` : "Not recorded"], ["Starting metric", sprint.startingMetric ? `${sprint.startingMetric.name}: ${sprint.startingMetric.value} ${sprint.startingMetric.unit} · ${sprint.startingMetric.period}` : "Missing"], ["Measurement clock", sprint.measurementClockStartedAt ? new Date(sprint.measurementClockStartedAt).toLocaleString() : "Not started"]].map(([label, text]) => <article key={label}><span>{label}</span><strong>{text}</strong></article>)}</div>
       <div className="table-wrap"><table><thead><tr><th>Sprint task</th><th>Owner</th><th>Status</th></tr></thead><tbody>{tasks.length ? tasks.map((task) => <tr key={task.id}><td><strong>{task.task}</strong></td><td>{task.owner || "Unassigned"}</td><td><div className="status-toggle">{taskStatuses.map(([status, label]) => <button className={task.status === status ? "selected" : ""} disabled={busy === `task:${task.id}`} key={status} onClick={() => onTask(task.id, status)} type="button">{label}</button>)}</div>{busy === `task:${task.id}` ? <small role="status">Saving…</small> : null}</td></tr>) : <tr><td colSpan={3}>The activated sprint returned no tasks.</td></tr>}</tbody></table></div>
       <div className="page-actions"><p><Icon name="info" size={16} />No delta is computed in the browser. The ending metric is captured separately.</p><Button icon="arrow" onClick={() => onNavigate("measure")}>Record the outcome</Button></div>
     </>}
