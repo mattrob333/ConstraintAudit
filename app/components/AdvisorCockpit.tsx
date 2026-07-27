@@ -489,6 +489,41 @@ async function readTranscriptFile(file: File): Promise<TranscriptFile> {
   return { content: await file.text(), encoding: "utf8", mimeType, name: file.name };
 }
 
+/** The same `[timestamp] Speaker:` line shape the server parses (see parseTranscriptText). Used to surface speakers for role tagging. */
+const SPEAKER_LINE = /^\[?(\d{1,2}:\d{2}(?::\d{2})?)(?:[.,]\d{1,3})?\]?\s*(?:-\s*)?([^:]{1,80}):\s*(.+)$/;
+
+/** Distinct speaker labels in a pasted transcript, in first-seen order. Empty when the text has no `Speaker:` lines. */
+function distinctSpeakers(text: string): string[] {
+  const seen = new Set<string>();
+  const order: string[] = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const matched = raw.trim().match(SPEAKER_LINE);
+    if (!matched) continue;
+    const speaker = matched[2].trim();
+    if (!speaker || seen.has(speaker.toLowerCase())) continue;
+    seen.add(speaker.toLowerCase());
+    order.push(speaker);
+  }
+  return order;
+}
+
+/**
+ * The default role guess for a detected speaker. The primary contact is the client and an
+ * advisor-labelled speaker is the advisor; everyone else defaults to `unknown` so an unrecognized
+ * speaker (an advisor named normally, a second person in the room) never silently becomes evidence.
+ */
+function defaultSpeakerRole(speaker: string, contact: string): "client" | "advisor" | "unknown" {
+  if (/^(advisor|consultant|tier\s*4|facilitator|interviewer|host)\b/i.test(speaker)) return "advisor";
+  const c = contact.trim().toLowerCase();
+  if (c) {
+    const s = speaker.trim().toLowerCase();
+    const contactTokens = c.split(/\s+/).filter((token) => token.length > 1);
+    const speakerTokens = s.split(/\s+/).filter((token) => token.length > 1);
+    if (s === c || contactTokens.some((token) => speakerTokens.includes(token))) return "client";
+  }
+  return "unknown";
+}
+
 /** Each card is bound to the artifact `kind` its generator writes, so no card can point at nothing. */
 const deliverables = [
   ["Diagnosis package", "Canvas v1, constraint card, evidence, baseline, prescription, owner, and predicted next constraint.", "diagnosis_package"],
@@ -1063,14 +1098,16 @@ function Documents({ activeId }: { activeId: string | null }) {
   const menuRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!open) return;
-    type ApiDocument = Partial<DocumentItem> & { id: string; title?: string; url?: string };
+    type ApiDocument = Partial<DocumentItem> & { id: string; title?: string; url?: string; source?: "static" | "generated" };
     api<ApiDocument[] | { documents: ApiDocument[] }>(`/api/documents${activeId ? `?engagementId=${activeId}` : ""}`)
       .then((data) => {
         const items = Array.isArray(data) ? data : data.documents;
         setDocs(items.map((doc) => ({
           name: doc.name ?? doc.title ?? "Untitled document",
           id: doc.id,
-          href: doc.href ?? doc.url,
+          // Static reference docs carry their own url; generated artifacts have neither an href nor a
+          // url, so they used to render href="#" and do nothing. Point those at the printable route.
+          href: doc.href ?? doc.url ?? (doc.source === "generated" ? `/api/documents/${doc.id}?format=html` : undefined),
           kind: doc.kind === "workflow" ? "workflow" : "generated",
           status: doc.status ?? "draft",
         })));
@@ -1115,7 +1152,7 @@ function Documents({ activeId }: { activeId: string | null }) {
       {error ? <p className="menu-error" role="alert">{error}</p> : null}
       {!loading && !error && docs.length === 0 ? <p className="menu-empty">No approved workflow documents or generated artifacts yet.</p> : null}
       {!loading && !error ? docs.map((doc) =>
-        <a href={doc.href ?? "#"} key={doc.id} onClick={(event) => { if (!doc.href) event.preventDefault(); }} role="menuitem">
+        <a href={doc.href ?? "#"} key={doc.id} onClick={(event) => { if (!doc.href) event.preventDefault(); }} rel="noopener noreferrer" role="menuitem" target={doc.href ? "_blank" : undefined}>
           <span><Icon name="document" size={16} /></span><span><strong>{doc.name}</strong><small>{doc.kind === "workflow" ? "Approved workflow" : "Generated artifact"} · {doc.status}</small></span>{doc.href ? <Icon name="external" size={13} /> : null}
         </a>) : null}
       <button onClick={() => { setOpen(false); triggerRef.current?.focus(); }} role="menuitem" type="button">Close documents <Icon name="close" size={13} /></button>
@@ -1160,7 +1197,6 @@ export default function AdvisorCockpit() {
   const [synthesisResult, setSynthesisResult] = useState<TranscriptSynthesis | null>(null);
   const [transcriptMethod, setTranscriptMethod] = useState<"fireflies" | "paste" | "upload">("fireflies");
   const [transcript, setTranscript] = useState("");
-  const [meetingDate, setMeetingDate] = useState("2026-07-23");
   const [fileName, setFileName] = useState("");
   const [transcriptFile, setTranscriptFile] = useState<TranscriptFile | null>(null);
   const [fileSummary, setFileSummary] = useState("");
@@ -1195,6 +1231,19 @@ export default function AdvisorCockpit() {
   const [tourStep, setTourStep] = useState(0);
   const [tourMode, setTourMode] = useState<TourMode>("off");
   const [researchTab, setResearchTab] = useState<ResearchTab | undefined>(undefined);
+  /** Per-button in-flight guards so a double-click cannot fire a mutating request twice. */
+  const [analyzing, setAnalyzing] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [approving, setApproving] = useState<"" | "canvas" | "diagnosis">("");
+  const [contactBusy, setContactBusy] = useState(false);
+  const [contactError, setContactError] = useState("");
+  /** Source-upload feedback for the Research screen's "Add a source" control. */
+  const [researchSourceState, setResearchSourceState] = useState<{ tone: "reading" | "ready" | "error"; message: string } | null>(null);
+  /** Migration source text carried from the Migration screen into the created engagement. */
+  const [pendingSourceText, setPendingSourceText] = useState("");
+  /** Speaker → role map the advisor confirms before a transcript is analyzed. Only "client" becomes evidence. */
+  const [speakerRoles, setSpeakerRoles] = useState<Record<string, "client" | "advisor" | "unknown">>({});
+  const [speakerReq, setSpeakerReq] = useState("");
   const modalRef = useRef<HTMLDivElement>(null);
   const currentStage = stageFor(screen);
   const practiceActive = isPracticeEngagement(activeId);
@@ -1208,6 +1257,37 @@ export default function AdvisorCockpit() {
   const displayCompany = company || "Untitled engagement";
   const script = callScriptFor(researchResult);
   const callQuestion = script.questions[Math.min(callIndex, script.questions.length - 1)];
+  /**
+   * Speakers we can surface for role tagging: pasted text, or an uploaded transcript that was read
+   * as UTF-8 text. A Fireflies id (pre-fetch) or a base64 DOCX cannot be parsed client-side.
+   */
+  const speakerSource = transcriptMethod === "paste"
+    ? transcript
+    : transcriptMethod === "upload" && transcriptFile?.encoding === "utf8"
+      ? transcriptFile.content
+      : "";
+  const detectedSpeakers = speakerSource.trim() ? distinctSpeakers(speakerSource) : [];
+  // Render-phase sync (the same pattern the research tab uses): when the detected speaker set changes,
+  // seed defaults for new speakers while preserving any the advisor has already tagged.
+  const speakerKey = detectedSpeakers.map((speaker) => speaker.toLowerCase()).join("\u0000");
+  if (speakerKey !== speakerReq) {
+    setSpeakerReq(speakerKey);
+    setSpeakerRoles((prev) => {
+      const next: Record<string, "client" | "advisor" | "unknown"> = {};
+      for (const speaker of detectedSpeakers) next[speaker] = prev[speaker] ?? defaultSpeakerRole(speaker, contact);
+      return next;
+    });
+  }
+  // Shown on the transcript screen when speakers cannot be listed for the chosen method, so the
+  // advisor knows the fail-closed default is in effect rather than assuming everyone became evidence.
+  const speakerNote = detectedSpeakers.length ? ""
+    : transcriptMethod === "fireflies"
+      ? "Speaker roles can't be listed for a Fireflies id before it is fetched. Your primary contact is tagged Client and advisor-labelled speakers Advisor; any other speaker is treated as a gap, not evidence."
+      : transcriptMethod === "upload" && transcriptFile && transcriptFile.encoding !== "utf8"
+        ? "This file is extracted on the server, so its speakers can't be listed here. Your primary contact is tagged Client and advisor-labelled speakers Advisor; any other speaker is treated as a gap, not evidence."
+        : (transcriptMethod === "paste" && transcript.trim()) || (transcriptMethod === "upload" && transcriptFile)
+          ? "No “[timestamp] Speaker:” lines were detected, so individual speakers can't be listed. Your primary contact is tagged Client and advisor-labelled speakers Advisor; any other speaker is treated as a gap, not evidence."
+          : "";
 
   useEffect(() => {
     api<{ engagements: BackendEngagement[] }>("/api/engagements")
@@ -1284,6 +1364,42 @@ export default function AdvisorCockpit() {
   }
 
   /**
+   * The single source of truth for "return every per-engagement field to its initial value".
+   * `createEngagement`, `resume`, and `leavePractice` all call this so they cannot drift — the
+   * bug that mattered was a new engagement inheriting the previous one's recording consent, call
+   * number, brief-sent flag, synthesis, and artifacts. Identity fields (company/website/contact/
+   * role/email/context) and the intake attachment are deliberately NOT reset here: the caller owns
+   * them — the intake form has already set them for a new engagement, and `resume` sets them from
+   * the record only after a successful load.
+   */
+  function resetEngagementState() {
+    setConsent("pending"); setCall2Consent("pending");
+    setAnswers({}); setNotes({}); setValues({});
+    setResearchResult(null); setCanvas(null);
+    setSprint(null); setOutcome(null); setCatalogEntry(null);
+    setSynthesisResult(null);
+    setArtifacts([]); setIntents([]);
+    setTranscript(""); setTranscriptFile(null); setFileName(""); setFileSummary(""); setFileError(""); setFileReading(false);
+    setTranscriptMethod("fireflies");
+    setTranscriptCallNumber(1); setCall2Processed(false); setDiagnosisApproved(false);
+    setBriefSent(false);
+    setGapFlags([]); setGapSave("idle"); setGapError("");
+    setPresenting(false);
+    setCallIndex(0);
+    setCall1At(null); setCall2At(null);
+    setAgenda([]); setAgendaStep(0); setAgendaBusy(false); setAgendaError("");
+    setScheduleBusy(false); setScheduleError(""); setScheduleSavedAt("");
+    setDeliverBusy(""); setDeliverError("");
+    setOpsBusy(""); setOpsError("");
+    setAnalyzing(false); setSending(false); setApproving("");
+    setContactBusy(false); setContactError("");
+    setResearchSourceState(null);
+    setSpeakerRoles({}); setSpeakerReq("");
+    setConfirmSend(false); setConfirmed(false);
+    setResumed(null);
+  }
+
+  /**
    * The intake attachment is chosen before the engagement exists, so it is parsed here and
    * uploaded to the source register the moment `createEngagement` returns an id.
    */
@@ -1320,8 +1436,20 @@ export default function AdvisorCockpit() {
 
   async function createEngagement(event: FormEvent) {
     event.preventDefault();
+    const normalizedWebsite = normalizeWebsiteInput(website);
+    // Research runs on the public website and 400s without one. Creating the engagement first and
+    // then dead-ending on that error stranded the advisor on the form and tempted a duplicate
+    // submit, so the website is required up front and nothing is created without it.
+    if (!normalizedWebsite) {
+      setApiState("error");
+      setNotice("Add a company website first — research runs on the public website, and creating the engagement without one would leave it with nothing to research.");
+      return;
+    }
+    // A fresh engagement must not inherit the previously open one's recording consent, call number,
+    // brief-sent flag, synthesis, or artifacts. Identity/context and the chosen intake file are
+    // preserved because this POST and the source upload still need them.
+    resetEngagementState();
     try {
-      const normalizedWebsite = normalizeWebsiteInput(website);
       setWebsite(normalizedWebsite);
       const response = await save<{ engagement: BackendEngagement }>("/api/engagements", {
         client: company,
@@ -1336,29 +1464,36 @@ export default function AdvisorCockpit() {
       setCall1At(response.engagement.call1At ?? null);
       setCall2At(response.engagement.call2At ?? null);
       setEngagements((items) => [toEngagement(response.engagement), ...items.filter((item) => item.id !== id)]);
-      let sourceOutcome = "";
+      const sourceOutcomes: string[] = [];
       if (intakeFile) {
         setIntakeFileState({ tone: "reading", message: `Adding ${intakeFile.name} to the source register…` });
         try {
           await api(`/api/engagements/${id}/sources`, { method: "POST", body: JSON.stringify({ file: intakeFile }) });
           setIntakeFileState({ tone: "added", message: `${intakeFile.name} was added to the engagement's source register.` });
-          sourceOutcome = `${intakeFile.name} was added to the engagement's source register.`;
+          sourceOutcomes.push(`${intakeFile.name} was added to the engagement's source register.`);
         } catch (reason) {
           const message = reason instanceof Error ? reason.message : "unknown request failure";
           setIntakeFileState({ tone: "error", message: `${intakeFile.name} was NOT added to the source register: ${message}` });
-          sourceOutcome = `The engagement was created, but ${intakeFile.name} was not added to the source register: ${message}`;
+          sourceOutcomes.push(`${intakeFile.name} was not added to the source register: ${message}`);
         }
         // Cleared either way: a retry belongs to this engagement, not to the next one created.
         setIntakeFile(null);
       }
+      if (pendingSourceText.trim()) {
+        const migratedFile: TranscriptFile = { name: "migrated-notes.txt", mimeType: "text/plain", content: pendingSourceText, encoding: "utf8" };
+        try {
+          await api(`/api/engagements/${id}/sources`, { method: "POST", body: JSON.stringify({ file: migratedFile, label: "Migrated source material" }) });
+          sourceOutcomes.push("The migrated notes were added to the engagement's source register.");
+        } catch (reason) {
+          sourceOutcomes.push(`The migrated notes were not added to the source register: ${reason instanceof Error ? reason.message : "unknown request failure"}`);
+        }
+        setPendingSourceText("");
+      }
       const researchResponse = await save<{ engagement?: BackendEngagement; research: ResearchPayload }>(`/api/engagements/${id}/research`, { sourceUrl: normalizedWebsite });
       setResearchResult(researchResponse.research);
       setCanvas(researchResponse.engagement?.data?.canvas ?? null);
-      setCallIndex(0);
-      setGapFlags([]); setGapSave("idle"); setGapError(""); setPresenting(false);
-      setAnswers({}); setNotes({}); setValues({});
       go("research");
-      if (sourceOutcome) setNotice(sourceOutcome);
+      if (sourceOutcomes.length) setNotice(sourceOutcomes.join(" "));
     } catch {
       // save() leaves the advisor on intake with a visible error.
     }
@@ -1392,14 +1527,22 @@ export default function AdvisorCockpit() {
    * to the final Deliver screen. Anything unrecognized lands on research, never on Deliver.
    */
   async function resume(item: Engagement) {
-    setCompany(item.companyName); setWebsite(item.website); setActiveId(item.id); setCallIndex(0);
-    setContact(item.primaryContact); setRole(item.primaryContactRole); setEmail(item.email);
-    // The coaching state belongs to one engagement's call, never to the next one opened.
-    setGapFlags([]); setGapSave("idle"); setGapError(""); setPresenting(false);
-    setAnswers({}); setNotes({}); setValues({});
-    setScheduleError(""); setScheduleSavedAt(""); setDeliverError(""); setAgendaError(""); setAgendaStep(0);
+    // Reset every per-engagement field BEFORE the fetch so no stale value survives the switch, and
+    // clear the intake attachment so it cannot bleed into a later new engagement. Identity is not
+    // committed yet — a failed GET must not leave the previous engagement's data under the new id.
+    resetEngagementState();
+    setIntakeFile(null); setIntakeFileName(""); setIntakeFileState(null); setPendingSourceText("");
     const record = await loadEngagement(item.id);
-    if (!record) return;
+    if (!record) {
+      // The GET failed. Stay off the new engagement and drop to a clean state; loadEngagement has
+      // already surfaced the error. Nothing from the previous engagement is shown under a new id.
+      setActiveId(null); setCompany(""); setWebsite(""); setContact(""); setRole(""); setEmail(""); setContext("");
+      return;
+    }
+    // The load succeeded: only now commit the new identity.
+    setActiveId(item.id);
+    setCompany(item.companyName); setWebsite(item.website);
+    setContact(item.primaryContact); setRole(item.primaryContactRole); setEmail(item.email);
     const state = isWorkflowState(record.workflowState ?? "") ? record.workflowState as WorkflowState : item.workflowState;
     const reached = (target: WorkflowState) => state !== null && workflowStates.indexOf(state) >= workflowStates.indexOf(target);
     const consent = record.data?.recordingConsent;
@@ -1408,7 +1551,6 @@ export default function AdvisorCockpit() {
     setTranscriptCallNumber(reached("CANVAS_COMMIT_APPROVED") ? 2 : 1);
     setCall2Processed(reached("TRANSCRIPT_2_RECONCILED"));
     setDiagnosisApproved(reached("DIAGNOSIS_APPROVED"));
-    setTranscript(""); setFileName(""); setTranscriptFile(null); setFileSummary(""); setFileError("");
     setBriefSent(record.readinessBriefStatus === "Approved" || record.readinessBriefStatus === "Sent");
     const target = state ? resumeScreens[state] : "research";
     go(target);
@@ -1487,14 +1629,11 @@ export default function AdvisorCockpit() {
   /** Clears practice mode out of the cockpit. Local only — the practice record is left alone. */
   function leavePractice(message?: string) {
     setTourMode("off"); setTourStep(0); setResearchTab(undefined);
+    // One shared reset for the whole per-engagement set, plus the identity and intake fields the
+    // shared reset deliberately leaves to the caller.
+    resetEngagementState();
     setActiveId(null); setCompany(""); setWebsite(""); setContact(""); setRole(""); setEmail(""); setContext("");
-    setResearchResult(null); setCanvas(null); setSprint(null); setOutcome(null); setCatalogEntry(null);
-    setSynthesisResult(null); setArtifacts([]); setIntents([]); setCall1At(null); setCall2At(null);
-    setConsent("pending"); setCall2Consent("pending"); setAnswers({}); setNotes({}); setValues({});
-    setGapFlags([]); setGapSave("idle"); setGapError(""); setPresenting(false);
-    setBriefSent(false); setCall2Processed(false); setDiagnosisApproved(false);
-    setTranscript(""); setFileName(""); setTranscriptFile(null); setFileSummary(""); setFileError("");
-    setAgenda([]); setAgendaStep(0); setAgendaError(""); setDeliverError(""); setOpsError("");
+    setIntakeFile(null); setIntakeFileName(""); setIntakeFileState(null); setPendingSourceText("");
     go("home");
     if (message) setNotice(message);
   }
@@ -1679,6 +1818,8 @@ export default function AdvisorCockpit() {
 
   async function sendBrief() {
     if (!activeId) return setNotice("Action not completed: select or create an engagement first.");
+    if (sending) return;
+    setSending(true);
     try {
       await save(`/api/engagements/${activeId}/readiness-brief`, { action: "approve" });
       await save(`/api/engagements/${activeId}/readiness-brief`, { action: "send_intent" });
@@ -1686,10 +1827,59 @@ export default function AdvisorCockpit() {
       setNotice("Brief approved and a reviewed send intent was recorded. No email was sent.");
     } catch {
       // Keep the confirmation open so the advisor can retry or cancel.
+    } finally {
+      setSending(false);
+    }
+  }
+
+  /**
+   * Sets the engagement's primary contact and role after intake. Diagnosis approval needs a named
+   * owner, and if the role was left blank at intake there was no other screen to add it — this
+   * unblocks that. The version is re-read immediately before the write to avoid a stale-version reject.
+   */
+  async function saveContact(nextContact: string, nextRole: string) {
+    if (!activeId) return setNotice("Action not completed: select or create an engagement first.");
+    if (contactBusy) return;
+    setContactBusy(true); setContactError("");
+    try {
+      const current = await api<{ engagement: BackendEngagement }>(`/api/engagements/${activeId}`);
+      const response = await save<{ engagement: BackendEngagement }>(`/api/engagements/${activeId}`, {
+        command: "update_metadata",
+        expectedVersion: current.engagement.version,
+        fields: { primaryContact: nextContact.trim(), primaryContactRole: nextRole.trim() },
+      }, "PATCH");
+      const savedContact = response.engagement.primaryContact ?? nextContact.trim();
+      const savedRole = response.engagement.primaryContactRole ?? nextRole.trim();
+      setContact(savedContact); setRole(savedRole);
+      setEngagements((items) => items.map((item) => item.id === activeId ? { ...item, primaryContact: savedContact, primaryContactRole: savedRole } : item));
+      setNotice("Primary contact updated on the engagement record.");
+    } catch (reason) {
+      setContactError(`The primary contact could not be saved: ${reason instanceof Error ? reason.message : "unknown request failure"}`);
+    } finally {
+      setContactBusy(false);
+    }
+  }
+
+  /** Reads a chosen file and adds it to the engagement's source register from the Research screen. */
+  async function addResearchSource(file: File) {
+    if (!activeId) return setResearchSourceState({ tone: "error", message: "Open or create an engagement before adding a source." });
+    const extension = extensionOf(file.name);
+    if (extension === "pdf") return setResearchSourceState({ tone: "error", message: "PDF cannot be read by the source register. Export it to DOCX, TXT, Markdown, or CSV first." });
+    if (!(sourceExtensions as readonly string[]).includes(extension)) return setResearchSourceState({ tone: "error", message: `${file.name} is not a supported source format. Use TXT, MD, CSV, DOCX, VTT, SRT, or JSON.` });
+    if (file.size > MAX_TRANSCRIPT_BYTES) return setResearchSourceState({ tone: "error", message: `${file.name} is ${formatBytes(file.size)}. The upload limit is ${formatBytes(MAX_TRANSCRIPT_BYTES)}.` });
+    setResearchSourceState({ tone: "reading", message: `Adding ${file.name} to the source register…` });
+    try {
+      const payload = await readTranscriptFile(file);
+      if (!payload.content.length) return setResearchSourceState({ tone: "error", message: `${file.name} contained no readable content. Choose another file.` });
+      await api(`/api/engagements/${activeId}/sources`, { method: "POST", body: JSON.stringify({ file: payload }) });
+      setResearchSourceState({ tone: "ready", message: `${file.name} was added to the engagement's source register.` });
+    } catch (reason) {
+      setResearchSourceState({ tone: "error", message: `${file.name} was not added: ${reason instanceof Error ? reason.message : "unknown request failure"}` });
     }
   }
 
   async function analyze() {
+    if (analyzing) return;
     if (!activeId) {
       setNotice("Action not completed: select or create an engagement first.");
       return;
@@ -1699,65 +1889,62 @@ export default function AdvisorCockpit() {
       setNotice("Transcript capture is blocked until recording and transcription consent is confirmed for this call.");
       return;
     }
+    // Validate presence before flipping the busy flag so an empty submit does not lock the button.
+    if (transcriptMethod === "fireflies" && !transcript.trim()) {
+      setNotice("Enter a Fireflies transcript ID, or choose paste/upload.");
+      return;
+    }
+    if (transcriptMethod === "upload" && !transcriptFile) {
+      setNotice("Choose a transcript file and let it finish reading before analysis.");
+      return;
+    }
+    if (transcriptMethod === "paste" && !transcript.trim()) {
+      setNotice("Paste the transcript text before analysis.");
+      return;
+    }
     const consentAttestation = {
       grantedBeforeCapture: true,
       attestedBy: "Tier 4 Advisor",
       attestedAt: new Date().toISOString(),
       note: `Client confirmed recording and transcription consent for Call ${transcriptCallNumber}.`,
     };
-    const speakerRoles = {
-      Advisor: "advisor" as const,
-      ...(contact.trim() ? { [contact.trim()]: "client" as const } : {}),
-    };
+    // Start from the always-true defaults, then apply every speaker the advisor tagged. Only speakers
+    // resolved to "client" become evidence; anything left "unknown" is treated as a gap by the server.
+    const resolvedSpeakerRoles: Record<string, "client" | "advisor" | "unknown"> = { Advisor: "advisor" };
+    if (contact.trim()) resolvedSpeakerRoles[contact.trim()] = "client";
+    for (const [name, resolved] of Object.entries(speakerRoles)) resolvedSpeakerRoles[name] = resolved;
     const humanOwner = contact.trim() && role.trim() ? { name: contact.trim(), role: role.trim() } : undefined;
+    setAnalyzing(true);
     let response: { synthesis: TranscriptSynthesis };
-    if (transcriptMethod === "fireflies") {
-      if (!transcript.trim()) {
-        setNotice("Enter a Fireflies transcript ID, or choose paste/upload.");
-        return;
-      }
-      try {
+    try {
+      if (transcriptMethod === "fireflies") {
         response = await save<{ synthesis: TranscriptSynthesis }>(`/api/engagements/${activeId}/fireflies`, {
           transcriptId: transcript,
           callNumber: transcriptCallNumber,
           consentAttestation,
-          speakerRoles,
+          speakerRoles: resolvedSpeakerRoles,
         });
-      } catch {
-        return;
-      }
-    } else if (transcriptMethod === "upload") {
-      if (!transcriptFile) {
-        setNotice("Choose a transcript file and let it finish reading before analysis.");
-        return;
-      }
-      try {
+      } else if (transcriptMethod === "upload") {
+        if (!transcriptFile) { setAnalyzing(false); return; }
         response = await save<{ synthesis: TranscriptSynthesis }>(`/api/engagements/${activeId}/transcripts`, {
           callNumber: transcriptCallNumber,
           consentAttestation,
           file: transcriptFile,
           humanOwner,
-          speakerRoles,
+          speakerRoles: resolvedSpeakerRoles,
         });
-      } catch {
-        return;
-      }
-    } else {
-      if (!transcript.trim()) {
-        setNotice("Paste the transcript text before analysis.");
-        return;
-      }
-      try {
+      } else {
         response = await save<{ synthesis: TranscriptSynthesis }>(`/api/engagements/${activeId}/transcripts`, {
           callNumber: transcriptCallNumber,
           consentAttestation,
           humanOwner,
           rawText: transcript,
-          speakerRoles,
+          speakerRoles: resolvedSpeakerRoles,
         });
-      } catch {
-        return;
       }
+    } catch {
+      setAnalyzing(false);
+      return;
     }
     setSynthesisResult(response.synthesis);
     try {
@@ -1766,6 +1953,7 @@ export default function AdvisorCockpit() {
     } catch {
       // The synthesis is already on screen; a canvas refresh failure must not hide it.
     }
+    setAnalyzing(false);
     if (transcriptCallNumber === 2) {
       setCall2Processed(true);
       setNotice("Call 2 transcript reconciled. Review the finding once more before diagnosis approval.");
@@ -1776,11 +1964,13 @@ export default function AdvisorCockpit() {
   }
 
   async function approve(checkpoint: "canvas" | "diagnosis") {
+    if (approving) return;
     if (!activeId) {
       setNotice("Action not completed: select or create an engagement first.");
       return;
     }
     if (checkpoint === "canvas") {
+      setApproving("canvas");
       try {
         const current = await api<{ engagement: BackendEngagement }>(`/api/engagements/${activeId}`);
         await save(`/api/engagements/${activeId}`, {
@@ -1792,6 +1982,8 @@ export default function AdvisorCockpit() {
         go("findings");
       } catch {
         // Keep the advisor at the checkpoint after a failed approval.
+      } finally {
+        setApproving("");
       }
       return;
     }
@@ -1803,11 +1995,12 @@ export default function AdvisorCockpit() {
       go("transcript");
       return;
     }
+    if (!contact.trim() || !role.trim()) {
+      setNotice("Diagnosis approval requires a named human owner and role. Add them to the engagement before approval.");
+      return;
+    }
+    setApproving("diagnosis");
     try {
-      if (!contact.trim() || !role.trim()) {
-        setNotice("Diagnosis approval requires a named human owner and role. Add them to the engagement before approval.");
-        return;
-      }
       await save(`/api/engagements/${activeId}/finding`, {
         action: "approve_diagnosis",
         humanOwner: { name: contact.trim(), role: role.trim() },
@@ -1817,6 +2010,8 @@ export default function AdvisorCockpit() {
       await loadEngagement(activeId);
     } catch {
       // Keep the advisor on the finding review after a failed approval.
+    } finally {
+      setApproving("");
     }
   }
 
@@ -1889,11 +2084,15 @@ export default function AdvisorCockpit() {
 
   async function prepareCrmWriteBack() {
     if (!activeId) return setNotice("Action not completed: select or create an engagement first.");
+    if (deliverBusy) return;
+    setDeliverBusy("crm"); setDeliverError("");
     try {
       await save(`/api/engagements/${activeId}/crm`, {});
       setNotice("CRM write-back intent prepared. No external Sheet was changed.");
     } catch {
       // Do not claim intent creation after an API failure.
+    } finally {
+      setDeliverBusy("");
     }
   }
 
@@ -1925,14 +2124,28 @@ export default function AdvisorCockpit() {
       </div> : null}
       {screen === "home" ? <Home engagements={engagements} loading={registryLoading} onFresh={() => go("intake")} onMigration={() => go("migration")} onPractice={openPractice} onResume={resume} onUpdate={() => go("engagements")} practiceBusy={practiceBusy} practiceExists={practiceExists} practiceProbe={practiceProbe} /> : null}
       {screen === "intake" ? <Intake apiState={apiState} company={company} contact={contact} context={context} email={email} fileName={intakeFileName} fileState={intakeFileState} locked={practiceActive && tourMode !== "off"} onBack={() => go("home")} onCompany={setCompany} onContact={setContact} onContext={setContext} onEmail={setEmail} onFile={selectIntakeFile} onRole={setRole} onSubmit={createEngagement} onWebsite={setWebsite} role={role} website={website} /> : null}
-      {screen === "migration" ? <Migration onBack={() => go("home")} onContinue={() => { setNotice("Source material staged locally. Add the client anchor before research begins."); go("intake"); }} /> : null}
+      {screen === "migration" ? <Migration onBack={() => go("home")} onStage={(payload) => {
+        if (payload.file) {
+          setIntakeFile(payload.file);
+          setIntakeFileName(payload.fileName);
+          setIntakeFileState({ tone: "ready", message: `${payload.fileName} is ready and will be added to the engagement's source register once it is created below.` });
+        }
+        setPendingSourceText(payload.text);
+        const parts: string[] = [];
+        if (payload.file) parts.push(`${payload.fileName}`);
+        if (payload.text.trim()) parts.push("your pasted notes");
+        setNotice(parts.length
+          ? `${parts.join(" and ")} will be added to the engagement's source register once you create it below.`
+          : "Add the client anchor to begin the engagement.");
+        go("intake");
+      }} /> : null}
       {screen === "engagements" ? <Engagements engagements={engagements} loading={registryLoading} onBack={() => go("home")} onFresh={() => go("intake")} onResume={resume} /> : null}
-      {screen === "research" ? <Research canvas={canvas} company={displayCompany} focusTab={researchTab} onBack={() => go("intake")} onPrepare={() => go("prepare")} research={researchResult} script={script} /> : null}
+      {screen === "research" ? <Research canvas={canvas} company={displayCompany} focusTab={researchTab} onAddSource={addResearchSource} onBack={() => go("intake")} onPrepare={() => go("prepare")} research={researchResult} script={script} sourceState={researchSourceState} /> : null}
       {screen === "prepare" ? <Prepare briefSent={briefSent} call1At={call1At} call2At={call2At} contact={contact || "Primary contact"} email={email} onBack={() => go("research")} onCall={() => { setCallIndex(0); go("call"); }} onSaveSchedule={saveSchedule} onSend={() => { setConfirmed(false); setConfirmSend(true); }} savedAt={scheduleSavedAt} scheduleBusy={scheduleBusy} scheduleError={scheduleError} /> : null}
       {screen === "call" && callQuestion ? <Call answer={answers[callQuestion.id] ?? ""} company={displayCompany} consent={consent} gapError={gapError} gaps={gapFlags} gapSave={gapSave} generic={script.generic} index={Math.min(callIndex, script.questions.length - 1)} notes={notes[callQuestion.id] ?? ""} onAnswer={(value) => setAnswers((all) => ({ ...all, [callQuestion.id]: value }))} onConsent={setConsent} onExit={() => go("prepare")} onFlagGap={flagGap} onNext={() => callIndex < script.questions.length - 1 ? setCallIndex(callIndex + 1) : go("transcript")} onNotes={(value) => setNotes((all) => ({ ...all, [callQuestion.id]: value }))} onPresenting={setPresenting} onPrevious={() => setCallIndex(Math.max(0, callIndex - 1))} onSaveGaps={saveGaps} onUnflagGap={unflagGap} onValue={(value) => setValues((all) => ({ ...all, [callQuestion.id]: value }))} practice={practiceActive} presenting={presenting} question={callQuestion} scheduledAt={call1At} total={script.questions.length} value={values[callQuestion.id] ?? ""} /> : null}
-      {screen === "transcript" ? <Transcript callNumber={transcriptCallNumber} company={displayCompany} date={meetingDate} fileError={fileError} fileName={fileName} fileReading={fileReading} fileSummary={fileSummary} method={transcriptMethod} onAnalyze={analyze} onBack={() => transcriptCallNumber === 2 ? go("findings") : go("call")} onDate={setMeetingDate} onFile={selectTranscriptFile} onMethod={setTranscriptMethod} onText={setTranscript} ready={Boolean(transcriptFile)} text={transcript} /> : null}
-      {screen === "synthesis" ? <Synthesis onApprove={() => approve("canvas")} onBack={() => go("transcript")} synthesis={synthesisResult} /> : null}
-      {screen === "findings" ? <Findings agendaBusy={agendaBusy} agendaError={agendaError} consent={call2Consent} onApprove={() => approve("diagnosis")} onBack={() => go("synthesis")} onConsent={setCall2Consent} onPresent={openFindingsPresentation} owner={contact && role ? `${contact}, ${role}` : ""} scheduledAt={call2At} synthesis={synthesisResult} /> : null}
+      {screen === "transcript" ? <Transcript busy={analyzing} callNumber={transcriptCallNumber} company={displayCompany} fileError={fileError} fileName={fileName} fileReading={fileReading} fileSummary={fileSummary} method={transcriptMethod} onAnalyze={analyze} onBack={() => transcriptCallNumber === 2 ? go("findings") : go("call")} onFile={selectTranscriptFile} onMethod={setTranscriptMethod} onSpeakerRole={(speaker, roleValue) => setSpeakerRoles((prev) => ({ ...prev, [speaker]: roleValue }))} onText={setTranscript} ready={Boolean(transcriptFile)} scheduledAt={transcriptCallNumber === 1 ? call1At : call2At} speakerNote={speakerNote} speakerRoles={speakerRoles} speakers={detectedSpeakers} text={transcript} /> : null}
+      {screen === "synthesis" ? <Synthesis busy={approving === "canvas"} onApprove={() => approve("canvas")} onBack={() => go("transcript")} synthesis={synthesisResult} /> : null}
+      {screen === "findings" ? <Findings agendaBusy={agendaBusy} agendaError={agendaError} busy={approving === "diagnosis"} consent={call2Consent} contact={contact} contactBusy={contactBusy} contactError={contactError} contactRole={role} onApprove={() => approve("diagnosis")} onBack={() => go("synthesis")} onConsent={setCall2Consent} onPresent={openFindingsPresentation} onSaveContact={saveContact} owner={contact && role ? `${contact}, ${role}` : ""} scheduledAt={call2At} synthesis={synthesisResult} /> : null}
       {screen === "findings-call" ? <FindingsPresentation company={displayCompany} consent={call2Consent} index={Math.min(agendaStep, Math.max(0, agenda.length - 1))} onConsent={setCall2Consent} onExit={() => go("findings")} onNext={() => setAgendaStep((step) => Math.min(agenda.length - 1, step + 1))} onPrevious={() => setAgendaStep((step) => Math.max(0, step - 1))} practice={practiceActive} scheduledAt={call2At} sections={agenda} /> : null}
       {screen === "deliver" ? <Deliver approved={diagnosisApproved} artifacts={artifacts} busy={deliverBusy} error={deliverError} intents={intents} onActions={() => openOperations("actions")} onBack={() => go("findings")} onGenerate={generateAllDeliverables} onOperate={openOperations} onPublish={publishDocument} onSync={prepareCrmWriteBack} /> : null}
       {screen === "sprint" ? <SprintScreen busy={opsBusy} error={opsError} onActivate={activateSprint} onBack={() => { go("deliver"); if (activeId) void loadEngagement(activeId); }} onNavigate={openOperations} onTask={updateSprintTask} sprint={sprint} /> : null}
@@ -1950,7 +2163,7 @@ export default function AdvisorCockpit() {
       <p id="send-description">This records approval and prepares a reviewed send intent. It does not send an email. The brief excludes the Canvas, internal questions, and constraint hypotheses.</p>
       <dl><div><dt>Recipient</dt><dd>{contact || "Primary contact"}</dd></div><div><dt>Email address</dt><dd>{email.trim() || "No address on the engagement — the send would have nowhere to go"}</dd></div><div><dt>Delivery intent</dt><dd>Email draft</dd></div><div><dt>Document</dt><dd>Pre-Call Readiness Brief</dd></div></dl>
       <label className="confirm"><input checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} type="checkbox" />I reviewed the recipient and client-facing content.</label>
-      <div className="modal-actions"><Button onClick={() => setConfirmSend(false)} variant="secondary">Cancel</Button><Button disabled={!confirmed} icon="mail" onClick={sendBrief}>Approve send intent</Button></div>
+      <div className="modal-actions"><Button onClick={() => setConfirmSend(false)} variant="secondary">Cancel</Button><Button disabled={!confirmed || sending} icon="mail" onClick={sendBrief}>{sending ? "Approving…" : "Approve send intent"}</Button></div>
       <small>No external provider is contacted by this action.</small>
     </div></div> : null}
   </div>;
@@ -2011,10 +2224,13 @@ function Intake(props: {
 }) {
   const emailValid = looksLikeEmail(props.email);
   const emailTouched = props.email.trim().length > 0;
+  // Research runs on the public website, so it is required here — the same way email is — rather than
+  // letting the create→research flow 400 after the record already exists and tempt a duplicate submit.
+  const websiteValid = props.website.trim().length > 0;
   const busy = props.apiState === "saving" || props.fileState?.tone === "reading";
   return <section className="guided narrow"><Back onClick={props.onBack}>Entry options</Back><PageHead eyebrow="Client · Starting point" title="Who are we learning about?">Give us a starting point. We’ll research the business, draft a first-pass business model, and prepare the questions that matter for your call.</PageHead>
     <form className="intake-form" onSubmit={props.locked ? (event) => event.preventDefault() : props.onSubmit}>
-      <div className="field-row"><label><span>Company name <em>Required</em></span><input autoFocus onChange={(e) => props.onCompany(e.target.value)} placeholder="Acme Industrial" required value={props.company} /></label><label><span>Company website</span><input autoCapitalize="none" inputMode="url" onBlur={(e) => props.onWebsite(normalizeWebsiteInput(e.target.value))} onChange={(e) => props.onWebsite(e.target.value)} placeholder="tier4advisors.com" spellCheck={false} type="text" value={props.website} /></label></div>
+      <div className="field-row"><label><span>Company name <em>Required</em></span><input autoFocus onChange={(e) => props.onCompany(e.target.value)} placeholder="Acme Industrial" required value={props.company} /></label><label className="field-note"><span>Company website <em>Required</em></span><input autoCapitalize="none" inputMode="url" onBlur={(e) => props.onWebsite(normalizeWebsiteInput(e.target.value))} onChange={(e) => props.onWebsite(e.target.value)} placeholder="tier4advisors.com" spellCheck={false} type="text" value={props.website} /><small>Research runs on the public website, so we need one before we can start. Without it the engagement has nothing to research.</small></label></div>
       <div className="field-row"><label><span>Primary contact name</span><input onChange={(e) => props.onContact(e.target.value)} placeholder="Maya Chen" value={props.contact} /></label><label className="field-note"><span>Primary contact role</span><input onChange={(e) => props.onRole(e.target.value)} placeholder="Chief Operating Officer" value={props.role} /><small>Stored as its own field, not buried in notes. Diagnosis approval reuses the name and role as the named human owner.</small></label></div>
       <label className="field-note"><span>Primary contact email <em>Required</em></span><input autoCapitalize="none" className={emailTouched && !emailValid ? "invalid" : ""} inputMode="email" onChange={(e) => props.onEmail(e.target.value)} placeholder="maya@acmeindustrial.com" spellCheck={false} type="email" value={props.email} />
         <small>{emailTouched && !emailValid ? "That does not look like an email address yet." : "We’ll send the pre-call readiness brief here. Without it the brief has nowhere to go and cannot be sent."}</small></label>
@@ -2022,17 +2238,43 @@ function Intake(props: {
       <label className="upload"><input accept={sourceAccept} onChange={(e) => props.onFile(e.target.files?.[0] ?? null)} type="file" /><span><Icon name="upload" size={20} /></span><span><strong>{props.fileName || "Add an email, notes, proposal, or prior document"}</strong><small>Optional · TXT, Markdown, CSV, DOCX, VTT, SRT, or JSON. PDF cannot be read — export it first.</small></span></label>
       {props.fileState ? <p className={`upload-state ${props.fileState.tone === "error" ? "error" : props.fileState.tone === "reading" ? "" : "ready"}`} role={props.fileState.tone === "error" ? "alert" : "status"}><Icon name={props.fileState.tone === "error" ? "info" : props.fileState.tone === "reading" ? "refresh" : "check"} size={15} />{props.fileState.message}</p> : null}
       {props.locked ? <p className="upload-state ready" role="status"><Icon name="shield" size={15} />You are walking the practice example, so this form is here to read rather than to submit. Creating a new engagement is switched off until you leave practice mode — nothing you do on this screen can create a record.</p> : null}
-      <div className="action-row"><p><Icon name="shield" size={18} /><span><strong>Public sources first.</strong> Nothing is sent to the client, and paid enrichment never runs automatically.</span></p><Button disabled={props.locked || !props.company.trim() || !emailValid || busy} icon="arrow" type="submit">{props.locked ? "Creating engagements is off in practice mode" : props.apiState === "saving" ? "Preparing research…" : "Research this business"}</Button></div>
+      <div className="action-row"><p><Icon name="shield" size={18} /><span><strong>Public sources first.</strong> Nothing is sent to the client, and paid enrichment never runs automatically.</span></p><Button disabled={props.locked || !props.company.trim() || !websiteValid || !emailValid || busy} icon="arrow" type="submit">{props.locked ? "Creating engagements is off in practice mode" : props.apiState === "saving" ? "Preparing research…" : "Research this business"}</Button></div>
     </form>
   </section>;
 }
 
-function Migration({ onBack, onContinue }: { onBack: () => void; onContinue: () => void }) {
-  const [file, setFile] = useState(""); const [text, setText] = useState("");
-  return <section className="guided narrow"><Back onClick={onBack}>Entry options</Back><PageHead eyebrow="Client · External migration" title="Bring the existing work with you.">Import an audit, transcript, notes, or workspace export. We’ll preserve the source and map it into the same evidence-grounded journey.</PageHead>
-    <div className="panel"><label className="upload large"><input accept=".pdf,.doc,.docx,.txt,.md,.csv,.json" onChange={(e) => setFile(e.target.files?.[0]?.name ?? "")} type="file" /><span><Icon name="upload" size={23} /></span><span><strong>{file || "Choose a source file"}</strong><small>The original remains a source; it is not silently overwritten.</small></span></label>
+function Migration({ onBack, onStage }: {
+  onBack: () => void;
+  onStage: (payload: { file: TranscriptFile | null; fileName: string; text: string }) => void;
+}) {
+  const [fileName, setFileName] = useState("");
+  const [file, setFile] = useState<TranscriptFile | null>(null);
+  const [text, setText] = useState("");
+  const [fileState, setFileState] = useState<{ tone: "reading" | "ready" | "error"; message: string } | null>(null);
+  async function choose(picked: File | null) {
+    setFile(null); setFileState(null);
+    if (!picked) return setFileName("");
+    setFileName(picked.name);
+    const extension = extensionOf(picked.name);
+    if (extension === "pdf") return setFileState({ tone: "error", message: "PDF cannot be read by the source register. Export it to DOCX, TXT, Markdown, or CSV first." });
+    if (!(sourceExtensions as readonly string[]).includes(extension)) return setFileState({ tone: "error", message: `${picked.name} is not a supported source format. Use TXT, MD, CSV, DOCX, VTT, SRT, or JSON.` });
+    if (picked.size > MAX_TRANSCRIPT_BYTES) return setFileState({ tone: "error", message: `${picked.name} is ${formatBytes(picked.size)}. The upload limit is ${formatBytes(MAX_TRANSCRIPT_BYTES)}.` });
+    setFileState({ tone: "reading", message: `Reading ${picked.name}…` });
+    try {
+      const payload = await readTranscriptFile(picked);
+      if (!payload.content.length) return setFileState({ tone: "error", message: `${picked.name} contained no readable content. Choose another file.` });
+      setFile(payload);
+      setFileState({ tone: "ready", message: `${formatBytes(picked.size)} read. It is attached to the engagement's source register once you add the client anchor.` });
+    } catch (reason) {
+      setFileState({ tone: "error", message: `The file could not be read: ${reason instanceof Error ? reason.message : "unknown error"}` });
+    }
+  }
+  const blocked = fileState?.tone === "reading" || fileState?.tone === "error";
+  return <section className="guided narrow"><Back onClick={onBack}>Entry options</Back><PageHead eyebrow="Client · External migration" title="Bring the existing work with you.">Import an audit, transcript, notes, or workspace export. It is attached to the new engagement’s source register once you add the client anchor.</PageHead>
+    <div className="panel"><label className="upload large"><input accept={sourceAccept} onChange={(e) => choose(e.target.files?.[0] ?? null)} type="file" /><span><Icon name="upload" size={23} /></span><span><strong>{fileName || "Choose a source file"}</strong><small>TXT, Markdown, CSV, DOCX, VTT, SRT, or JSON. PDF cannot be read — export it first.</small></span></label>
+      {fileState ? <p className={`upload-state ${fileState.tone === "error" ? "error" : fileState.tone === "reading" ? "" : "ready"}`} role={fileState.tone === "error" ? "alert" : "status"}><Icon name={fileState.tone === "error" ? "info" : fileState.tone === "reading" ? "refresh" : "check"} size={15} />{fileState.message}</p> : null}
       <div className="or"><span>or paste source material</span></div><label><span>Existing notes or transcript</span><textarea onChange={(e) => setText(e.target.value)} placeholder="Paste the material exactly as received…" rows={9} value={text} /></label>
-      <div className="action-row"><p><Icon name="info" size={17} />Claims retain their source and confirmation status.</p><Button disabled={!file && !text.trim()} icon="arrow" onClick={onContinue}>Continue with client anchor</Button></div>
+      <div className="action-row"><p><Icon name="info" size={17} />Nothing is captured on this screen. The file and pasted text are added to the engagement’s source register after you add the client anchor.</p><Button disabled={blocked || (!file && !text.trim())} icon="arrow" onClick={() => onStage({ file, fileName, text })}>Continue with client anchor</Button></div>
     </div>
   </section>;
 }
@@ -2073,13 +2315,15 @@ function claimsForBlock(canvas: CanvasRecord | null, facts: EvidenceClaim[], tit
   return [...claims].sort((a, b) => Number(b.provenance === "client-stated") - Number(a.provenance === "client-stated")).slice(0, 3);
 }
 
-function Research({ canvas, company, focusTab, onBack, onPrepare, research, script }: {
+function Research({ canvas, company, focusTab, onAddSource, onBack, onPrepare, research, script, sourceState }: {
   canvas: CanvasRecord | null; company: string;
   /** Lets the practice walkthrough open this screen on the tab its current stop is about. */
   focusTab?: ResearchTab;
-  onBack: () => void; onPrepare: () => void;
+  onAddSource: (file: File) => void; onBack: () => void; onPrepare: () => void;
   research: ResearchPayload | null; script: { questions: DiscoveryQuestion[]; generic: boolean };
+  sourceState: { tone: "reading" | "ready" | "error"; message: string } | null;
 }) {
+  const sourceInputRef = useRef<HTMLInputElement>(null);
   const [tab, setTab] = useState<ResearchTab>(focusTab ?? "canvas");
   // Same render-phase sync the coaching rail uses: a changed request moves the tab once,
   // and the advisor keeps control of it from then on.
@@ -2105,7 +2349,11 @@ function Research({ canvas, company, focusTab, onBack, onPrepare, research, scri
     {tab === "questions" ? <div className="discovery">{script.generic ? <div className="research-source-note warning"><Icon name="info" size={17} /><span><strong>Generic fallback script</strong>Research produced no client-specific discovery questions. These four prompts are generic and assert nothing about {company}.</span></div> : null}
       {discoverySections.map((section) => { const items = script.questions.filter((item) => item.section === section); return items.length ? <section className="discovery-section" key={section}><header><p className="eyebrow">{section}</p><h3>{sectionLabels[section]}</h3></header><div className="question-list">{items.map((item, index) => <article key={item.id}><b>{String(index + 1).padStart(2, "0")}</b><div><div className="question-meta"><Pill tone={evidenceTone[item.evidenceStatus] ?? "neutral"}>{evidenceLabel[item.evidenceStatus] ?? item.evidenceStatus}</Pill>{item.required ? <Pill tone="missing">Required</Pill> : null}<Pill>{item.expectedAnswerType}</Pill>{item.canvasBlock ? <Pill tone="inferred">{item.canvasBlock}</Pill> : null}</div><h3>{item.question}</h3><p>{item.whyItMatters}</p><div className="assumption"><span>What we found publicly</span><p>{item.publicAssumption}</p></div>{item.followUps.length ? <ul className="follow-ups">{item.followUps.map((follow) => <li key={follow}>{follow}</li>)}</ul> : null}</div></article>)}</div></section> : null; })}
       {research?.constraintHypotheses?.length ? <section className="discovery-section"><header><p className="eyebrow">internal only</p><h3>Constraint hypotheses to test — never read aloud as fact</h3></header><ul className="hypothesis-list">{research.constraintHypotheses.map((item) => <li key={`${item.canvasBlock}${item.type}`}><Pill tone="assumed">{item.type} · {item.canvasBlock}</Pill><strong>{item.confirmationCondition}</strong><small>Kill this hypothesis if: {item.killCondition}</small></li>)}</ul></section> : null}</div> : null}
-    <div className="page-actions"><div><Button variant="quiet">Correct research</Button><Button variant="quiet">Add a source</Button><Button variant="quiet">Research a gap</Button></div><Button icon="arrow" onClick={onPrepare}>Prepare the client</Button></div>
+    <div className="page-actions"><div className="research-source-add">
+      <input accept={sourceAccept} hidden onChange={(event) => { const picked = event.target.files?.[0] ?? null; if (picked) onAddSource(picked); event.target.value = ""; }} ref={sourceInputRef} type="file" />
+      <Button icon="upload" onClick={() => sourceInputRef.current?.click()} variant="quiet">Add a source</Button>
+      {sourceState ? <p className={`upload-state ${sourceState.tone === "error" ? "error" : sourceState.tone === "reading" ? "" : "ready"}`} role={sourceState.tone === "error" ? "alert" : "status"}><Icon name={sourceState.tone === "error" ? "info" : sourceState.tone === "reading" ? "refresh" : "check"} size={15} />{sourceState.message}</p> : null}
+    </div><Button icon="arrow" onClick={onPrepare}>Prepare the client</Button></div>
     <div className="apollo"><Icon name="spark" size={15} />Apollo remains off. Paid enrichment appears only beside a named gap, with credit cost shown before approval.</div>
   </section>;
 }
@@ -2471,13 +2719,16 @@ function Call(props: {
 }
 
 function Transcript(props: {
-  callNumber: 1 | 2; company: string; date: string; method: "fireflies" | "paste" | "upload"; text: string; fileName: string;
-  fileError: string; fileReading: boolean; fileSummary: string; ready: boolean;
-  onBack: () => void; onDate: (v: string) => void; onMethod: (v: "fireflies" | "paste" | "upload") => void;
+  callNumber: 1 | 2; company: string; scheduledAt: string | null; method: "fireflies" | "paste" | "upload"; text: string; fileName: string;
+  fileError: string; fileReading: boolean; fileSummary: string; ready: boolean; busy: boolean;
+  speakers: string[]; speakerRoles: Record<string, "client" | "advisor" | "unknown">; speakerNote: string;
+  onBack: () => void; onMethod: (v: "fireflies" | "paste" | "upload") => void;
   onText: (v: string) => void; onFile: (file: File | null) => void; onAnalyze: () => void;
+  onSpeakerRole: (speaker: string, role: "client" | "advisor" | "unknown") => void;
 }) {
+  const speakerOptions: Array<["client" | "advisor" | "unknown", string]> = [["client", "Client"], ["advisor", "Advisor"], ["unknown", "Other / skip"]];
   return <section className="guided narrow"><Back onClick={props.onBack}>Guided call</Back><PageHead eyebrow="Call · Transcript evidence" title="Let’s turn the conversation into evidence.">Use the full transcript—not only a generated summary—so every correction and finding can point back to the client’s words.</PageHead>
-    <div className="meeting-anchor"><div><span>Client</span><strong>{props.company}</strong></div><label><span>Meeting date</span><input onChange={(e) => props.onDate(e.target.value)} type="date" value={props.date} /></label></div>
+    <div className="meeting-anchor"><div><span>Client</span><strong>{props.company}</strong></div><div><span>Call {props.callNumber} scheduled</span><strong>{formatMeeting(props.scheduledAt)}</strong></div></div>
     <div className="method-cards">{[["fireflies", "mic", "Import from Fireflies", "Choose a connected meeting"], ["paste", "document", "Paste transcript text", "Keep the original wording"], ["upload", "upload", "Upload a transcript", "TXT, VTT, SRT, or DOCX"]].map(([method, icon, title, sub]) => <button className={props.method === method ? "selected" : ""} key={method} onClick={() => props.onMethod(method as typeof props.method)} type="button"><span><Icon name={icon as IconName} size={19} /></span><strong>{title}</strong><small>{sub}</small></button>)}</div>
     <div className="method-panel">{props.method === "fireflies" ? <div className="connector-empty"><Icon name="mic" size={24} /><div><strong>Fireflies transcript ID</strong><p>Enter a processed meeting ID after connecting Fireflies, or paste/upload now.</p><input onChange={(event) => props.onText(event.target.value)} placeholder="Transcript ID" value={props.text} /></div><Button onClick={() => props.onMethod("paste")} variant="secondary">Paste instead</Button></div> : null}
       {props.method === "paste" ? <label><span>Full transcript</span><textarea onChange={(e) => props.onText(e.target.value)} placeholder="[00:00] Speaker: …" rows={12} value={props.text} /></label> : null}
@@ -2485,7 +2736,16 @@ function Transcript(props: {
         {props.fileReading ? <p className="upload-state" role="status"><Icon name="refresh" size={15} />Reading {props.fileName}…</p> : null}
         {props.fileError ? <p className="upload-state error" role="alert"><Icon name="info" size={15} />{props.fileError}</p> : null}
         {props.ready && !props.fileReading && !props.fileError ? <p className="upload-state ready"><Icon name="check" size={15} />{props.fileName} is parsed and ready to upload. The file content itself is sent — not just its name.</p> : null}</> : null}
-    </div><div className="action-row"><p><Icon name="spark" size={17} />We’ll compare this with original research, surface contradictions, and keep gaps explicit.</p><Button disabled={(props.method === "paste" && !props.text.trim()) || (props.method === "upload" && (!props.ready || props.fileReading))} icon="arrow" onClick={props.onAnalyze}>Analyze transcript</Button></div>
+    </div>
+    {props.speakers.length || props.speakerNote ? <div className="speaker-roles">
+      <div className="speaker-roles-head"><p className="eyebrow">Who is who?</p><small>Only speakers you tag <strong>Client</strong> become evidence. Your own lines never do, however quotable — and an untagged speaker is treated as a gap, not the client.</small></div>
+      {props.speakers.length ? <ul>{props.speakers.map((speaker) => {
+        const role = props.speakerRoles[speaker] ?? "unknown";
+        return <li key={speaker}><strong>{speaker}</strong><div className="status-toggle">{speakerOptions.map(([value, label]) =>
+          <button className={role === value ? "selected" : ""} key={value} onClick={() => props.onSpeakerRole(speaker, value)} type="button">{label}</button>)}</div></li>;
+      })}</ul> : <p className="upload-state" role="status"><Icon name="info" size={15} />{props.speakerNote}</p>}
+    </div> : null}
+    <div className="action-row"><p><Icon name="spark" size={17} />We’ll compare this with original research, surface contradictions, and keep gaps explicit.</p><Button disabled={props.busy || (props.method === "paste" && !props.text.trim()) || (props.method === "upload" && (!props.ready || props.fileReading))} icon="arrow" onClick={props.onAnalyze}>{props.busy ? "Analyzing…" : "Analyze transcript"}</Button></div>
   </section>;
 }
 
@@ -2515,7 +2775,7 @@ function GroundingRejections({ synthesis }: { synthesis: TranscriptSynthesis | n
   </details>;
 }
 
-function Synthesis({ onApprove, onBack, synthesis }: { onApprove: () => void; onBack: () => void; synthesis: TranscriptSynthesis | null }) {
+function Synthesis({ busy, onApprove, onBack, synthesis }: { busy: boolean; onApprove: () => void; onBack: () => void; synthesis: TranscriptSynthesis | null }) {
   const candidate = synthesis?.constraintCandidate;
   const quotes = synthesis?.quotes ?? [];
   const gaps = synthesis?.gaps ?? [];
@@ -2526,16 +2786,26 @@ function Synthesis({ onApprove, onBack, synthesis }: { onApprove: () => void; on
     <Narrative synthesis={synthesis} />
     <GroundingRejections synthesis={synthesis} />
     <div className="candidate"><div><p className="eyebrow">Leading constraint candidate · {candidate?.findingStatus ?? "none"}</p><h2>{candidate ? `${candidate.constraintType} in ${candidate.canvasBlock}` : "No constraint candidate yet."}</h2><p>{candidate ? candidate.prescription.description : "The system will not invent a finding from a zero-signal transcript."}</p></div><dl><div><dt>Evidence lines</dt><dd>{candidate?.evidence.length ?? 0}</dd></div><div><dt>Baseline</dt><dd>{synthesis?.baselineStatus ?? "Missing"}</dd></div><div><dt>Open gaps</dt><dd>{gaps.length ? gaps.join("; ") : "None detected"}</dd></div></dl></div>
-    <div className="page-actions"><p><Icon name="lock" size={16} />Approval commits the reviewed Canvas and evidence diff. It does not approve the diagnosis.</p><Button disabled={!synthesis} icon="check" onClick={onApprove}>Approve Canvas commit</Button></div>
+    <div className="page-actions"><p><Icon name="lock" size={16} />Approval commits the reviewed Canvas and evidence diff. It does not approve the diagnosis.</p><Button disabled={!synthesis || busy} icon="check" onClick={onApprove}>{busy ? "Approving…" : "Approve Canvas commit"}</Button></div>
   </section>;
 }
 
-function Findings({ agendaBusy, agendaError, consent, onApprove, onBack, onConsent, onPresent, owner, scheduledAt, synthesis }: {
-  agendaBusy: boolean; agendaError: string; consent: "pending" | "recorded" | "not-recorded"; onApprove: () => void; onBack: () => void;
+function Findings({ agendaBusy, agendaError, busy, consent, contact, contactBusy, contactError, contactRole, onApprove, onBack, onConsent, onPresent, onSaveContact, owner, scheduledAt, synthesis }: {
+  agendaBusy: boolean; agendaError: string; busy: boolean; consent: "pending" | "recorded" | "not-recorded"; onApprove: () => void; onBack: () => void;
   onConsent: (value: "pending" | "recorded" | "not-recorded") => void; onPresent: () => void; owner: string;
+  contact: string; contactRole: string; contactBusy: boolean; contactError: string; onSaveContact: (contact: string, role: string) => void;
   scheduledAt: string | null; synthesis: TranscriptSynthesis | null;
 }) {
   const [step, setStep] = useState(0);
+  const [ownerName, setOwnerName] = useState(contact);
+  const [ownerRole, setOwnerRole] = useState(contactRole);
+  // Keep the editor in step with the record after a successful save (the props change then).
+  const [ownerReq, setOwnerReq] = useState(`${contact}\u0000${contactRole}`);
+  if (`${contact}\u0000${contactRole}` !== ownerReq) {
+    setOwnerReq(`${contact}\u0000${contactRole}`);
+    setOwnerName(contact); setOwnerRole(contactRole);
+  }
+  const ownerUnchanged = ownerName.trim() === contact.trim() && ownerRole.trim() === contactRole.trim();
   const candidate = synthesis?.constraintCandidate;
   const baseline = synthesis?.baselineStatus ?? "Missing";
   const steps = [["Reconcile the Canvas", "Confirm corrections, role ownership, and the actual flow."], ["Resolve the baseline", `${baseline} baseline. Confirm its source or assign instrumentation to the named owner.`], ["Test the constraint", candidate ? `Confirm or kill the ${candidate.constraintType} candidate in ${candidate.canvasBlock}.` : "No constraint signal was detected; collect stronger evidence before approval."], ["Reveal the prescription", "Constraint → prescription → metric formula → named owner."]];
@@ -2548,13 +2818,23 @@ function Findings({ agendaBusy, agendaError, consent, onApprove, onBack, onConse
       {!candidate ? <small>No supported constraint candidate yet, so there is nothing to present. Collect stronger evidence first.</small> : null}
       {agendaError ? <p className="upload-state error" role="alert"><Icon name="info" size={15} />{agendaError}</p> : null}
     </div>
+    <div className={`owner-editor${!owner ? " missing" : ""}`}>
+      <div className="owner-editor-head"><p className="eyebrow">Named human owner</p><small>Diagnosis approval needs a real person and their role. Set or correct them here — it updates the engagement record before you approve.</small></div>
+      <div className="owner-editor-fields">
+        <label><span>Contact name</span><input onChange={(event) => setOwnerName(event.target.value)} placeholder="Dana Whitfield" value={ownerName} /></label>
+        <label><span>Contact role</span><input onChange={(event) => setOwnerRole(event.target.value)} placeholder="Owner" value={ownerRole} /></label>
+        <Button disabled={contactBusy || !ownerName.trim() || !ownerRole.trim() || ownerUnchanged} icon="check" onClick={() => onSaveContact(ownerName, ownerRole)} variant="secondary">{contactBusy ? "Saving…" : "Save contact"}</Button>
+      </div>
+      {contactError ? <p className="upload-state error" role="alert"><Icon name="info" size={15} />{contactError}</p> : null}
+      {!owner ? <p className="upload-state" role="status"><Icon name="info" size={15} />No named owner is on the engagement yet, so diagnosis approval stays blocked. Add the name and role above.</p> : null}
+    </div>
     <div className="findings-flow"><ol>{steps.map(([title], index) => <li className={index === step ? "active" : index < step ? "done" : ""} key={title}><button onClick={() => setStep(index)} type="button"><span>{index < step ? <Icon name="check" size={13} /> : index + 1}</span>{title}</button></li>)}</ol>
       <article><p className="eyebrow">Part {step < 2 ? "A · Reconciliation" : "B · Reveal"}</p><h2>{steps[step][0]}</h2><p>{steps[step][1]}</p>
         {step === 1 ? <div className="baseline"><Pill tone={baseline === "Confirmed" ? "known" : "missing"}>{baseline} baseline</Pill><strong>{baseline === "Confirmed" ? "Verify the coherent metric and source." : "No benchmark will be substituted."}</strong><span>{synthesis?.gaps.join("; ") || "Assign baseline instrumentation as the first Sprint task."}</span></div> : null}
         {step === 3 ? <div className="reveal">{[["Constraint", candidate ? `${candidate.constraintType} in ${candidate.canvasBlock}` : "No supported candidate"], ["Prescription", candidate?.prescription.description || "Collect stronger evidence before prescribing"], ["Projected delta", "(ending metric − starting metric) ÷ measurement period"], ["Human owner", owner || "Named owner required"]].map(([label, text], index) => <div key={label}>{index ? <Icon name="arrow" /> : null}<section><span>{label}</span><strong>{text}</strong></section></div>)}</div> : null}
         <div className="findings-actions"><Button disabled={step === 0} onClick={() => setStep(step - 1)} variant="secondary">Back</Button>{step < 3 ? <Button icon="arrow" onClick={() => setStep(step + 1)}>Continue</Button> : null}</div>
       </article></div>
-    {step === 3 ? <div className="diagnosis"><div><Pill tone="assumed">Provisional diagnosis</Pill><h2>{candidate ? `${candidate.constraintType} in ${candidate.canvasBlock}` : "No supported diagnosis yet."}</h2><p>{baseline === "Confirmed" ? "Approve only after checking the evidence and owner." : "It stays provisional until the baseline lands; Sprint 1 begins with instrumentation."}</p></div><dl><div><dt>Evidence</dt><dd>{candidate?.evidence.length ?? 0} client line(s)</dd></div><div><dt>Canvas block</dt><dd>{candidate?.canvasBlock ?? "Missing"}</dd></div><div><dt>Named owner</dt><dd>{owner || "Required"}</dd></div><div><dt>First Sprint task</dt><dd>{baseline === "Confirmed" ? "Run the intervention" : "Instrument baseline"}</dd></div></dl><Button disabled={!candidate || !owner || consent !== "recorded"} icon="check" onClick={onApprove}>Approve provisional diagnosis</Button></div> : null}
+    {step === 3 ? <div className="diagnosis"><div><Pill tone="assumed">Provisional diagnosis</Pill><h2>{candidate ? `${candidate.constraintType} in ${candidate.canvasBlock}` : "No supported diagnosis yet."}</h2><p>{baseline === "Confirmed" ? "Approve only after checking the evidence and owner." : "It stays provisional until the baseline lands; Sprint 1 begins with instrumentation."}</p></div><dl><div><dt>Evidence</dt><dd>{candidate?.evidence.length ?? 0} client line(s)</dd></div><div><dt>Canvas block</dt><dd>{candidate?.canvasBlock ?? "Missing"}</dd></div><div><dt>Named owner</dt><dd>{owner || "Required"}</dd></div><div><dt>First Sprint task</dt><dd>{baseline === "Confirmed" ? "Run the intervention" : "Instrument baseline"}</dd></div></dl><Button disabled={!candidate || !owner || consent !== "recorded" || busy} icon="check" onClick={onApprove}>{busy ? "Approving…" : "Approve provisional diagnosis"}</Button></div> : null}
   </section>;
 }
 
@@ -2615,7 +2895,7 @@ function Deliver({ approved, artifacts, busy, error, intents, onActions, onBack,
         </div> : <button disabled={Boolean(busy)} onClick={onGenerate} type="button">{busy === "suite" ? "Generating…" : "Generate suite"}<Icon name="arrow" size={14} /></button>}
       </article>;
     })}</div>
-    <div className="page-actions"><p><Icon name="lock" size={16} />The CRM action creates a reviewed write-back intent. It does not change Google Sheets automatically.</p><div><Button disabled={Boolean(busy)} icon="refresh" onClick={onGenerate} variant="secondary">{busy === "suite" ? "Generating…" : artifacts.length ? "Regenerate the suite" : "Generate the suite"}</Button><Button icon="arrow" onClick={onSync} variant="secondary">Prepare CRM write-back</Button></div></div>
+    <div className="page-actions"><p><Icon name="lock" size={16} />The CRM action creates a reviewed write-back intent. It does not change Google Sheets automatically.</p><div><Button disabled={Boolean(busy)} icon="refresh" onClick={onGenerate} variant="secondary">{busy === "suite" ? "Generating…" : artifacts.length ? "Regenerate the suite" : "Generate the suite"}</Button><Button disabled={Boolean(busy)} icon="arrow" onClick={onSync} variant="secondary">{busy === "crm" ? "Preparing…" : "Prepare CRM write-back"}</Button></div></div>
     <div className="sprint-path"><div className="sprint-path-heading"><p className="eyebrow">Implementation roadmap</p><span>After diagnosis approval</span></div>{([["1", "Activate the sprint", "Fixed scope, named owner, measurement clock started.", "sprint"], ["2", "Remove & measure", "Capture the ending metric; the server decides whether a delta is claimable.", "measure"], ["3", "Catalog write-back", "Compound the reusable evidence pattern.", "catalog"]] as Array<[string, string, string, Screen]>).map(([number, title, text, target], index) => <button className="sprint-step" key={title} onClick={() => onOperate(target)} type="button">{index ? <Icon className="sprint-arrow" name="arrow" /> : null}<span className="sprint-number">{number}</span><section><strong>{title}</strong><small>{text}</small></section><Icon name="chevron" size={15} /></button>)}</div>
   </section>;
 }

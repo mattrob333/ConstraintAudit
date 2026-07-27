@@ -3325,3 +3325,57 @@ blockquote { margin: 0; }
   .tour-panel > header { flex-direction: column; }
   .tour-actions .button { flex-basis: 100%; }
 }
+
+/* Research: the "Add a source" control that replaced the former no-op quiet buttons. */
+.research-source-add { align-items: center; }
+.research-source-add .upload-state { margin: 0; flex-basis: 100%; }
+
+/* Transcript: speaker role tagging before analysis. Only Client-tagged speakers become evidence. */
+.speaker-roles {
+  margin-top: 18px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  padding: 16px 18px;
+}
+.speaker-roles-head { display: grid; gap: 4px; margin-bottom: 12px; }
+.speaker-roles-head small { color: var(--muted); font-size: .8rem; }
+.speaker-roles ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.speaker-roles li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper);
+  padding: 9px 12px;
+}
+.speaker-roles li > strong { font-size: .92rem; }
+.speaker-roles .upload-state { margin: 0; }
+
+/* Findings: editable named-owner control that unblocks diagnosis approval when a role was left blank. */
+.owner-editor {
+  margin-bottom: 22px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  padding: 18px 20px;
+}
+.owner-editor.missing { border-color: var(--provisional); background: #fdf6e3; }
+.owner-editor-head { display: grid; gap: 4px; margin-bottom: 12px; }
+.owner-editor-head small { color: var(--muted); font-size: .8rem; }
+.owner-editor-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 14px;
+}
+.owner-editor-fields label { display: grid; gap: 7px; }
+.owner-editor > .upload-state { margin: 12px 0 0; }
+
+@media (max-width: 720px) {
+  .owner-editor-fields { grid-template-columns: 1fr; }
+  .owner-editor-fields .button { grid-column: 1; }
+}
