@@ -8,7 +8,7 @@ type Stage = (typeof stages)[number];
 type Screen =
   | "home" | "intake" | "migration" | "engagements" | "research" | "prepare"
   | "call" | "transcript" | "synthesis" | "findings" | "findings-call" | "deliver" | "sprint"
-  | "measure" | "catalog" | "actions" | "integrations";
+  | "measure" | "catalog" | "actions" | "integrations" | "settings";
 type Tone = "neutral" | "known" | "inferred" | "assumed" | "missing" | "success";
 /** Mirrors WORKFLOW_STATES in lib/workflow.ts, in canonical order. */
 const workflowStates = [
@@ -102,6 +102,12 @@ type IntegrationItem = {
   id: string; name: string; status: string; mode: string; setup?: string;
   environmentVariables?: string[]; model?: string; resource?: { name: string; url: string };
 };
+/** Mirrors the advisor-scoped connection settings behind GET/PUT /api/settings. Non-secret only — never a key. */
+type AdvisorSettings = { crmSpreadsheetId: string; crmSheetTab: string; driveFolderId: string; fromName: string };
+/** The providers POST /api/settings/test accepts. Mirrors the server's testable set exactly. */
+type SettingsTestProvider = "openai" | "resend" | "google_sheets" | "google_docs" | "fireflies";
+/** The `result` POST /api/settings/test returns. `detail` is human-readable and never contains a secret. */
+type SettingsTestResult = { ok?: boolean; status?: string; provider?: string; detail?: string };
 type TranscriptFile = { name: string; mimeType: string; content: string; encoding: "utf8" | "base64" };
 
 type ResearchPayload = {
@@ -2108,6 +2114,7 @@ export default function AdvisorCockpit() {
         <Documents activeId={activeId} />
         <button className="header-link" onClick={() => go("engagements")} type="button"><Icon name="briefcase" size={16} />Engagements</button>
         <button className="header-link" onClick={() => go("integrations")} type="button"><Icon name="integration" size={16} />Integrations</button>
+        <button className="header-link" onClick={() => go("settings")} type="button"><Icon name="lock" size={16} />Settings</button>
         {screen !== "home" ? <button className="exit" onClick={() => go("home")} type="button">Exit</button> : null}
       </nav>
     </header>
@@ -2153,6 +2160,7 @@ export default function AdvisorCockpit() {
       {screen === "catalog" ? <Catalog busy={opsBusy === "catalog"} entry={catalogEntry} error={opsError} onBack={() => openOperations("measure")} onNavigate={openOperations} onSubmit={writeCatalog} outcome={outcome} /> : null}
       {screen === "actions" ? <ReviewedActions engagementId={activeId} onBack={() => openOperations("sprint")} onNavigate={openOperations} /> : null}
       {screen === "integrations" ? <IntegrationCenter onBack={() => go("home")} /> : null}
+      {screen === "settings" ? <SettingsScreen onBack={() => go("home")} onIntegrations={() => go("integrations")} /> : null}
       {screen === "call" && !callQuestion ? <section className="guided narrow"><PageHead eyebrow="Call · guided script" title="No call question is available.">Run research for this engagement so the guided call can be driven by client-specific discovery questions.</PageHead><Button icon="back" onClick={() => go("research")}>Back to research</Button></section> : null}
     </main>
     {screen !== "home" && !isClientFacing(screen) ? <div aria-live="polite" className="save-state"><i className={apiState} />{apiState === "saving" ? "Saving…" : apiState === "saved" ? "Saved" : apiState === "error" ? "Action failed" : "Ready"}</div> : null}
@@ -3126,5 +3134,211 @@ function IntegrationCenter({ onBack }: { onBack: () => void }) {
     </article>)}</div>
     <div className="status-legend"><p className="eyebrow">What each status means</p><dl>{statusLegend.map(([status, text]) => <div key={status}><dt><Pill tone={statusTone[status] ?? "neutral"}>{status.replace(/_/g, " ")}</Pill></dt><dd>{text}</dd></div>)}</dl></div>
     <div className="security"><Icon name="lock" size={18} /><div><strong>Authorization boundary</strong><p>Secrets are never entered into the audit. External writes, connector imports, paid enrichment, and customer sends require explicit review and approval.</p></div></div>
+  </section>;
+}
+
+/** Which live integration ids can be verified, and the provider name POST /api/settings/test expects for each. */
+const TESTABLE_PROVIDERS: Partial<Record<string, SettingsTestProvider>> = {
+  openai: "openai",
+  resend: "resend",
+  google_sheets: "google_sheets",
+  google_drive_docs: "google_docs",
+  fireflies: "fireflies",
+};
+
+/** Reads a test result into a tone and label. ok → pass, not-configured → not set up, anything else → fail. */
+function testResultView(result: SettingsTestResult | undefined): { tone: Tone; label: string } | null {
+  if (!result) return null;
+  if (result.ok) return { tone: "success", label: "Passed" };
+  if (result.status === "not-configured") return { tone: "assumed", label: "Not set up" };
+  return { tone: "missing", label: "Failed" };
+}
+
+type SettingsTestState = { running: boolean; result?: SettingsTestResult; error?: string };
+
+/** One selectable, copyable shell command. The command is always visible, so a manual copy works even without clipboard access. */
+function CopyLine({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  return <div className="copy-line">
+    <code>{text}</code>
+    <button aria-label={`Copy command: ${text}`} className="copy-button" onClick={() => {
+      if (typeof navigator.clipboard?.writeText !== "function") return;
+      navigator.clipboard.writeText(text).then(() => { setCopied(true); window.setTimeout(() => setCopied(false), 1600); }).catch(() => setCopied(false));
+    }} type="button">{copied ? <><Icon name="check" size={13} />Copied</> : <><Icon name="document" size={13} />Copy</>}</button>
+  </div>;
+}
+
+/** The pass / not set up / fail line under a Test button. `detail` is shown verbatim — the server promises it never carries a secret. */
+function TestOutcome({ test }: { test: SettingsTestState | undefined }) {
+  if (!test) return null;
+  const view = testResultView(test.result);
+  return <>
+    {test.error ? <p className="upload-state error" role="alert"><Icon name="info" size={15} />The test could not run: {test.error}</p> : null}
+    {view && test.result ? <p className={`settings-test-result ${view.tone}`} role="status"><Pill tone={view.tone}>{view.label}</Pill><span>{test.result.detail || "The server returned no detail."}</span></p> : null}
+  </>;
+}
+
+/**
+ * The advisor-only Settings screen. Two sections:
+ *  1. API keys — live status, what each unlocks, the required env-var NAMES, the exact
+ *     `wrangler secret put` command, and a Test button. No key is ever entered or displayed.
+ *  2. My connections — the non-secret, per-advisor connection settings behind GET/PUT /api/settings.
+ * Reachable only from the top nav, which is hidden on the client-facing call and presentation views.
+ */
+function SettingsScreen({ onBack, onIntegrations }: { onBack: () => void; onIntegrations: () => void }) {
+  const [integrations, setIntegrations] = useState<IntegrationItem[]>([]);
+  const [integrationsLoading, setIntegrationsLoading] = useState(true);
+  const [integrationsError, setIntegrationsError] = useState("");
+  const [tests, setTests] = useState<Partial<Record<SettingsTestProvider, SettingsTestState>>>({});
+
+  const [settings, setSettings] = useState<AdvisorSettings | null>(null);
+  const [settingsLoading, setSettingsLoading] = useState(true);
+  const [settingsError, setSettingsError] = useState("");
+  const [sheetId, setSheetId] = useState("");
+  const [tab, setTab] = useState("Engagements");
+  const [folder, setFolder] = useState("");
+  const [fromName, setFromName] = useState("");
+  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [saveError, setSaveError] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    api<{ integrations: IntegrationItem[] }>("/api/integrations")
+      .then((result) => { if (active) setIntegrations(result.integrations ?? []); })
+      .catch((reason: Error) => { if (active) { setIntegrations([]); setIntegrationsError(`Integration status could not be read: ${reason.message}`); } })
+      .finally(() => { if (active) setIntegrationsLoading(false); });
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    api<{ settings: AdvisorSettings }>("/api/settings")
+      .then((result) => {
+        if (!active) return;
+        const s = result.settings;
+        setSettings(s);
+        setSheetId(s.crmSpreadsheetId ?? "");
+        setTab(s.crmSheetTab?.trim() ? s.crmSheetTab : "Engagements");
+        setFolder(s.driveFolderId ?? "");
+        setFromName(s.fromName ?? "");
+      })
+      .catch((reason: Error) => { if (active) setSettingsError(`Your connection settings could not be loaded: ${reason.message}`); })
+      .finally(() => { if (active) setSettingsLoading(false); });
+    return () => { active = false; };
+  }, []);
+
+  /** Guarded against double-submit: a second click while a provider is in flight is ignored. */
+  async function runTest(provider: SettingsTestProvider) {
+    if (tests[provider]?.running) return;
+    setTests((prev) => ({ ...prev, [provider]: { running: true, result: prev[provider]?.result } }));
+    try {
+      const response = await api<{ result: SettingsTestResult }>("/api/settings/test", { method: "POST", body: JSON.stringify({ provider }) });
+      setTests((prev) => ({ ...prev, [provider]: { running: false, result: response.result } }));
+    } catch (reason) {
+      setTests((prev) => ({ ...prev, [provider]: { running: false, error: reason instanceof Error ? reason.message : "unknown request failure" } }));
+    }
+  }
+
+  /** Saves every connection field through a single PUT. Guarded so a double-click cannot fire it twice. */
+  async function saveConnections(event: FormEvent) {
+    event.preventDefault();
+    if (saveState === "saving" || settingsLoading) return;
+    setSaveState("saving"); setSaveError("");
+    try {
+      const body: Partial<AdvisorSettings> = {
+        crmSpreadsheetId: sheetId.trim(), crmSheetTab: tab.trim(), driveFolderId: folder.trim(), fromName: fromName.trim(),
+      };
+      const result = await api<{ settings: AdvisorSettings }>("/api/settings", { method: "PUT", body: JSON.stringify(body) });
+      const s = result.settings;
+      setSettings(s);
+      setSheetId(s.crmSpreadsheetId ?? "");
+      setTab(s.crmSheetTab?.trim() ? s.crmSheetTab : "Engagements");
+      setFolder(s.driveFolderId ?? "");
+      setFromName(s.fromName ?? "");
+      setSaveState("saved");
+    } catch (reason) {
+      setSaveState("error");
+      setSaveError(`Your connections were not saved: ${reason instanceof Error ? reason.message : "unknown request failure"}`);
+    }
+  }
+
+  const savedTab = settings ? (settings.crmSheetTab?.trim() ? settings.crmSheetTab : "Engagements") : "Engagements";
+  const dirty = settings !== null && (
+    sheetId.trim() !== (settings.crmSpreadsheetId ?? "").trim() ||
+    tab.trim() !== savedTab.trim() ||
+    folder.trim() !== (settings.driveFolderId ?? "").trim() ||
+    fromName.trim() !== (settings.fromName ?? "").trim()
+  );
+  const saveLabel = saveState === "saving" ? "Saving…"
+    : saveState === "error" ? "Not saved"
+    : saveState === "saved" && !dirty ? "Saved"
+    : dirty ? "Unsaved changes" : "Up to date";
+  const sheetsTest = tests.google_sheets;
+
+  return <section className="guided wide settings"><Back onClick={onBack}>Start</Back>
+    <PageHead eyebrow="Advisor setup" side={<Button icon="integration" onClick={onIntegrations} variant="secondary">Integration Center</Button>} title="Settings">Two things live here: the API keys your server holds (status and a test, never the key itself), and the connections stored against your advisor account. This screen is advisor-only and is not reachable from a client call.</PageHead>
+
+    <div className="settings-keys-banner"><Icon name="lock" size={20} /><div><strong>API keys are server secrets — you never type one here.</strong><p>Keys are set on the server with <code>wrangler secret put</code> and are never sent to the browser or written to the database. This screen shows only whether each key is present and lets you test it.</p></div></div>
+
+    <div className="settings-section"><header className="settings-section-head"><p className="eyebrow">Section 1 · API keys</p><h2>Status &amp; test — no key entry</h2><p>Read live from the server. For each provider you can see what it unlocks, the exact command to set its secret, and — where supported — a test that reports pass, not set up, or fail.</p></header>
+      {integrationsLoading ? <p className="registry-empty" role="status">Reading connector status…</p> : null}
+      {integrationsError ? <p className="ops-error" role="alert"><Icon name="info" size={15} />{integrationsError}</p> : null}
+      {!integrationsLoading && !integrationsError && integrations.length === 0 ? <p className="registry-empty">The server returned no integrations.</p> : null}
+      <div className="settings-providers">{integrations.map((item) => {
+        const provider = TESTABLE_PROVIDERS[item.id];
+        const test = provider ? tests[provider] : undefined;
+        return <article className="settings-provider" key={item.id}>
+          <span className="settings-provider-icon"><Icon name={modeIcon(item.mode)} size={21} /></span>
+          <div className="settings-provider-body">
+            <header><h3>{item.name}</h3><Pill tone={statusTone[item.status] ?? "neutral"}>{item.status.replace(/_/g, " ")}</Pill>{item.model ? <Pill tone="inferred">{item.model}</Pill> : null}</header>
+            <p className="settings-provider-unlocks">{item.setup || `Unlocks the ${(item.mode || "declared").replace(/_/g, " ")} mode.`}</p>
+            {item.environmentVariables?.length ? <div className="settings-secret">
+              <p className="settings-secret-lead"><Icon name="lock" size={14} />Required env var names — set each as a server secret. This keeps the key out of the database and out of this browser.</p>
+              <div className="copy-lines">{item.environmentVariables.map((name) => <CopyLine key={name} text={`wrangler secret put ${name}`} />)}</div>
+            </div> : <p className="settings-nokeys"><Icon name="check" size={14} />No credential is required for this provider.</p>}
+            {provider ? <div className="settings-test">
+              <Button disabled={Boolean(test?.running)} icon="refresh" onClick={() => runTest(provider)} variant="secondary">{test?.running ? "Testing…" : "Test"}</Button>
+              <TestOutcome test={test} />
+            </div> : null}
+          </div>
+        </article>;
+      })}</div>
+    </div>
+
+    <div className="settings-section"><header className="settings-section-head"><p className="eyebrow">Section 2 · My connections</p><h2>Stored against your advisor account</h2><p>Non-secret connection settings only. None of these fields is a key — they are saved to your account and can be changed at any time.</p></header>
+      {settingsLoading ? <p className="registry-empty" role="status">Reading your connection settings…</p> : null}
+      {settingsError ? <p className="ops-error" role="alert"><Icon name="info" size={15} />{settingsError}</p> : null}
+      {!settingsLoading && !settingsError ? <form className="panel settings-connections" onSubmit={saveConnections}>
+        <div className="settings-crm">
+          <h3>Connect your CRM — bring your own Google Sheet</h3>
+          <p className="settings-sub">The app writes engagement rows through the Google identity configured on the server. You share a sheet with it and paste the link here — you never paste a key.</p>
+          <ol className="settings-guide">
+            <li><span>1</span><div><strong>Download the CRM template</strong><p>Start from the exact columns the app writes back.</p><a className="button secondary settings-download" download href="/api/crm-template">Download CRM template<Icon name="download" size={15} /></a></div></li>
+            <li><span>2</span><div><strong>Import it into Google Sheets</strong><p>In Sheets, File → Import → Upload, and keep it as a new spreadsheet.</p></div></li>
+            <li><span>3</span><div><strong>Share it with the app&apos;s Google account</strong><p>Give edit access to the configured Google identity so the app can write the row. The app writes as that identity, not as you.</p></div></li>
+            <li><span>4</span><div><strong>Paste the sheet URL or id</strong>
+              <label><span>Google Sheet URL or ID</span><input autoCapitalize="none" onChange={(e) => setSheetId(e.target.value)} placeholder="https://docs.google.com/spreadsheets/d/…  or the raw id" spellCheck={false} value={sheetId} /></label>
+              <small>Paste the whole URL if it is easier — the server parses the id out of it.</small></div></li>
+            <li><span>5</span><div><strong>Set the tab name</strong>
+              <label><span>Sheet tab</span><input onChange={(e) => setTab(e.target.value)} placeholder="Engagements" value={tab} /></label>
+              <small>Defaults to Engagements. This is the tab the row is written to.</small></div></li>
+          </ol>
+          <div className="settings-test settings-test-inline">
+            <Button disabled={Boolean(sheetsTest?.running)} icon="refresh" onClick={() => runTest("google_sheets")} variant="secondary">{sheetsTest?.running ? "Testing…" : "Test connection"}</Button>
+            <small>Reports whether the tab and expected columns were found. Save first so the test reads your latest values.</small>
+            <TestOutcome test={sheetsTest} />
+          </div>
+        </div>
+        <div className="field-row">
+          <label className="field-note"><span>Drive folder id <small>Optional</small></span><input autoCapitalize="none" onChange={(e) => setFolder(e.target.value)} placeholder="Google Drive folder id" spellCheck={false} value={folder} /><small>Where generated Google Docs are filed.</small></label>
+          <label className="field-note"><span>From name <small>Optional</small></span><input onChange={(e) => setFromName(e.target.value)} placeholder="Tier 4 Advisors" value={fromName} /><small>The display name on outgoing email.</small></label>
+        </div>
+        <p className="settings-nosecret"><Icon name="lock" size={15} />These are the only editable fields, and not one of them is a secret. Set API keys with the <code>wrangler secret put</code> commands in Section 1.</p>
+        {saveError ? <p className="upload-state error" role="alert"><Icon name="info" size={15} />{saveError}</p> : null}
+        <div className="action-row"><p aria-live="polite" className={`settings-save-state ${saveState}`}>{saveLabel}</p><Button disabled={saveState === "saving" || settingsLoading} icon="check" type="submit">{saveState === "saving" ? "Saving…" : "Save connections"}</Button></div>
+      </form> : null}
+    </div>
+
+    <div className="security"><Icon name="lock" size={18} /><div><strong>Authorization boundary</strong><p>No secret is ever entered or displayed here. External writes, connector imports, paid enrichment, and customer sends still require explicit review and approval.</p></div></div>
   </section>;
 }

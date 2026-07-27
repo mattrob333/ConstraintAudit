@@ -22,12 +22,13 @@ import {
   generateRolesMap,
   generateRoadmap,
   generateSprintPlan,
-  renderMarkdownToHtml,
+  renderGoogleDocHtml,
 } from "./deliverables";
 import { HttpError } from "./http";
 import { resolveMetricDirection } from "./metric-direction";
 import { createDocument, appendOrUpdateRow, sendEmail, type CellValue } from "./integrations";
 import { researchPublicWebsite } from "./research";
+import { CRM_COLUMNS, CRM_MATCH_KEY, DEFAULT_CRM_SHEET_TAB, getSettings } from "./settings";
 import { enrichResearchWithOpenAI } from "./openai-research";
 import {
   requireApprovedReadinessArtifact,
@@ -534,35 +535,52 @@ export async function generateDeliverables(id: string, principal: Principal) {
 
 export async function createCrmWriteBackIntent(id: string, principal: Principal) {
   const engagement = await requireEngagement(id, principal.ownerId);
+  // BYO CRM: the write targets the advisor's own connected sheet, never a shared/global one.
+  const settings = await getSettings(principal.ownerId);
+  const connected = Boolean(settings.crmSpreadsheetId);
+  // Values keyed by CRM column, then projected onto the canonical column order so the payload row,
+  // the downloadable template, and the verify column-check all agree on exactly these columns.
+  const rowValues: Record<string, CellValue> = {
+    "Engagement ID": engagement.id,
+    Client: engagement.client,
+    Website: engagement.website,
+    "Primary Contact": engagement.primaryContact,
+    Email: engagement.email,
+    Advisor: engagement.advisor,
+    Stage: engagement.stage,
+    Status: engagement.status,
+    "Next Action": engagement.nextAction,
+    "Due Date": engagement.dueDate,
+    "Last Contact": engagement.lastContact,
+    "Call 1": engagement.call1At,
+    "Call 2": engagement.call2At,
+    "Readiness Brief status": engagement.readinessBriefStatus,
+    "Baseline status": engagement.baselineStatus,
+    "Engagement Folder": engagement.engagementFolder,
+    Notes: engagement.notes,
+  };
+  const row = Object.fromEntries(
+    CRM_COLUMNS.map((column) => [column, rowValues[column] ?? null]),
+  ) as Record<string, CellValue>;
   const intent = await createIntent(engagement, "crm_write_back", {
     workbook: "Tier 4 Engagement CRM",
-    sheet: "Engagements",
-    matchKey: "Engagement ID",
-    row: {
-      "Engagement ID": engagement.id,
-      Client: engagement.client,
-      Website: engagement.website,
-      "Primary Contact": engagement.primaryContact,
-      Email: engagement.email,
-      Advisor: engagement.advisor,
-      Stage: engagement.stage,
-      Status: engagement.status,
-      "Next Action": engagement.nextAction,
-      "Due Date": engagement.dueDate,
-      "Last Contact": engagement.lastContact,
-      "Call 1": engagement.call1At,
-      "Call 2": engagement.call2At,
-      "Readiness Brief status": engagement.readinessBriefStatus,
-      "Baseline status": engagement.baselineStatus,
-      "Engagement Folder": engagement.engagementFolder,
-      Notes: engagement.notes,
-    },
+    // Empty when no sheet is connected; execution then returns not-configured cleanly (no fallback
+    // to a deployment-wide sheet — a client's row must never land in another advisor's CRM).
+    spreadsheetId: settings.crmSpreadsheetId,
+    sheet: settings.crmSheetTab || DEFAULT_CRM_SHEET_TAB,
+    matchKey: CRM_MATCH_KEY,
+    row,
     requiresExplicitApproval: true,
+    detail: connected
+      ? `Targets your connected CRM sheet "${settings.crmSheetTab}".`
+      : "No CRM sheet is connected. Connect one in Settings before executing this intent.",
   });
   await addActivity(engagement, {
     activityType: "CRM",
     summary: "Created Google Sheets CRM write-back intent",
-    outcome: "No external write performed; intent is pending explicit approval",
+    outcome: connected
+      ? "No external write performed; intent is pending explicit approval"
+      : "No external write performed; connect a CRM sheet in Settings before executing",
   });
   return { engagement, intent };
 }
@@ -580,12 +598,19 @@ export async function createDocumentPublishIntent(
   if (!["approved", "provisional"].includes(String(artifact.status))) {
     throw new Error("Only an approved or provisional artifact may be proposed for publication.");
   }
+  // Carry the metadata the document shell needs so the published Doc is branded consistently,
+  // and file it in the advisor's configured Drive folder when the engagement has none.
+  const driveFolder = (await getSettings(principal.ownerId)).driveFolderId;
   const intent = await createIntent(engagement, "document_publish", {
     documentId: String(artifact.id),
     title: String(artifact.title),
     status: String(artifact.status),
     markdown: String(artifact.content),
-    folderId: engagement.engagementFolder || undefined,
+    client: engagement.client,
+    advisor: engagement.advisor,
+    date: new Date().toISOString().slice(0, 10),
+    kind: String(artifact.kind),
+    folderId: engagement.engagementFolder || driveFolder || undefined,
     requiresExplicitApproval: true,
   });
   await addActivity(engagement, {
@@ -800,9 +825,12 @@ async function executeIntent(
     });
   }
   if (type === "crm_write_back") {
+    // Pass the advisor's own spreadsheet id through. When it is empty (no sheet connected),
+    // appendOrUpdateRow returns not-configured rather than falling back to any global sheet.
     return appendOrUpdateRow({
-      sheet: str("sheet") || "Engagements",
-      matchKey: str("matchKey") || "Engagement ID",
+      spreadsheetId: str("spreadsheetId"),
+      sheet: str("sheet") || DEFAULT_CRM_SHEET_TAB,
+      matchKey: str("matchKey") || CRM_MATCH_KEY,
       row: (payload.row ?? {}) as Record<string, CellValue>,
       idempotencyKey: intentId,
     });
@@ -810,11 +838,21 @@ async function executeIntent(
   if (type === "document_publish") {
     const title = str("title");
     const markdown = str("markdown");
-    // Hand Drive real HTML so headings, lists, and tables survive the conversion.
+    // Wrap in the standard deliverable shell (title block, advisor byline, confidentiality
+    // footer) using structural HTML that survives Drive's HTML->Doc conversion, so every
+    // published Doc comes out consistently formatted. The publish intent carries the meta.
+    const html = renderGoogleDocHtml(markdown, {
+      client: str("client") || "the client",
+      title,
+      advisor: str("advisor") || "Tier 4 Advisor",
+      date: str("date"),
+      confidential: true,
+      kind: str("kind") || undefined,
+    });
     return createDocument({
       title,
       markdown,
-      html: renderMarkdownToHtml(markdown, title),
+      html,
       folderId: str("folderId") || undefined,
     });
   }

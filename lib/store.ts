@@ -72,6 +72,13 @@ const TABLE_STATEMENTS = [
     result_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL,
     updated_at TEXT, executed_at TEXT
   )`,
+  // Per-owner, non-secret advisor configuration (CRM sheet id, tab, Drive folder, from-name).
+  // Real credentials never live here — they stay in Cloudflare/wrangler secrets.
+  `CREATE TABLE IF NOT EXISTS advisor_settings (
+    owner_id TEXT PRIMARY KEY,
+    settings_json TEXT NOT NULL DEFAULT '{}',
+    updated_at TEXT NOT NULL
+  )`,
 ] as const;
 
 /**
@@ -91,6 +98,12 @@ const REQUIRED_COLUMNS: Record<string, Record<string, string>> = {
     result_json: "TEXT NOT NULL DEFAULT '{}'",
     updated_at: "TEXT",
     executed_at: "TEXT",
+  },
+  // owner_id is the PRIMARY KEY and always arrives with the CREATE, so only the value columns are
+  // reconciled here. NOT NULL adds need a DEFAULT so ALTER succeeds on a table that already has rows.
+  advisor_settings: {
+    settings_json: "TEXT NOT NULL DEFAULT '{}'",
+    updated_at: "TEXT NOT NULL DEFAULT ''",
   },
 };
 
@@ -677,4 +690,27 @@ export async function updateIntentStatus(
   const updated = await getIntent(id, owner);
   if (!updated) throw new Error("Intent not found");
   return { ...updated, changed };
+}
+
+/**
+ * Raw per-owner settings JSON. Returns `"{}"` for an advisor who has never saved settings, so the
+ * caller (lib/settings.ts) applies its own defaults. Scoped by owner like every other read.
+ */
+export async function getSettingsRow(ownerId: string): Promise<string> {
+  await ensureDatabase();
+  const owner = requireOwner(ownerId);
+  const row = await getD1().prepare(
+    "SELECT settings_json FROM advisor_settings WHERE owner_id = ? LIMIT 1"
+  ).bind(owner).first<DbRow>();
+  return typeof row?.settings_json === "string" ? row.settings_json : "{}";
+}
+
+/** Upsert the per-owner settings JSON. `json` is already validated/serialised by lib/settings.ts. */
+export async function putSettingsRow(ownerId: string, json: string): Promise<void> {
+  await ensureDatabase();
+  const owner = requireOwner(ownerId);
+  await getD1().prepare(
+    `INSERT INTO advisor_settings (owner_id, settings_json, updated_at) VALUES (?, ?, ?)
+     ON CONFLICT(owner_id) DO UPDATE SET settings_json = excluded.settings_json, updated_at = excluded.updated_at`
+  ).bind(owner, json, new Date().toISOString()).run();
 }
