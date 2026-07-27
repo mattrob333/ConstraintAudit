@@ -108,6 +108,16 @@ type AdvisorSettings = { crmSpreadsheetId: string; crmSheetTab: string; driveFol
 type SettingsTestProvider = "openai" | "resend" | "google_sheets" | "google_docs" | "fireflies";
 /** The `result` POST /api/settings/test returns. `detail` is human-readable and never contains a secret. */
 type SettingsTestResult = { ok?: boolean; status?: string; provider?: string; detail?: string };
+/**
+ * Where a credential's current value comes from. `server-secret` is set in the deployment
+ * environment and always wins over anything saved in the app; `saved-in-app` lives encrypted
+ * in the database.
+ */
+type CredentialSource = "server-secret" | "saved-in-app" | "none";
+/** One row from /api/settings/keys. A raw value is NEVER returned — `hint` is a masked tail only. */
+type CredentialState = { field: string; set: boolean; source: CredentialSource; hint: string };
+/** The whole /api/settings/keys payload, returned identically by GET, PUT and DELETE. */
+type CredentialsPayload = { credentials: CredentialState[]; encryptionMode: "app-key" | "generated-key" };
 type TranscriptFile = { name: string; mimeType: string; content: string; encoding: "utf8" | "base64" };
 
 type ResearchPayload = {
@@ -630,8 +640,10 @@ function isPracticeEngagement(id: string | null | undefined): boolean {
   return typeof id === "string" && id.startsWith(PRACTICE_ID_PREFIX);
 }
 
-type TourMode = "off" | "guiding" | "exploring" | "done";
-type TourState = { step: number; mode: TourMode };
+type TourMode = "off" | "guiding" | "done";
+/** Where the walkthrough docks. Both positions reflow the app; neither ever overlays it. */
+type TourDock = "side" | "bottom";
+type TourState = { step: number; mode: TourMode; dock: TourDock; collapsed: boolean };
 type ResearchTab = "canvas" | "flow" | "questions";
 
 type TourStop = {
@@ -892,8 +904,11 @@ function readTourState(): TourState | null {
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<TourState>;
     const step = typeof parsed.step === "number" && parsed.step >= 0 && parsed.step < practiceTour.length ? parsed.step : 0;
+    // Anything that is not an explicit "done" resumes as guiding, including the retired
+    // "exploring" mode, whose job the collapsed dock now does.
     const mode: TourMode = parsed.mode === "done" ? "done" : "guiding";
-    return { step, mode };
+    const dock: TourDock = parsed.dock === "bottom" ? "bottom" : "side";
+    return { step, mode, dock, collapsed: parsed.collapsed === true };
   } catch {
     return null;
   }
@@ -1236,6 +1251,11 @@ export default function AdvisorCockpit() {
   const [practiceError, setPracticeError] = useState("");
   const [tourStep, setTourStep] = useState(0);
   const [tourMode, setTourMode] = useState<TourMode>("off");
+  /** The advisor's saved dock preference. What is actually used is `activeDock`, below. */
+  const [tourDock, setTourDock] = useState<TourDock>("side");
+  const [tourCollapsed, setTourCollapsed] = useState(false);
+  /** 0 until the first client-side measurement, which is the signal to leave the preference alone. */
+  const [viewport, setViewport] = useState(0);
   const [researchTab, setResearchTab] = useState<ResearchTab | undefined>(undefined);
   /** Per-button in-flight guards so a double-click cannot fire a mutating request twice. */
   const [analyzing, setAnalyzing] = useState(false);
@@ -1251,6 +1271,7 @@ export default function AdvisorCockpit() {
   const [speakerRoles, setSpeakerRoles] = useState<Record<string, "client" | "advisor" | "unknown">>({});
   const [speakerReq, setSpeakerReq] = useState("");
   const modalRef = useRef<HTMLDivElement>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
   const currentStage = stageFor(screen);
   const practiceActive = isPracticeEngagement(activeId);
   /**
@@ -1260,6 +1281,17 @@ export default function AdvisorCockpit() {
    * NOT gated by this — it is the one thing that has to survive a screen share.
    */
   const guidanceHidden = screen === "findings-call" || (screen === "call" && presenting);
+  /**
+   * Dock geometry. The walkthrough is a real layout column, so the only question is which
+   * edge it takes. The coaching rail always owns the right of the guided call; a walkthrough
+   * column on the left of that same screen makes three columns and crushes the question in
+   * the middle, so below ~1600px that screen forces the bottom strip. Narrow viewports force
+   * it too. Both are overrides, not writes: the saved preference comes back when there is room.
+   */
+  const tourVisible = practiceActive && !guidanceHidden && tourMode !== "off";
+  const coachRailOnScreen = screen === "call" && !presenting;
+  const dockForced = viewport > 0 && (viewport < 1080 || (coachRailOnScreen && viewport < 1600));
+  const activeDock: TourDock = tourCollapsed || dockForced ? "bottom" : tourDock;
   const displayCompany = company || "Untitled engagement";
   const script = callScriptFor(researchResult);
   const callQuestion = script.questions[Math.min(callIndex, script.questions.length - 1)];
@@ -1344,15 +1376,26 @@ export default function AdvisorCockpit() {
     return () => { active = false; };
   }, []);
 
-  /** The advisor's place in the walkthrough survives a reload, a tab close, and a laptop restart. */
+  /** The advisor's place in the walkthrough — and how they like it docked — survives a reload. */
   useEffect(() => {
     if (!practiceActive || tourMode === "off") return;
-    writeTourState({ mode: tourMode === "done" ? "done" : "guiding", step: tourStep });
-  }, [practiceActive, tourMode, tourStep]);
+    writeTourState({ mode: tourMode, step: tourStep, dock: tourDock, collapsed: tourCollapsed });
+  }, [practiceActive, tourMode, tourStep, tourDock, tourCollapsed]);
+
+  /** The dock's shape depends on how much room there is, so the width has to be a real measurement. */
+  useEffect(() => {
+    const measure = () => setViewport(window.innerWidth);
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, []);
 
   function go(next: Screen) {
     setScreen(next); setNotice(""); setMobileNav(false); setResumed(null);
     window.scrollTo({ top: 0, behavior: "smooth" });
+    // While the walkthrough is docked the content column is the scroll container, not the
+    // window, so the window call above is a no-op and this is the one that does the work.
+    bodyRef.current?.scrollTo({ top: 0, behavior: "smooth" });
   }
 
   async function save<T = unknown>(path: string, body: unknown, method = "POST") {
@@ -1586,6 +1629,8 @@ export default function AdvisorCockpit() {
     setEngagements((items) => [toEngagement(record), ...items.filter((item) => item.id !== record.id)]);
     await resume(toEngagement(record));
     const saved = restart ? null : readTourState();
+    setTourDock(saved?.dock ?? "side");
+    setTourCollapsed(saved?.collapsed ?? false);
     if (saved?.mode === "done") {
       setTourStep(practiceTour.length - 1);
       setTourMode("done");
@@ -2102,10 +2147,20 @@ export default function AdvisorCockpit() {
     }
   }
 
-  return <div className={`cockpit ${isClientFacing(screen) ? "client-call" : ""} ${practiceActive ? "practice" : ""}`}>
+  return <div className={`cockpit ${isClientFacing(screen) ? "client-call" : ""} ${practiceActive ? "practice" : ""} ${tourVisible ? `tour-docked tour-${activeDock}${tourCollapsed ? " tour-collapsed" : ""}` : ""}`}>
     <a className="skip" href="#main">Skip to main content</a>
-    {/* Outside <main> and outside every screen, so no screen can suppress it. No dismiss control exists. */}
+    {/* Outside <main> and outside every screen, so no screen can suppress it. No dismiss control exists.
+        It is also outside the dock frame below, so collapsing or moving the walkthrough cannot touch it. */}
     {practiceActive ? <PracticeBar busy={practiceBusy} onLeave={() => leavePractice()} onReset={resetPractice} /> : null}
+    {/*
+      The dock and the app share one frame. When the walkthrough is up the frame is a flex
+      row (side) or reversed column (bottom) and `.cockpit-body` scrolls inside what is left,
+      so no content ever passes under the dock. When it is not up — including the moment
+      Escape hides it — the frame is a plain block and the app is full width again.
+    */}
+    <div className="cockpit-frame">
+    {practiceActive ? <PracticeTour busy={practiceBusy} collapsed={tourCollapsed} dock={activeDock} dockLocked={dockForced} hidden={guidanceHidden} index={tourStep} mode={tourMode} onCollapse={setTourCollapsed} onDock={setTourDock} onFinish={() => setTourMode("done")} onJump={goToStop} onLeave={() => leavePractice()} onNext={() => goToStop(tourStep + 1)} onPrevious={() => goToStop(tourStep - 1)} onRemove={removePractice} onReset={resetPractice} onRestart={() => goToStop(0)} onScreen={screen === practiceTour[Math.min(tourStep, practiceTour.length - 1)].screen} /> : null}
+    <div className="cockpit-body" ref={bodyRef}>
     <header className="app-header">
       <button className="brand" onClick={() => go("home")} type="button"><span><Icon name="shield" size={18} /></span>TIER 4 <em>AUDIT</em></button>
       {screen !== "home" ? <div className="header-context"><i />{displayCompany}{practiceActive ? <PracticeMark compact /> : null}<Pill tone={isClientFacing(screen) ? "known" : "neutral"}>{isClientFacing(screen) ? "Client call view" : "Advisor view"}</Pill></div> : null}
@@ -2164,7 +2219,8 @@ export default function AdvisorCockpit() {
       {screen === "call" && !callQuestion ? <section className="guided narrow"><PageHead eyebrow="Call · guided script" title="No call question is available.">Run research for this engagement so the guided call can be driven by client-specific discovery questions.</PageHead><Button icon="back" onClick={() => go("research")}>Back to research</Button></section> : null}
     </main>
     {screen !== "home" && !isClientFacing(screen) ? <div aria-live="polite" className="save-state"><i className={apiState} />{apiState === "saving" ? "Saving…" : apiState === "saved" ? "Saved" : apiState === "error" ? "Action failed" : "Ready"}</div> : null}
-    {practiceActive ? <PracticeTour busy={practiceBusy} hidden={guidanceHidden} index={tourStep} mode={tourMode} onExplore={() => setTourMode("exploring")} onFinish={() => setTourMode("done")} onJump={goToStop} onLeave={() => leavePractice()} onNext={() => goToStop(tourStep + 1)} onPrevious={() => goToStop(tourStep - 1)} onRemove={removePractice} onReset={resetPractice} onRestart={() => goToStop(0)} onResume={() => goToStop(tourStep)} onScreen={screen === practiceTour[Math.min(tourStep, practiceTour.length - 1)].screen} /> : null}
+    </div>
+    </div>
     {confirmSend ? <div className="modal-layer"><div aria-describedby="send-description" aria-labelledby="send-title" aria-modal="true" className="modal" ref={modalRef} role="dialog">
       <button aria-label="Close" className="modal-close" onClick={() => setConfirmSend(false)} type="button"><Icon name="close" size={17} /></button>
       <span className="modal-icon"><Icon name="mail" size={21} /></span><p className="eyebrow">External intent</p><h2 id="send-title">Approve this send intent</h2>
@@ -2434,13 +2490,18 @@ function PracticeBar({ busy, onLeave, onReset }: {
  * it returns null on a client-facing screen — absent from the DOM, not styled
  * out of view — and everything it does render lives inside <AdvisorOnly>.
  *
- * It never rebuilds a screen. It docks beside the real one and explains it.
+ * It never rebuilds a screen, and it never covers one. It is a DOCK: a real column
+ * (side) or strip (bottom) in the cockpit's layout, so the app reflows into the space
+ * that is left rather than being overlaid. Collapsing it to a single bar is the one
+ * "get out of my way" control — there is no second, competing explore mode.
  */
 function PracticeTour(props: {
-  busy: "" | "open" | "reset" | "remove"; hidden: boolean; index: number; mode: TourMode; onScreen: boolean;
-  onExplore: () => void; onFinish: () => void; onJump: (index: number) => void; onLeave: () => void;
+  busy: "" | "open" | "reset" | "remove"; collapsed: boolean; dock: TourDock; dockLocked: boolean;
+  hidden: boolean; index: number; mode: TourMode; onScreen: boolean;
+  onCollapse: (collapsed: boolean) => void; onDock: (dock: TourDock) => void;
+  onFinish: () => void; onJump: (index: number) => void; onLeave: () => void;
   onNext: () => void; onPrevious: () => void; onRemove: () => void; onReset: () => void;
-  onRestart: () => void; onResume: () => void;
+  onRestart: () => void;
 }) {
   const [listOpen, setListOpen] = useState(false);
   if (props.hidden || props.mode === "off") return null;
@@ -2448,60 +2509,75 @@ function PracticeTour(props: {
   const index = Math.min(Math.max(props.index, 0), total - 1);
   const stop = practiceTour[index];
   const last = index === total - 1;
+  const done = props.mode === "done";
 
-  if (props.mode === "exploring") return <div className="tour-dock collapsed">
+  // The slim bar. Everything needed to keep stepping is here, so collapsing never costs
+  // the advisor their place — which is exactly what "explore on my own" used to be for.
+  if (props.collapsed) return <div className="tour-dock">
     <AdvisorOnly hidden={false} label="Advisor only · practice walkthrough">
-      <button className="tour-rejoin" onClick={props.onResume} type="button">
-        <Icon name="refresh" size={16} />
-        <span><strong>Back to the walkthrough</strong><small>Step {index + 1} of {total} · {stop.title}</small></span>
-      </button>
-    </AdvisorOnly>
-  </div>;
-
-  if (props.mode === "done") return <div className="tour-dock">
-    <AdvisorOnly hidden={false} label="Advisor only · practice walkthrough, never shown to a client">
-      <div className="tour-panel">
-        <header><div><p className="eyebrow">Practice walkthrough · complete</p><h2>That is the whole arc.</h2></div></header>
-        <p className="tour-lead">You have now seen every screen you will use with a real client — and nothing left this app without a second, deliberate press.</p>
-        <p className="tour-lead">Carry the shape, not the detail: one constraint, one smallest change, one number from the client’s own record, one name against it. If your first real call gets you a traced flow, a step everything waits at, and a name — the call worked.</p>
-        <p className="tour-note"><Icon name="info" size={15} />{PRACTICE_CLIENT} stays here as long as you want. Walk it again, reset it, or delete it — it can always be rebuilt exactly as it was.</p>
-        <div className="tour-actions">
-          <Button icon="refresh" onClick={props.onRestart} variant="secondary">Walk it again</Button>
-          <Button disabled={Boolean(props.busy)} onClick={props.onReset} variant="secondary">{props.busy === "reset" ? "Resetting…" : "Reset practice data"}</Button>
-          <Button icon="arrow" onClick={props.onLeave}>Leave practice mode</Button>
-        </div>
-        <button className="tour-remove" disabled={Boolean(props.busy)} onClick={props.onRemove} type="button">{props.busy === "remove" ? "Deleting…" : "Delete the practice engagement"}</button>
+      <div className="tour-slim">
+        <span className="tour-slim-step"><Icon name="shield" size={13} />{done ? "Complete" : `Step ${index + 1} of ${total}`}</span>
+        <strong className="tour-slim-title">{done ? "That is the whole arc." : stop.title}</strong>
+        {done ? null : <span className="tour-slim-nav">
+          <button aria-label="Previous step" disabled={index === 0} onClick={props.onPrevious} type="button"><Icon name="back" size={15} /></button>
+          <button aria-label={last ? "Finish the walkthrough" : "Next step"} onClick={last ? props.onFinish : props.onNext} type="button"><Icon name={last ? "check" : "arrow"} size={15} /></button>
+        </span>}
+        <button className="tour-icon" onClick={() => props.onCollapse(false)} type="button"><Icon name="upload" size={14} />Expand</button>
       </div>
     </AdvisorOnly>
   </div>;
 
+  const tools = <span className="tour-tools">
+    {props.dockLocked ? null : <button className="tour-icon" onClick={() => props.onDock(props.dock === "side" ? "bottom" : "side")} type="button">
+      <Icon name={props.dock === "side" ? "download" : "back"} size={14} />{props.dock === "side" ? "Move to bottom" : "Move to side"}
+    </button>}
+    <button className="tour-icon" onClick={() => props.onCollapse(true)} type="button"><Icon name="download" size={14} />Collapse</button>
+  </span>;
+
   return <div className="tour-dock">
     <AdvisorOnly hidden={false} label="Advisor only · practice walkthrough, never shown to a client">
       <div className="tour-panel">
-        <header>
-          <div><p className="eyebrow">{stop.stage}</p><h2>{stop.title}</h2></div>
-          <button aria-expanded={listOpen} className="tour-count" onClick={() => setListOpen(!listOpen)} type="button">Step {index + 1} of {total}<Icon name="chevron" size={13} /></button>
+        {/* Pinned: the step, the title and the navigation stay reachable however long the body runs. */}
+        <header className="tour-head">
+          <div className="tour-head-top"><p className="eyebrow">{done ? "Practice walkthrough · complete" : stop.stage}</p>{tools}</div>
+          <h2>{done ? "That is the whole arc." : stop.title}</h2>
+          {done ? null : <>
+            <div className="tour-head-meter">
+              <button aria-expanded={listOpen} className="tour-count" onClick={() => setListOpen(!listOpen)} type="button">Step {index + 1} of {total}<Icon name="chevron" size={13} /></button>
+              <div className="tour-progress"><i style={{ width: `${((index + 1) / total) * 100}%` }} /></div>
+            </div>
+            <div className="tour-actions">
+              <Button disabled={index === 0} onClick={props.onPrevious} variant="secondary"><Icon name="back" size={16} />Previous</Button>
+              <Button icon={last ? "check" : "arrow"} onClick={last ? props.onFinish : props.onNext}>{last ? "Finish the walkthrough" : "Next"}</Button>
+            </div>
+          </>}
         </header>
-        <div className="tour-progress"><i style={{ width: `${((index + 1) / total) * 100}%` }} /></div>
-        {listOpen ? <ol className="tour-list">{practiceTour.map((item, position) => <li key={item.id}>
-          <button aria-current={position === index ? "step" : undefined} className={position === index ? "active" : position < index ? "done" : ""} onClick={() => { setListOpen(false); props.onJump(position); }} type="button">
-            <b>{position + 1}</b><span><strong>{item.title}</strong><small>{item.stage}</small></span>
-          </button>
-        </li>)}</ol> : null}
-        {!props.onScreen ? <p className="tour-note" role="status"><Icon name="info" size={15} />You have moved off this step. <button className="call-link" onClick={() => props.onJump(index)} type="button">Take me back</button>, or keep looking around — the walkthrough will wait.</p> : null}
-        <div className="tour-body">
-          <section><p className="eyebrow">On this screen</p><p>{stop.looking}</p></section>
-          <section><p className="eyebrow">With a real client</p><p>{stop.real}</p></section>
-          <section><p className="eyebrow">Worth a look</p><ul>{stop.watch.map((line) => <li key={line}>{line}</li>)}</ul></section>
+        <div className="tour-scroll">
+          {listOpen ? <ol className="tour-list">{practiceTour.map((item, position) => <li key={item.id}>
+            <button aria-current={position === index ? "step" : undefined} className={position === index ? "active" : position < index ? "done" : ""} onClick={() => { setListOpen(false); props.onJump(position); }} type="button">
+              <b>{position + 1}</b><span><strong>{item.title}</strong><small>{item.stage}</small></span>
+            </button>
+          </li>)}</ol> : null}
+          {done ? <>
+            <p className="tour-lead">You have now seen every screen you will use with a real client — and nothing left this app without a second, deliberate press.</p>
+            <p className="tour-lead">Carry the shape, not the detail: one constraint, one smallest change, one number from the client’s own record, one name against it. If your first real call gets you a traced flow, a step everything waits at, and a name — the call worked.</p>
+            <p className="tour-note"><Icon name="info" size={15} />{PRACTICE_CLIENT} stays here as long as you want. Walk it again, reset it, or delete it — it can always be rebuilt exactly as it was.</p>
+            <div className="tour-actions">
+              <Button icon="refresh" onClick={props.onRestart} variant="secondary">Walk it again</Button>
+              <Button disabled={Boolean(props.busy)} onClick={props.onReset} variant="secondary">{props.busy === "reset" ? "Resetting…" : "Reset practice data"}</Button>
+              <Button icon="arrow" onClick={props.onLeave}>Leave practice mode</Button>
+            </div>
+            <button className="tour-remove" disabled={Boolean(props.busy)} onClick={props.onRemove} type="button">{props.busy === "remove" ? "Deleting…" : "Delete the practice engagement"}</button>
+          </> : <>
+            {!props.onScreen ? <p className="tour-note" role="status"><Icon name="info" size={15} />You have moved off this step. <button className="call-link" onClick={() => props.onJump(index)} type="button">Take me back</button>, or keep looking around — the walkthrough will wait.</p> : null}
+            <div className="tour-body">
+              <section><p className="eyebrow">On this screen</p><p>{stop.looking}</p></section>
+              <section><p className="eyebrow">With a real client</p><p>{stop.real}</p></section>
+              <section><p className="eyebrow">Worth a look</p><ul>{stop.watch.map((line) => <li key={line}>{line}</li>)}</ul></section>
+            </div>
+            <p className="tour-foot"><Icon name="info" size={13} />Wander anywhere — your place is saved. Collapse this to a bar when you want the screen to yourself.</p>
+          </>}
         </div>
-        <div className="tour-actions">
-          <Button disabled={index === 0} onClick={props.onPrevious} variant="secondary"><Icon name="back" size={16} />Previous</Button>
-          <Button icon={last ? "check" : "arrow"} onClick={last ? props.onFinish : props.onNext}>{last ? "Finish the walkthrough" : "Next"}</Button>
-        </div>
-        <footer className="tour-foot">
-          <button onClick={props.onExplore} type="button"><Icon name="search" size={13} />Explore on my own</button>
-          <small>Wander anywhere — your place is saved.</small>
-        </footer>
       </div>
     </AdvisorOnly>
   </div>;
@@ -3137,15 +3213,6 @@ function IntegrationCenter({ onBack }: { onBack: () => void }) {
   </section>;
 }
 
-/** Which live integration ids can be verified, and the provider name POST /api/settings/test expects for each. */
-const TESTABLE_PROVIDERS: Partial<Record<string, SettingsTestProvider>> = {
-  openai: "openai",
-  resend: "resend",
-  google_sheets: "google_sheets",
-  google_drive_docs: "google_docs",
-  fireflies: "fireflies",
-};
-
 /** Reads a test result into a tone and label. ok → pass, not-configured → not set up, anything else → fail. */
 function testResultView(result: SettingsTestResult | undefined): { tone: Tone; label: string } | null {
   if (!result) return null;
@@ -3156,17 +3223,77 @@ function testResultView(result: SettingsTestResult | undefined): { tone: Tone; l
 
 type SettingsTestState = { running: boolean; result?: SettingsTestResult; error?: string };
 
-/** One selectable, copyable shell command. The command is always visible, so a manual copy works even without clipboard access. */
-function CopyLine({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false);
-  return <div className="copy-line">
-    <code>{text}</code>
-    <button aria-label={`Copy command: ${text}`} className="copy-button" onClick={() => {
-      if (typeof navigator.clipboard?.writeText !== "function") return;
-      navigator.clipboard.writeText(text).then(() => { setCopied(true); window.setTimeout(() => setCopied(false), 1600); }).catch(() => setCopied(false));
-    }} type="button">{copied ? <><Icon name="check" size={13} />Copied</> : <><Icon name="document" size={13} />Copy</>}</button>
-  </div>;
+/** Plain-language description of one savable credential. `secret` decides password-vs-text input. */
+type CredentialFieldMeta = { label: string; secret: boolean; placeholder: string; note?: string };
+
+/**
+ * Every field /api/settings/keys accepts, in plain words. The server's response is still the
+ * source of truth for which fields exist — anything it returns that is missing here falls back
+ * to `fallbackFieldMeta`, so a server-side addition shows up rather than disappearing.
+ */
+const CREDENTIAL_FIELDS: Record<string, CredentialFieldMeta> = {
+  OPENAI_API_KEY: { label: "OpenAI API key", secret: true, placeholder: "sk-…" },
+  OPENAI_RESEARCH_MODEL: { label: "Research model", secret: false, placeholder: "gpt-4.1", note: "Optional. Leave empty to use the server's default model." },
+  OPENAI_TRANSCRIPT_MODEL: { label: "Transcript model", secret: false, placeholder: "gpt-4.1-mini", note: "Optional. Leave empty to use the server's default model." },
+  FIREFLIES_API_KEY: { label: "Fireflies API key", secret: true, placeholder: "Paste your Fireflies key" },
+  RESEND_API_KEY: { label: "Resend API key", secret: true, placeholder: "re_…" },
+  EMAIL_FROM: { label: "Send from", secret: false, placeholder: "advisor@yourdomain.com", note: "Must be an address on a domain you have verified with Resend." },
+  EMAIL_REPLY_TO: { label: "Replies go to", secret: false, placeholder: "you@yourdomain.com", note: "Optional. Where a client's reply lands." },
+  GOOGLE_CLIENT_ID: { label: "Google client ID", secret: true, placeholder: "…apps.googleusercontent.com" },
+  GOOGLE_CLIENT_SECRET: { label: "Google client secret", secret: true, placeholder: "Paste the client secret" },
+  GOOGLE_REFRESH_TOKEN: { label: "Google refresh token", secret: true, placeholder: "Paste the refresh token" },
+};
+
+/** A readable label and a safe default for a field the server knows about but this build does not. */
+function fallbackFieldMeta(field: string): CredentialFieldMeta {
+  const label = field.toLowerCase().replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
+  return { label, secret: /KEY|SECRET|TOKEN|PASSWORD/.test(field), placeholder: `Paste the ${label.toLowerCase()}` };
 }
+
+function fieldMeta(field: string): CredentialFieldMeta {
+  return CREDENTIAL_FIELDS[field] ?? fallbackFieldMeta(field);
+}
+
+/** One provider's box: what its keys unlock, where to get them, its fields, and its tests. */
+type CredentialGroup = {
+  id: string; name: string; icon: IconName; unlocks: string; where: string;
+  fields: string[]; tests: Array<{ provider: SettingsTestProvider; label: string }>;
+};
+
+const CREDENTIAL_GROUPS: CredentialGroup[] = [
+  {
+    id: "openai", name: "OpenAI", icon: "spark",
+    unlocks: "Web research on the recon brief, and model-assisted reading of a call transcript. Without a key both still run, just on the plain deterministic path.",
+    where: "Go to platform.openai.com, open API keys, and create a new secret key. It begins with sk- and is only shown to you once.",
+    fields: ["OPENAI_API_KEY", "OPENAI_RESEARCH_MODEL", "OPENAI_TRANSCRIPT_MODEL"],
+    tests: [{ provider: "openai", label: "Test" }],
+  },
+  {
+    id: "fireflies", name: "Fireflies", icon: "mic",
+    unlocks: "Pulling a recorded call transcript straight into the audit instead of pasting it in by hand.",
+    where: "Go to app.fireflies.ai, open Settings, then Developer settings, and copy the API key.",
+    fields: ["FIREFLIES_API_KEY"],
+    tests: [{ provider: "fireflies", label: "Test" }],
+  },
+  {
+    id: "resend", name: "Email (Resend)", icon: "mail",
+    unlocks: "Sending an approved readiness brief by email. Every send still needs your explicit approval first.",
+    where: "Go to resend.com, open API Keys, and create one. The two addresses below must be on a domain you have verified with Resend.",
+    fields: ["RESEND_API_KEY", "EMAIL_FROM", "EMAIL_REPLY_TO"],
+    tests: [{ provider: "resend", label: "Test" }],
+  },
+  {
+    id: "google", name: "Google Sheets & Drive", icon: "folder",
+    unlocks: "Writing engagement rows into your Google Sheet CRM, and filing generated documents in your Drive folder.",
+    where: "Go to console.cloud.google.com, open APIs & Services then Credentials, and create an OAuth client to get the ID and secret. The refresh token comes from the one-time Google consent step.",
+    fields: ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REFRESH_TOKEN"],
+    tests: [{ provider: "google_sheets", label: "Test CRM sheet" }, { provider: "google_docs", label: "Test Drive & Docs" }],
+  },
+];
+
+/** Per-field UI state. `busy` is the in-flight guard: while it is set, Save and Clear are both disabled. */
+type CredentialFieldState = { busy: "save" | "clear" | null; saved: boolean; error: string; reveal: boolean; confirmClear: boolean };
+const EMPTY_FIELD_STATE: CredentialFieldState = { busy: null, saved: false, error: "", reveal: false, confirmClear: false };
 
 /** The pass / not set up / fail line under a Test button. `detail` is shown verbatim — the server promises it never carries a secret. */
 function TestOutcome({ test }: { test: SettingsTestState | undefined }) {
@@ -3180,15 +3307,20 @@ function TestOutcome({ test }: { test: SettingsTestState | undefined }) {
 
 /**
  * The advisor-only Settings screen. Two sections:
- *  1. API keys — live status, what each unlocks, the required env-var NAMES, the exact
- *     `wrangler secret put` command, and a Test button. No key is ever entered or displayed.
+ *  1. API keys — one real input per credential. You paste a key, press Save, and the server
+ *     stores it encrypted. A saved key is never sent back: only a masked tail (`hint`) is.
+ *     A field held in the deployment environment is shown as server-managed and has no input,
+ *     because saving over it would silently do nothing.
  *  2. My connections — the non-secret, per-advisor connection settings behind GET/PUT /api/settings.
  * Reachable only from the top nav, which is hidden on the client-facing call and presentation views.
  */
 function SettingsScreen({ onBack, onIntegrations }: { onBack: () => void; onIntegrations: () => void }) {
-  const [integrations, setIntegrations] = useState<IntegrationItem[]>([]);
-  const [integrationsLoading, setIntegrationsLoading] = useState(true);
-  const [integrationsError, setIntegrationsError] = useState("");
+  const [credentials, setCredentials] = useState<CredentialState[] | null>(null);
+  const [encryptionMode, setEncryptionMode] = useState<CredentialsPayload["encryptionMode"] | null>(null);
+  const [keysLoading, setKeysLoading] = useState(true);
+  const [keysError, setKeysError] = useState("");
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [fieldStates, setFieldStates] = useState<Record<string, CredentialFieldState>>({});
   const [tests, setTests] = useState<Partial<Record<SettingsTestProvider, SettingsTestState>>>({});
 
   const [settings, setSettings] = useState<AdvisorSettings | null>(null);
@@ -3203,10 +3335,14 @@ function SettingsScreen({ onBack, onIntegrations }: { onBack: () => void; onInte
 
   useEffect(() => {
     let active = true;
-    api<{ integrations: IntegrationItem[] }>("/api/integrations")
-      .then((result) => { if (active) setIntegrations(result.integrations ?? []); })
-      .catch((reason: Error) => { if (active) { setIntegrations([]); setIntegrationsError(`Integration status could not be read: ${reason.message}`); } })
-      .finally(() => { if (active) setIntegrationsLoading(false); });
+    api<CredentialsPayload>("/api/settings/keys")
+      .then((result) => {
+        if (!active) return;
+        setCredentials(result.credentials ?? []);
+        setEncryptionMode(result.encryptionMode ?? null);
+      })
+      .catch((reason: Error) => { if (active) { setCredentials(null); setKeysError(`Your saved keys could not be read: ${reason.message}`); } })
+      .finally(() => { if (active) setKeysLoading(false); });
     return () => { active = false; };
   }, []);
 
@@ -3226,6 +3362,50 @@ function SettingsScreen({ onBack, onIntegrations }: { onBack: () => void; onInte
       .finally(() => { if (active) setSettingsLoading(false); });
     return () => { active = false; };
   }, []);
+
+  function fieldState(field: string): CredentialFieldState {
+    return fieldStates[field] ?? EMPTY_FIELD_STATE;
+  }
+
+  function patchField(field: string, patch: Partial<CredentialFieldState>) {
+    setFieldStates((prev) => ({ ...prev, [field]: { ...(prev[field] ?? EMPTY_FIELD_STATE), ...patch } }));
+  }
+
+  /**
+   * Saves one credential. Guarded against double-submit: while `busy` is set, this field's
+   * Save and Clear are both disabled and a second call returns immediately. The typed value is
+   * dropped from state as soon as the server confirms, so no plaintext key survives the save.
+   */
+  async function saveField(field: string) {
+    if (fieldState(field).busy) return;
+    const value = (drafts[field] ?? "").trim();
+    if (!value) return;
+    patchField(field, { busy: "save", error: "", saved: false, confirmClear: false });
+    try {
+      const result = await api<CredentialsPayload>("/api/settings/keys", { method: "PUT", body: JSON.stringify({ field, value }) });
+      setCredentials(result.credentials ?? []);
+      setEncryptionMode(result.encryptionMode ?? null);
+      setDrafts((prev) => ({ ...prev, [field]: "" }));
+      patchField(field, { busy: null, saved: true, error: "", reveal: false });
+    } catch (reason) {
+      patchField(field, { busy: null, saved: false, error: `Not saved: ${reason instanceof Error ? reason.message : "unknown request failure"}` });
+    }
+  }
+
+  /** Removes a credential saved in the app. Same in-flight guard as `saveField`. */
+  async function clearField(field: string) {
+    if (fieldState(field).busy) return;
+    patchField(field, { busy: "clear", error: "", saved: false });
+    try {
+      const result = await api<CredentialsPayload>("/api/settings/keys", { method: "DELETE", body: JSON.stringify({ field }) });
+      setCredentials(result.credentials ?? []);
+      setEncryptionMode(result.encryptionMode ?? null);
+      setDrafts((prev) => ({ ...prev, [field]: "" }));
+      patchField(field, { busy: null, saved: false, error: "", reveal: false, confirmClear: false });
+    } catch (reason) {
+      patchField(field, { busy: null, confirmClear: false, error: `Not cleared: ${reason instanceof Error ? reason.message : "unknown request failure"}` });
+    }
+  }
 
   /** Guarded against double-submit: a second click while a provider is in flight is ignored. */
   async function runTest(provider: SettingsTestProvider) {
@@ -3275,43 +3455,104 @@ function SettingsScreen({ onBack, onIntegrations }: { onBack: () => void; onInte
     : dirty ? "Unsaved changes" : "Up to date";
   const sheetsTest = tests.google_sheets;
 
+  // The server's list decides which fields exist; the local catalog only supplies wording and order.
+  // Anything the server returns that this build does not recognise still gets a row, in a trailing group.
+  const credentialByField = new Map((credentials ?? []).map((item) => [item.field, item]));
+  const catalogued = new Set(CREDENTIAL_GROUPS.flatMap((group) => group.fields));
+  const unrecognised = (credentials ?? []).filter((item) => !catalogued.has(item.field)).map((item) => item.field);
+  const groups: CredentialGroup[] = [
+    ...CREDENTIAL_GROUPS
+      .map((group) => ({ ...group, fields: group.fields.filter((field) => credentialByField.has(field)) }))
+      .filter((group) => group.fields.length > 0),
+    ...(unrecognised.length ? [{
+      id: "other", name: "Other credentials", icon: "integration" as IconName,
+      unlocks: "The server accepts these as well.",
+      where: "Check with whoever set this deployment up for where each value comes from.",
+      fields: unrecognised, tests: [],
+    }] : []),
+  ];
+
   return <section className="guided wide settings"><Back onClick={onBack}>Start</Back>
-    <PageHead eyebrow="Advisor setup" side={<Button icon="integration" onClick={onIntegrations} variant="secondary">Integration Center</Button>} title="Settings">Two things live here: the API keys your server holds (status and a test, never the key itself), and the connections stored against your advisor account. This screen is advisor-only and is not reachable from a client call.</PageHead>
+    <PageHead eyebrow="Advisor setup" side={<Button icon="integration" onClick={onIntegrations} variant="secondary">Integration Center</Button>} title="Settings">Two things live here: the API keys the app uses, which you paste in and save below, and the connections stored against your advisor account. This screen is advisor-only and is not reachable from a client call.</PageHead>
 
-    <div className="settings-keys-banner"><Icon name="lock" size={20} /><div><strong>API keys are server secrets — you never type one here.</strong><p>Keys are set on the server with <code>wrangler secret put</code> and are never sent to the browser or written to the database. This screen shows only whether each key is present and lets you test it.</p></div></div>
+    <div className="settings-keys-banner"><Icon name="lock" size={20} /><div>
+      <strong>Paste a key, press Save. It is stored encrypted in your database.</strong>
+      <p>That is deliberate so you can get set up and test in minutes. It is still weaker than holding a key in the deployment environment itself, so before you run this for real, move these keys to server secrets. A key set on the server always wins over one saved here.</p>
+      {encryptionMode === "generated-key" ? <p className="settings-keys-extra"><Icon name="info" size={14} />The encryption key was generated for you automatically and is stored alongside the data, so anyone who can read the database can read both. Setting <code>APP_ENCRYPTION_KEY</code> in the deployment environment is the stronger option.</p> : null}
+    </div></div>
 
-    <div className="settings-section"><header className="settings-section-head"><p className="eyebrow">Section 1 · API keys</p><h2>Status &amp; test — no key entry</h2><p>Read live from the server. For each provider you can see what it unlocks, the exact command to set its secret, and — where supported — a test that reports pass, not set up, or fail.</p></header>
-      {integrationsLoading ? <p className="registry-empty" role="status">Reading connector status…</p> : null}
-      {integrationsError ? <p className="ops-error" role="alert"><Icon name="info" size={15} />{integrationsError}</p> : null}
-      {!integrationsLoading && !integrationsError && integrations.length === 0 ? <p className="registry-empty">The server returned no integrations.</p> : null}
-      <div className="settings-providers">{integrations.map((item) => {
-        const provider = TESTABLE_PROVIDERS[item.id];
-        const test = provider ? tests[provider] : undefined;
-        return <article className="settings-provider" key={item.id}>
-          <span className="settings-provider-icon"><Icon name={modeIcon(item.mode)} size={21} /></span>
-          <div className="settings-provider-body">
-            <header><h3>{item.name}</h3><Pill tone={statusTone[item.status] ?? "neutral"}>{item.status.replace(/_/g, " ")}</Pill>{item.model ? <Pill tone="inferred">{item.model}</Pill> : null}</header>
-            <p className="settings-provider-unlocks">{item.setup || `Unlocks the ${(item.mode || "declared").replace(/_/g, " ")} mode.`}</p>
-            {item.environmentVariables?.length ? <div className="settings-secret">
-              <p className="settings-secret-lead"><Icon name="lock" size={14} />Required env var names — set each as a server secret. This keeps the key out of the database and out of this browser.</p>
-              <div className="copy-lines">{item.environmentVariables.map((name) => <CopyLine key={name} text={`wrangler secret put ${name}`} />)}</div>
-            </div> : <p className="settings-nokeys"><Icon name="check" size={14} />No credential is required for this provider.</p>}
-            {provider ? <div className="settings-test">
-              <Button disabled={Boolean(test?.running)} icon="refresh" onClick={() => runTest(provider)} variant="secondary">{test?.running ? "Testing…" : "Test"}</Button>
+    <div className="settings-section"><header className="settings-section-head"><p className="eyebrow">Section 1 · API keys</p><h2>Paste your keys and save them</h2><p>One box per provider. Each shows whether a value is saved, what it unlocks, and where to get it. A saved key is never shown back to you — only its last few characters, so you can tell which one is in there. The plain settings mixed in below (addresses, model names) are not secrets and are stored as typed.</p></header>
+      {keysLoading ? <p className="registry-empty" role="status">Reading your saved keys…</p> : null}
+      {keysError ? <p className="ops-error" role="alert"><Icon name="info" size={15} />{keysError}</p> : null}
+      {!keysLoading && !keysError && groups.length === 0 ? <p className="registry-empty">The server returned no credential fields.</p> : null}
+      <div className="settings-providers">{groups.map((group) => <article className="settings-provider" key={group.id}>
+        <span className="settings-provider-icon"><Icon name={group.icon} size={21} /></span>
+        <div className="settings-provider-body">
+          <header><h3>{group.name}</h3></header>
+          <p className="settings-provider-unlocks">{group.unlocks}</p>
+          <p className="cred-where"><Icon name="search" size={14} /><span>Where to get it: {group.where}</span></p>
+          <div className="cred-fields">{group.fields.map((field) => {
+            const meta = fieldMeta(field);
+            const credential = credentialByField.get(field);
+            const state = fieldState(field);
+            const draft = drafts[field] ?? "";
+            const managed = credential?.source === "server-secret";
+            const savedInApp = credential?.set === true && credential.source === "saved-in-app";
+            const busy = state.busy !== null;
+            const inputId = `credential-${field}`;
+            return <div className="cred-field" key={field}>
+              <div className="cred-field-head">
+                <label htmlFor={inputId}><span>{meta.label}</span></label>
+                {managed ? <Pill tone="known">Set on the server</Pill> : savedInApp ? <Pill tone="success">Saved</Pill> : <Pill tone="neutral">Not set</Pill>}
+                {savedInApp && credential?.hint ? <span className="cred-hint">{meta.secret ? `ends in ${credential.hint.replace(/^…/, "")}` : credential.hint}</span> : null}
+                <code className="cred-name">{field}</code>
+              </div>
+              {managed
+                ? <p className="cred-managed"><Icon name="lock" size={14} /><span>This one is already set in the deployment environment, so there is nothing to paste. A key set on the server takes priority over anything saved in the app — saving one here would have no effect.</span></p>
+                : <>
+                  <div className="cred-row">
+                    <div className="cred-input">
+                      <input autoCapitalize="none" autoComplete="off" disabled={busy} id={inputId}
+                        onChange={(event) => {
+                          const next = event.target.value;
+                          setDrafts((prev) => ({ ...prev, [field]: next }));
+                          if (state.saved || state.error) patchField(field, { saved: false, error: "" });
+                        }}
+                        placeholder={savedInApp ? "Paste a new value to replace the saved one" : meta.placeholder}
+                        spellCheck={false} type={meta.secret && !state.reveal ? "password" : "text"} value={draft} />
+                      {meta.secret ? <button aria-label={state.reveal ? `Hide ${meta.label}` : `Show ${meta.label}`} aria-pressed={state.reveal} className="cred-reveal" disabled={busy} onClick={() => patchField(field, { reveal: !state.reveal })} type="button">{state.reveal ? "Hide" : "Show"}</button> : null}
+                    </div>
+                    <Button disabled={busy || draft.trim() === ""} icon="check" onClick={() => saveField(field)}>{state.busy === "save" ? "Saving…" : "Save"}</Button>
+                    {savedInApp ? state.confirmClear
+                      ? <><Button disabled={busy} icon="close" onClick={() => clearField(field)} variant="secondary">{state.busy === "clear" ? "Clearing…" : "Confirm clear"}</Button><Button disabled={busy} onClick={() => patchField(field, { confirmClear: false })} variant="quiet">Cancel</Button></>
+                      : <Button disabled={busy} onClick={() => patchField(field, { confirmClear: true })} variant="quiet">Clear</Button>
+                    : null}
+                  </div>
+                  {meta.note ? <small className="cred-note">{meta.note}</small> : null}
+                  {state.saved ? <p className="cred-feedback" role="status"><Icon name="check" size={14} />{meta.secret ? "Saved. It is stored encrypted and will not be shown back to you." : "Saved."}</p> : null}
+                  {state.error ? <p className="upload-state error" role="alert"><Icon name="info" size={15} />{state.error}</p> : null}
+                </>}
+            </div>;
+          })}</div>
+          {group.tests.map((entry) => {
+            const test = tests[entry.provider];
+            return <div className="settings-test" key={entry.provider}>
+              <Button disabled={Boolean(test?.running)} icon="refresh" onClick={() => runTest(entry.provider)} variant="secondary">{test?.running ? "Testing…" : entry.label}</Button>
+              <small>Checks the key the app would actually use. Save first, then test.</small>
               <TestOutcome test={test} />
-            </div> : null}
-          </div>
-        </article>;
-      })}</div>
+            </div>;
+          })}
+        </div>
+      </article>)}</div>
     </div>
 
-    <div className="settings-section"><header className="settings-section-head"><p className="eyebrow">Section 2 · My connections</p><h2>Stored against your advisor account</h2><p>Non-secret connection settings only. None of these fields is a key — they are saved to your account and can be changed at any time.</p></header>
+    <div className="settings-section"><header className="settings-section-head"><p className="eyebrow">Section 2 · My connections</p><h2>Stored against your advisor account</h2><p>Where your work is written, not how the app authenticates. None of these fields is a key — the keys are in Section 1 above. These are saved to your account and can be changed at any time.</p></header>
       {settingsLoading ? <p className="registry-empty" role="status">Reading your connection settings…</p> : null}
       {settingsError ? <p className="ops-error" role="alert"><Icon name="info" size={15} />{settingsError}</p> : null}
       {!settingsLoading && !settingsError ? <form className="panel settings-connections" onSubmit={saveConnections}>
         <div className="settings-crm">
           <h3>Connect your CRM — bring your own Google Sheet</h3>
-          <p className="settings-sub">The app writes engagement rows through the Google identity configured on the server. You share a sheet with it and paste the link here — you never paste a key.</p>
+          <p className="settings-sub">The app writes engagement rows through the Google identity configured on the server. You share a sheet with it and paste the link here — this field is the sheet, not a key.</p>
           <ol className="settings-guide">
             <li><span>1</span><div><strong>Download the CRM template</strong><p>Start from the exact columns the app writes back.</p><a className="button secondary settings-download" download href="/api/crm-template">Download CRM template<Icon name="download" size={15} /></a></div></li>
             <li><span>2</span><div><strong>Import it into Google Sheets</strong><p>In Sheets, File → Import → Upload, and keep it as a new spreadsheet.</p></div></li>
@@ -3333,12 +3574,12 @@ function SettingsScreen({ onBack, onIntegrations }: { onBack: () => void; onInte
           <label className="field-note"><span>Drive folder id <small>Optional</small></span><input autoCapitalize="none" onChange={(e) => setFolder(e.target.value)} placeholder="Google Drive folder id" spellCheck={false} value={folder} /><small>Where generated Google Docs are filed.</small></label>
           <label className="field-note"><span>From name <small>Optional</small></span><input onChange={(e) => setFromName(e.target.value)} placeholder="Tier 4 Advisors" value={fromName} /><small>The display name on outgoing email.</small></label>
         </div>
-        <p className="settings-nosecret"><Icon name="lock" size={15} />These are the only editable fields, and not one of them is a secret. Set API keys with the <code>wrangler secret put</code> commands in Section 1.</p>
+        <p className="settings-nosecret"><Icon name="lock" size={15} />Nothing on this section is a key — these are just pointers to your sheet, folder and sender name. API keys go in Section 1.</p>
         {saveError ? <p className="upload-state error" role="alert"><Icon name="info" size={15} />{saveError}</p> : null}
         <div className="action-row"><p aria-live="polite" className={`settings-save-state ${saveState}`}>{saveLabel}</p><Button disabled={saveState === "saving" || settingsLoading} icon="check" type="submit">{saveState === "saving" ? "Saving…" : "Save connections"}</Button></div>
       </form> : null}
     </div>
 
-    <div className="security"><Icon name="lock" size={18} /><div><strong>Authorization boundary</strong><p>No secret is ever entered or displayed here. External writes, connector imports, paid enrichment, and customer sends still require explicit review and approval.</p></div></div>
+    <div className="security"><Icon name="lock" size={18} /><div><strong>Authorization boundary</strong><p>A key you save here is stored encrypted and is never displayed again — only its last few characters. External writes, connector imports, paid enrichment, and customer sends still require explicit review and approval.</p></div></div>
   </section>;
 }

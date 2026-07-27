@@ -1,4 +1,5 @@
-import { extractErrorMessage, googleOAuthCredentials, readJsonBody } from "./env";
+import { extractErrorMessage, googleOAuthCredentials, readJsonBody, type GoogleOAuthCredentials } from "./env";
+import type { Credentials } from "../secrets";
 
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
 
@@ -21,7 +22,37 @@ interface CachedToken {
 }
 
 /** Module scope: per-isolate on Workers, so a cold isolate simply re-exchanges. */
-let cached: CachedToken | null = null;
+const cache = new Map<string, CachedToken>();
+
+/** Bounded so a many-advisor isolate cannot grow the cache without limit. */
+const MAX_CACHED_TOKENS = 32;
+
+/**
+ * Cache slots are keyed by a SHA-256 fingerprint of the grant (client id + refresh
+ * token), never by the refresh token itself: a plain-token key is one stray log or
+ * heap dump away from leaking the credential. Because the fingerprint covers the
+ * refresh token, two advisors can never read each other's access token, and the
+ * env-only path keeps a single stable slot exactly as the previous single-slot
+ * cache did.
+ */
+async function cacheKeyFor(oauth: GoogleOAuthCredentials): Promise<string> {
+  const material = new TextEncoder().encode(`${oauth.clientId}\u0000${oauth.refreshToken}`);
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", material));
+  let key = "";
+  for (const byte of digest) key += byte.toString(16).padStart(2, "0");
+  return key;
+}
+
+function storeToken(key: string, token: CachedToken): void {
+  cache.delete(key);
+  cache.set(key, token);
+  // Map iterates in insertion order, so the first key is the least recently stored.
+  while (cache.size > MAX_CACHED_TOKENS) {
+    const oldest = cache.keys().next();
+    if (oldest.done) break;
+    cache.delete(oldest.value);
+  }
+}
 
 /** Empty when Google did not report a scope list; never treat that as a denial. */
 function uncoveredScopes(requested: readonly string[], granted: readonly string[]): string[] {
@@ -39,12 +70,16 @@ export type AccessTokenResult =
  * `scopes` is advisory: the refresh-token grant returns whatever scopes the
  * token was originally consented to, so the requested set is only used to
  * report a coverage mismatch rather than to widen access.
+ *
+ * `credentials`, when supplied, resolves the grant for one advisor; omitted, the
+ * Cloudflare environment is read exactly as before.
  */
 export async function getAccessTokenResult(
   scopes: readonly string[] = [DRIVE_FILE_SCOPE],
+  credentials?: Credentials,
 ): Promise<AccessTokenResult> {
-  const credentials = googleOAuthCredentials();
-  if (!credentials) {
+  const oauth = googleOAuthCredentials(credentials);
+  if (!oauth) {
     return {
       ok: false,
       reason: "not-configured",
@@ -52,7 +87,9 @@ export async function getAccessTokenResult(
     };
   }
 
+  const key = await cacheKeyFor(oauth);
   const now = Date.now();
+  const cached = cache.get(key);
   if (cached && cached.expiresAt - EXPIRY_MARGIN_MS > now) {
     return {
       ok: true,
@@ -69,20 +106,20 @@ export async function getAccessTokenResult(
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
         grant_type: "refresh_token",
-        client_id: credentials.clientId,
-        client_secret: credentials.clientSecret,
-        refresh_token: credentials.refreshToken,
+        client_id: oauth.clientId,
+        client_secret: oauth.clientSecret,
+        refresh_token: oauth.refreshToken,
       }).toString(),
       signal: AbortSignal.timeout(10_000),
     });
   } catch {
-    cached = null;
+    cache.delete(key);
     return { ok: false, reason: "failed", detail: "Google token endpoint did not respond within 10s." };
   }
 
   const body = await readJsonBody<TokenResponse>(response);
   if (!response.ok) {
-    cached = null;
+    cache.delete(key);
     return {
       ok: false,
       reason: "failed",
@@ -92,17 +129,17 @@ export async function getAccessTokenResult(
 
   const token = typeof body.json?.access_token === "string" ? body.json.access_token : "";
   if (!token) {
-    cached = null;
+    cache.delete(key);
     return { ok: false, reason: "failed", detail: "Google token exchange returned no access_token." };
   }
 
   const lifetimeMs = Math.max(0, Number(body.json?.expires_in ?? 0)) * 1000;
   const grantedScopes = (body.json?.scope ?? "").split(/\s+/).filter(Boolean);
-  cached = {
+  storeToken(key, {
     token,
     expiresAt: now + (lifetimeMs || 3_600_000),
     grantedScopes,
-  };
+  });
 
   // A scope gap is not fatal here: the API call itself returns the authoritative
   // authorization error, which the adapter surfaces in `detail`.
@@ -112,12 +149,17 @@ export async function getAccessTokenResult(
 /** Convenience wrapper: null when unconfigured or when the exchange failed. */
 export async function getAccessToken(
   scopes: readonly string[] = [DRIVE_FILE_SCOPE],
+  credentials?: Credentials,
 ): Promise<string | null> {
-  const result = await getAccessTokenResult(scopes);
+  const result = await getAccessTokenResult(scopes, credentials);
   return result.ok ? result.token : null;
 }
 
-/** Drop the cached token, e.g. after a 401 from a Google API. */
+/**
+ * Drop cached tokens, e.g. after a 401 from a Google API. Clears every grant:
+ * the caller holds a token, not the fingerprint that keys it, and an over-broad
+ * eviction only costs one extra exchange.
+ */
 export function resetAccessTokenCache(): void {
-  cached = null;
+  cache.clear();
 }

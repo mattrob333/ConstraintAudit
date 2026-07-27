@@ -79,6 +79,24 @@ const TABLE_STATEMENTS = [
     settings_json TEXT NOT NULL DEFAULT '{}',
     updated_at TEXT NOT NULL
   )`,
+  // Per-owner credential values saved from the app (see lib/secrets.ts). One row per field.
+  // Secret fields hold an AES-GCM ciphertext plus its IV; non-secret fields hold a plain value
+  // with an empty `iv`. `hint` is a display-only masked tail — never the value itself.
+  `CREATE TABLE IF NOT EXISTS advisor_secrets (
+    owner_id TEXT NOT NULL,
+    field TEXT NOT NULL,
+    ciphertext TEXT NOT NULL,
+    iv TEXT NOT NULL,
+    hint TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (owner_id, field)
+  )`,
+  // Deployment-wide, non-tenant key/value. Currently holds only the generated encryption key used
+  // when no APP_ENCRYPTION_KEY binding is configured. Never owner-scoped, so it has no owner_id.
+  `CREATE TABLE IF NOT EXISTS app_config (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  )`,
 ] as const;
 
 /**
@@ -105,6 +123,16 @@ const REQUIRED_COLUMNS: Record<string, Record<string, string>> = {
     settings_json: "TEXT NOT NULL DEFAULT '{}'",
     updated_at: "TEXT NOT NULL DEFAULT ''",
   },
+  // (owner_id, field) is the composite PRIMARY KEY and always arrives with the CREATE.
+  advisor_secrets: {
+    ciphertext: "TEXT NOT NULL DEFAULT ''",
+    iv: "TEXT NOT NULL DEFAULT ''",
+    hint: "TEXT NOT NULL DEFAULT ''",
+    updated_at: "TEXT NOT NULL DEFAULT ''",
+  },
+  app_config: {
+    value: "TEXT NOT NULL DEFAULT ''",
+  },
 };
 
 const INDEX_STATEMENTS = [
@@ -117,6 +145,7 @@ const INDEX_STATEMENTS = [
   "CREATE INDEX IF NOT EXISTS idx_transcripts_owner ON transcripts (owner_id, created_at DESC)",
   "CREATE INDEX IF NOT EXISTS idx_activities_owner ON activities (owner_id, created_at DESC)",
   "CREATE INDEX IF NOT EXISTS idx_intents_owner ON intents (owner_id, created_at DESC)",
+  "CREATE INDEX IF NOT EXISTS idx_advisor_secrets_owner ON advisor_secrets (owner_id)",
 ] as const;
 
 const CLEANUP_STATEMENTS = [
@@ -713,4 +742,78 @@ export async function putSettingsRow(ownerId: string, json: string): Promise<voi
     `INSERT INTO advisor_settings (owner_id, settings_json, updated_at) VALUES (?, ?, ?)
      ON CONFLICT(owner_id) DO UPDATE SET settings_json = excluded.settings_json, updated_at = excluded.updated_at`
   ).bind(owner, json, new Date().toISOString()).run();
+}
+
+/**
+ * Saved credential rows for one advisor. Storage only: this layer never encrypts, decrypts, or
+ * inspects a value — lib/secrets.ts owns the format of `ciphertext`/`iv`/`hint`. Owner-scoped like
+ * every other read, so one advisor can never enumerate another's credentials.
+ */
+export async function listSecretRows(ownerId: string): Promise<DbRow[]> {
+  await ensureDatabase();
+  const owner = requireOwner(ownerId);
+  const result = await getD1().prepare(
+    "SELECT * FROM advisor_secrets WHERE owner_id = ? ORDER BY field ASC"
+  ).bind(owner).all<DbRow>();
+  return result.results ?? [];
+}
+
+/** Another owner's credential row is indistinguishable from a missing one. */
+export async function getSecretRow(ownerId: string, field: string): Promise<DbRow | null> {
+  await ensureDatabase();
+  const owner = requireOwner(ownerId);
+  const row = await getD1().prepare(
+    "SELECT * FROM advisor_secrets WHERE owner_id = ? AND field = ? LIMIT 1"
+  ).bind(owner, field).first<DbRow>();
+  return row ?? null;
+}
+
+/** Upsert one credential row. Values are already encrypted (or deliberately plain) by the caller. */
+export async function putSecretRow(
+  ownerId: string,
+  field: string,
+  ciphertext: string,
+  iv: string,
+  hint: string,
+): Promise<void> {
+  await ensureDatabase();
+  const owner = requireOwner(ownerId);
+  await getD1().prepare(
+    `INSERT INTO advisor_secrets (owner_id, field, ciphertext, iv, hint, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(owner_id, field) DO UPDATE SET
+       ciphertext = excluded.ciphertext, iv = excluded.iv,
+       hint = excluded.hint, updated_at = excluded.updated_at`
+  ).bind(owner, field, ciphertext, iv, hint, new Date().toISOString()).run();
+}
+
+/** `false` when the advisor had nothing saved for that field. */
+export async function deleteSecretRow(ownerId: string, field: string): Promise<boolean> {
+  await ensureDatabase();
+  const owner = requireOwner(ownerId);
+  const result = await getD1().prepare(
+    "DELETE FROM advisor_secrets WHERE owner_id = ? AND field = ?"
+  ).bind(owner, field).run();
+  return Boolean(result.meta.changes);
+}
+
+/**
+ * Deployment-wide configuration value, `""` when unset. Not owner-scoped by design: the only
+ * current entry is the generated encryption key, which is a property of the deployment, not of
+ * an advisor. Never expose these values through an owner-facing route.
+ */
+export async function getAppConfig(key: string): Promise<string> {
+  await ensureDatabase();
+  const row = await getD1().prepare(
+    "SELECT value FROM app_config WHERE key = ? LIMIT 1"
+  ).bind(key).first<DbRow>();
+  return text(row ?? {}, "value");
+}
+
+export async function putAppConfig(key: string, value: string): Promise<void> {
+  await ensureDatabase();
+  await getD1().prepare(
+    `INSERT INTO app_config (key, value) VALUES (?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+  ).bind(key, value).run();
 }

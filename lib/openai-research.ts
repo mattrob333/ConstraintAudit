@@ -3,6 +3,7 @@ import {
   collectOpenAIWebSources,
   parseOpenAIResearchPayload,
 } from "./openai-research-schema";
+import type { Credentials } from "./secrets";
 import type { ResearchSynthesis } from "./workflow";
 
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
@@ -20,17 +21,19 @@ function bindings(): Record<string, unknown> {
   return env as unknown as Record<string, unknown>;
 }
 
-function configuredValue(name: string): string {
+/** With credentials the resolver owns precedence (server secret wins); without, env only. */
+function configuredValue(name: string, credentials?: Credentials): string {
+  if (credentials) return credentials.get(name).trim();
   const value = bindings()[name];
   return typeof value === "string" ? value.trim() : "";
 }
 
-export function openAIResearchConfigured(): boolean {
-  return configuredValue("OPENAI_API_KEY").length > 0;
+export function openAIResearchConfigured(credentials?: Credentials): boolean {
+  return configuredValue("OPENAI_API_KEY", credentials).length > 0;
 }
 
-export function openAIResearchModel(): string {
-  return configuredValue("OPENAI_RESEARCH_MODEL") || DEFAULT_MODEL;
+export function openAIResearchModel(credentials?: Credentials): string {
+  return configuredValue("OPENAI_RESEARCH_MODEL", credentials) || DEFAULT_MODEL;
 }
 
 function outputText(response: OpenAIResponse): string {
@@ -168,9 +171,10 @@ export async function enrichResearchWithOpenAI(
   base: ResearchSynthesis,
   client: string,
   fetcher: typeof fetch = fetch,
+  credentials?: Credentials,
 ): Promise<ResearchSynthesis> {
-  const key = configuredValue("OPENAI_API_KEY");
-  const model = openAIResearchModel();
+  const key = configuredValue("OPENAI_API_KEY", credentials);
+  const model = openAIResearchModel(credentials);
   if (!key) {
     return {
       ...base,
