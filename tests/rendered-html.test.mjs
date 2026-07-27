@@ -15,6 +15,9 @@ test("build contains the Tier 4 audit entry point", async () => {
   assert.match(cockpit, /Continue an engagement/);
   assert.match(cockpit, /Works without setup/);
   assert.doesNotMatch(cockpit, /SkeletonPreview|Your site is taking shape|react-loading-skeleton/);
+  // The walkthrough is an operating manual, not a coaching course. The deleted call-briefing
+  // panel and its "arc of the hour"/"if you get lost" script must not creep back in.
+  assert.doesNotMatch(cockpit, /CallBriefing|ifYouGetLost|callArc|mustLeaveWith/);
 });
 
 test("the crash screen never shows a client the internals", async () => {

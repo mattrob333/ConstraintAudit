@@ -39,7 +39,7 @@ Do not turn the product into a general AI-opportunity audit. It is a throughput 
 
 ### Working and verified in source
 
-- Fresh engagement, external migration, and resume. Intake captures the primary contact's role as a real column, and can ingest a source document (TXT/VTT/SRT/JSON/DOCX; PDF is refused).
+- Fresh engagement, external migration, and resume. Intake requires only the company name and website — the contact block and the contact email are optional there and the email is collected on the Prepare screen, where the brief is actually sent. The gate moved rather than disappearing: `readinessBriefAction()` refuses a `send_intent` when `engagement.email` is blank. Intake still captures the primary contact's role as a real column, and can ingest a source document (TXT/VTT/SRT/JSON/DOCX; PDF is refused).
 - Engagements, artifacts, transcripts, activities, and intents persist in Cloudflare D1. All five tables carry `owner_id`, every query is scoped in SQL, and post-release columns are added by an idempotent boot-time migration.
 - All 25 API routes resolve the advisor through `requirePrincipalAsync`.
 - Cloudflare Access is a real identity provider: `lib/access-jwt.ts` verifies the assertion signature against the team's published keys and checks issuer, audience and expiry. When Access is configured it is the *only* accepted source — no fallback to a spoofable header or the shared local advisor. `advisorAuthMode()` reports `cloudflare-access | sites-headers | local-fallback | denied`, and a half-configured Access rollout is `denied` rather than silently downgraded.
@@ -59,7 +59,7 @@ Do not turn the product into a general AI-opportunity audit. It is a throughput 
 
 ### Verification status
 
-`npm run lint`, `npx tsc --noEmit`, and `npm test` are the required checks; `npm test` builds first, then runs 43 checks (3 rendered-frontend, 40 backend). Counts and coverage per file are in `README.md`. No test needs the network or a key.
+`npm run lint`, `npx tsc --noEmit`, and `npm test` are the required checks; `npm test` builds first, then runs 50 checks (3 rendered-frontend, 47 backend). Counts and coverage per file are in `README.md`. No test needs the network or a key.
 
 This handoff was written from source reading. It does not assert a fresh full-suite run or a browser pass on 2026-07-27 — run them yourself before shipping, per `AGENTS.md`.
 
@@ -94,7 +94,7 @@ These behave this way on purpose. Do not "fix" them without reading the reasonin
    - `presenting` is not reset by `go()` — only by `resume()` and `leavePractice()` — so it persists across screens within one engagement.
    - The Documents menu and the send-intent modal register their own `document` Escape listeners without `stopPropagation`. They are not reachable from the call screen today, so this is latent rather than a live bug.
 
-8. **Two different practice-id tests.** The client uses `id.startsWith("eng_demo_")`; the server's `isDemoEngagement` requires `eng_demo_practice`. Nothing generates a colliding id today, so this is a latent inconsistency, not a defect — but do not assume the two agree.
+8. **The practice-id test is duplicated in two places.** `PRACTICE_ID_PREFIX` in `AdvisorCockpit.tsx` and `DEMO_ENGAGEMENT_ID` in `lib/demo.ts` are both `"eng_demo_practice"`, and the client's `isPracticeEngagement()` is a prefix match on it. They agree today only because the client carries a comment saying they must; nothing enforces it, so changing one without the other would badge an unrelated engagement as practice data or miss one the server considers practice.
 
 9. **`docs/DEPLOYMENT.md` Step 6a is stale.** It instructs the reader to migrate API routes from the synchronous resolver to `requirePrincipalAsync` "first". That migration is already done — every route under `app/api/` uses the async resolver. The synchronous `resolvePrincipal`/`requirePrincipal` remain exported in `lib/auth.ts` but have no caller. That file is owned elsewhere; correct it there rather than duplicating a fix.
 

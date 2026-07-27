@@ -83,11 +83,11 @@ Recon produces:
 
 `runResearch()` writes the canonical Canvas, the value flow, and the source register in one update, and the Company Brief artifact includes the proposed flow marked as unconfirmed.
 
-Intake also captures `primaryContactRole` alongside the contact name, so the named human owner required at diagnosis approval does not have to be retyped later.
+Intake requires only the company name and the website — research reads the public site, so a site is the one thing it cannot start without. The contact block is optional there, and the contact email is collected later on the Prepare screen, immediately before the brief is sent. Intake still captures `primaryContactRole` alongside the contact name when they are supplied, so the named human owner required at diagnosis approval does not have to be retyped later.
 
 An advisor can attach material they already had — a prior proposal, an email thread, notes — through `POST /api/engagements/:id/sources`. The file is decoded by the same decoder the transcripts use, stored as a `source_document` artifact with **`doc` provenance**, and appended to `sourceRegister`. **PDF is refused outright** with a 400 telling the advisor to convert to DOCX, TXT, or Markdown first; the file picker omits `.pdf` and pre-checks for it client-side. A silently unreadable PDF would be worse than a refusal.
 
-The Readiness Brief is generated as a draft, approved separately, and only then may a send intent be created — `readinessBriefAction()` refuses `send_intent` unless the brief status is `Approved`, and `requireApprovedReadinessArtifact()` rejects a regenerated or mismatched artifact.
+The Readiness Brief is generated as a draft, approved separately, and only then may a send intent be created — `readinessBriefAction()` refuses `send_intent` unless the brief status is `Approved`, and `requireApprovedReadinessArtifact()` rejects a regenerated or mismatched artifact. Because intake no longer demands a contact email, the recipient check lives here too: `send_intent` is refused when `engagement.email` is blank, so the gate moved later in the workflow rather than disappearing. The Prepare screen is where that address is captured, and its **Approve send intent** button stays disabled until there is one.
 
 ## Call 1
 

@@ -13,22 +13,23 @@ As of the 2026-07-27 update, verified by reading `package.json` and every file i
 
 - `npm run lint` and `npx tsc --noEmit` are the declared gates alongside `npm test`;
 - the vinext production build runs first and is not optional — the rendered-HTML suite asserts against `dist/server/index.js`;
-- `node --test` runs `tests/rendered-html.test.mjs`: **2 tests**;
-- `tsx --test` then runs four files in this order: `backend-workflow` (**15**), `gap-closure` (**11**), `reasoning` (**7**), `practice-mode` (**7**) — **40 tests**.
+- `node --test` runs `tests/rendered-html.test.mjs`: **3 tests**;
+- `tsx --test` then runs five files in this order: `backend-workflow` (**16**), `gap-closure` (**11**), `reasoning` (**7**), `practice-mode` (**7**), `bug-review` (**6**) — **47 tests**.
 
-**43 tests in total.** Every one is a flat top-level `test()` from `node:test`; there are no `describe` blocks, no nested subtests, and nothing skipped or `.only`.
+**50 tests in total.** Every one is a flat top-level `test()` from `node:test`; there are no `describe` blocks, no nested subtests, and nothing skipped or `.only`.
 
 | File | Runner | Tests |
 | --- | --- | --- |
-| `tests/rendered-html.test.mjs` | `node --test` | 2 |
-| `tests/backend-workflow.test.mjs` | `tsx --test` | 15 |
+| `tests/rendered-html.test.mjs` | `node --test` | 3 |
+| `tests/backend-workflow.test.mjs` | `tsx --test` | 16 |
 | `tests/gap-closure.test.mjs` | `tsx --test` | 11 |
 | `tests/reasoning.test.mjs` | `tsx --test` | 7 |
 | `tests/practice-mode.test.mjs` | `tsx --test` | 7 |
+| `tests/bug-review.test.mjs` | `tsx --test` | 6 |
 
 ### Rendered-frontend coverage
 
-The build contains the audit entry point and the expected cockpit strings; and the owned client surface keeps its workflow gates and accessibility — the `<AdvisorCockpit />` mount, a typed `/api/engagements` call, no local fallback engagements, the consent-status union, send-intent approval copy, ARIA attributes, and the CSS grid and reduced-motion rules.
+The build contains the audit entry point and the expected cockpit strings, and the walkthrough carries no retired coaching content (`CallBriefing`, `ifYouGetLost`); the crash screen renders no exception message, digest, stack, or class name to a client; and the owned client surface keeps its workflow gates and accessibility — the `<AdvisorCockpit />` mount, a typed `/api/engagements` call, no local fallback engagements, the consent-status union, send-intent approval copy, ARIA attributes, and the CSS grid and reduced-motion rules.
 
 ### Backend workflow coverage
 
@@ -67,6 +68,10 @@ Research fallback, source-backed Canvas facts, public-URL safety, transcript pro
 Determinism across two builds and distinct per-owner ids; the data being unmistakably fake and saying so; every quote the diagnosis rests on appearing verbatim in a real transcript line; more than ten advisor lines all parsing as `advisor-note` with none reaching the finding's evidence; the findings agenda reading back only figures that bear on the constraint; artifacts generating real content across the whole arc; and the measured outcome reading as an improvement from inference alone, with `directionInference.source` asserted **not** to be `"advisor"`.
 
 That last test is the automated statement of the behavior change on this page: the app can now interpret a delta without the advisor, and the suite pins that it records how it got there.
+
+### Bug-review coverage
+
+The six regressions found in code review and fixed: a model value grounds only against a whole number in the cited line, never a substring of a longer one; magnitude suffixes are read, so a revenue drop is not called an improvement; a range value can anchor neither a delta nor a confirmed baseline; a millisecond timestamp does not corrupt the parsed speaker; a VTT cue without milliseconds is not silently dropped; and the generic workflow advance cannot reach an evidence-gated state.
 
 ## Manually exercised end-to-end story
 

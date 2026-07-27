@@ -190,6 +190,12 @@ export async function readinessBriefAction(
   if (input.action === "send_intent" && engagement.readinessBriefStatus !== "Approved") {
     throw new Error("Readiness brief must be Approved before creating a send intent.");
   }
+  // Intake no longer demands a contact email, so the recipient gate lives here instead: a send
+  // intent cannot be created without an address on the engagement. The gate moved later in the
+  // workflow, it did not disappear.
+  if (input.action === "send_intent" && !engagement.email.trim()) {
+    throw new Error("A primary contact email is required before a readiness brief send intent can be created.");
+  }
   if (input.action === "send_intent") {
     const binding = engagement.data.approvedReadinessBrief;
     const bound = binding?.documentId ? await getArtifact(binding.documentId, principal.ownerId) : null;

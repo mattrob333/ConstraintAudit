@@ -13,7 +13,7 @@ tags: [operations, local-development, deployment, cloudflare, workers, tenancy, 
 C:\Users\mrobe\Documents\Codex\2026-07-24\sales-plugin-sales-openai-curated-remote\work\tier4-advisor-app
 ```
 
-At the 2026-07-27 update the checkout is on `claude/repo-overview-b7tlrs` at `5f50feb`. The relevant sequence since the last wiki pass:
+At the second 2026-07-27 update the checkout is at `b835bd6`. The relevant sequence since the last wiki pass, oldest first:
 
 | Commit | What landed |
 | --- | --- |
@@ -24,6 +24,13 @@ At the 2026-07-27 update the checkout is on `claude/repo-overview-b7tlrs` at `5f
 | `d4c21fc` | Practice-mode data, Cloudflare deployment config, verified Cloudflare Access auth |
 | `2ca2560` | Advisor-only live-call coaching |
 | `5f50feb` | The Practice-mode walkthrough |
+| `321baa3` | Deployment made checkable; the crash screen made client-safe |
+| `4d3f753` | Evidence-integrity and state bug fixes, plus `tests/bug-review.test.mjs` |
+| `e4b4bbb` | Engagement state reset on switch, double-submit guards, speaker tagging |
+| `67006c4`, `f796fed` | Bring-your-own CRM sheet docs; the standard document shell |
+| `cc04770`, `5c7579f` | The Settings screen and in-app API-key setup |
+| `7dad5c1` → `8b49ee9` | The walkthrough docked, then rebuilt as 8 terse stops |
+| `b835bd6` | Intake requires only company and website |
 
 Use current Git `HEAD` for the complete source. The checkout has no persistent user-configured Git remote.
 
@@ -86,7 +93,7 @@ npx tsc --noEmit
 npm test
 ```
 
-`npm test` builds the application, runs `tests/rendered-html.test.mjs` under `node --test` (2 tests), then `tests/backend-workflow.test.mjs`, `tests/gap-closure.test.mjs`, `tests/reasoning.test.mjs`, and `tests/practice-mode.test.mjs` under `tsx --test` (15 + 11 + 7 + 7 = 40). **43 tests in total.** The build is not optional — the rendered-HTML suite asserts against `dist/server/index.js`.
+`npm test` builds the application, runs `tests/rendered-html.test.mjs` under `node --test` (3 tests), then `tests/backend-workflow.test.mjs`, `tests/gap-closure.test.mjs`, `tests/reasoning.test.mjs`, `tests/practice-mode.test.mjs`, and `tests/bug-review.test.mjs` under `tsx --test` (16 + 11 + 7 + 7 + 6 = 47). **50 tests in total.** The build is not optional — the rendered-HTML suite asserts against `dist/server/index.js`.
 
 ## Secrets
 

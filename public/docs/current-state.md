@@ -5,7 +5,7 @@
 
 ## Start with Practice mode
 
-Practice mode is a complete fictional engagement — Meridian Millwork — seeded into your own account with no API key and no configuration. It covers research through catalog write-back, including both transcripts and all 14 generated documents, and a 15-stop walkthrough docks beside the real screens rather than rebuilding fake ones. It is labelled by a sticky bar that cannot be dismissed and by a footer on every document, and it can be reset or removed at any time. Open it from the Home screen.
+Practice mode is a complete fictional engagement — Meridian Millwork — seeded into your own account with no API key and no configuration. It covers research through catalog write-back, including both transcripts and all 14 generated documents, and an 8-stop walkthrough docks beside the real screens rather than rebuilding fake ones. It is labelled by a sticky bar that cannot be dismissed and by a footer on every document, and it can be reset or removed at any time. Open it from the Home screen.
 
 Because the practice bar deliberately stays visible on the client-facing screens, practice mode is for rehearsal, not for a screen share with a live audience.
 

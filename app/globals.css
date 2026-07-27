@@ -1247,8 +1247,26 @@ blockquote { margin: 0; }
   border-radius: 6px;
 }
 
+.flow-panel .legend {
+  align-items: center;
+  row-gap: 8px;
+}
+
 .flow-panel .legend .eyebrow {
   margin: 0;
+}
+
+.flow-panel .legend > .pill {
+  flex: none;
+}
+
+/* The trailing caption is a sentence, not a chip: give it its own full-width row rather than
+   letting it fight the pills for space and overflow (flex items do not shrink below min-content).
+   `:not(.pill)` keeps the evidence pills, which are also spans, out of this rule. */
+.flow-panel .legend > span:not(.pill) {
+  flex: 1 1 100%;
+  min-width: 0;
+  line-height: 1.45;
 }
 
 .value-flow {
@@ -1269,15 +1287,22 @@ blockquote { margin: 0; }
   padding: 18px;
 }
 
+/* Flex, not a fixed three-column grid: the evidence pill is sized `width: max-content`, so an
+   `auto` track that got squeezed below that width let the pill spill out of the card's top-right
+   corner. Here the pill never shrinks, the title block absorbs the remaining space, and the pill
+   wraps onto its own line instead of overflowing once the row runs out of room. */
 .value-flow header {
-  display: grid;
-  grid-template-columns: 26px minmax(0, 1fr) auto;
-  align-items: start;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
   gap: 12px;
 }
 
-.value-flow header > span {
+/* `:not(.pill)` is load-bearing: this rule out-specifies `.pill`, so without it the evidence pill
+   was also forced to a 26px circle and its label spilled out of the card's corner. */
+.value-flow header > span:not(.pill) {
   display: grid;
+  flex: none;
   width: 26px;
   height: 26px;
   place-items: center;
@@ -1290,12 +1315,21 @@ blockquote { margin: 0; }
 
 .value-flow header > div {
   display: grid;
+  flex: 1 1 200px;
+  min-width: 0;
   gap: 4px;
+}
+
+.value-flow header > .pill {
+  flex: none;
+  margin-left: auto;
+  max-width: 100%;
 }
 
 .value-flow header strong {
   font-family: "Space Grotesk", system-ui, sans-serif;
   font-size: 1.05rem;
+  overflow-wrap: break-word;
 }
 
 .value-flow header small {
@@ -1610,6 +1644,16 @@ blockquote { margin: 0; }
 .ops-summary small {
   color: var(--muted);
   font-size: .76rem;
+}
+
+/* The sprint summary cards carry prose, not figures — a prescription can run several sentences,
+   and display-sized bold text made it look broken. Body copy here; the eyebrow label is unchanged. */
+.sprint-summary strong {
+  color: var(--muted);
+  font-size: .92rem;
+  font-weight: 500;
+  line-height: 1.5;
+  overflow-wrap: break-word;
 }
 
 .ops-columns {
@@ -2598,8 +2642,11 @@ blockquote { margin: 0; }
 
 @media (max-width: 720px) {
   .value-flow dl { grid-template-columns: 1fr; }
-  .value-flow header { grid-template-columns: 26px minmax(0, 1fr); }
-  .value-flow header .pill { grid-column: 2; }
+  /* Narrow cards: marker + title fill row one (26px marker + 12px gap = 38px), so the pill wraps
+     onto row two and sits left-aligned under the title instead of squeezing into the corner. */
+  .value-flow header { row-gap: 8px; }
+  .value-flow header > div { flex-basis: calc(100% - 38px); }
+  .value-flow header > .pill { margin-left: 38px; margin-right: auto; }
   .ops-rail { overflow-x: auto; }
   .ops-rail button { white-space: nowrap; }
   .answer-value { width: 100%; }
@@ -2619,8 +2666,8 @@ blockquote { margin: 0; }
  * ADVISOR COACHING LAYER
  * ---------------------------------------------------------------------------
  * In-call support for the advisor: follow-up prompts, unknown handling, steer-
- * back lines, objection answers, plain-English glossary, and the pre-call
- * briefing. None of it is client-facing.
+ * back lines, objection answers, and the plain-English glossary. None of it is
+ * client-facing.
  *
  * There is no CSS here that hides coaching from a client. There deliberately
  * is not: hiding by style leaves the words in the DOM, in the page source, and
@@ -2966,9 +3013,7 @@ blockquote { margin: 0; }
 .coach-foot button:hover { border-color: var(--forest); color: var(--forest); }
 .coach-foot small { color: var(--muted); font-size: .7rem; line-height: 1.4; }
 
-/* Pre-call confidence briefing on the Prepare screen. */
-.advisor-only .briefing + .briefing { margin-top: 12px; }
-
+/* Collapsible advisor panel on the Prepare screen. */
 .briefing {
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -3008,79 +3053,6 @@ blockquote { margin: 0; }
   padding: 18px 17px 20px;
 }
 
-.briefing-body > section { display: grid; gap: 9px; }
-.briefing-body .eyebrow { margin: 0; color: var(--forest); }
-
-.briefing-arc { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; counter-reset: none; }
-
-.briefing-arc li {
-  display: grid;
-  grid-template-columns: 88px minmax(0, 1fr);
-  align-items: baseline;
-  gap: 14px;
-  border-left: 3px solid var(--step);
-  padding: 9px 12px;
-}
-
-.briefing-arc li:hover { border-left-color: var(--forest); background: var(--paper); }
-
-.briefing-arc b {
-  color: var(--forest);
-  font-family: "JetBrains Mono", monospace;
-  font-size: .72rem;
-  font-weight: 500;
-}
-
-.briefing-arc strong { display: block; font-size: .95rem; }
-.briefing-arc span { color: var(--muted); font-size: .84rem; line-height: 1.45; }
-
-.briefing-musts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
-
-.briefing-musts article {
-  display: grid;
-  gap: 5px;
-  align-content: start;
-  border: 1px solid var(--line);
-  border-top: 3px solid var(--forest);
-  border-radius: 9px;
-  background: var(--paper);
-  padding: 13px 14px;
-}
-
-.briefing-musts b {
-  display: grid;
-  width: 24px;
-  height: 24px;
-  place-items: center;
-  border-radius: 50%;
-  background: var(--forest);
-  color: white;
-  font-family: "JetBrains Mono", monospace;
-  font-size: .72rem;
-}
-
-.briefing-musts strong { font-family: "Space Grotesk", system-ui, sans-serif; font-size: 1rem; }
-.briefing-musts p { margin: 0; color: var(--muted); font-size: .82rem; line-height: 1.45; }
-
-.briefing-lost { display: grid; gap: 7px; margin: 0; padding: 0 0 0 18px; }
-.briefing-lost li { color: var(--muted); font-size: .86rem; line-height: 1.5; }
-
-.briefing-note {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  margin: 0;
-  border-radius: 8px;
-  border: 1px solid var(--line);
-  background: var(--paper);
-  padding: 11px 13px;
-  color: var(--muted);
-  font-size: .82rem;
-  line-height: 1.5;
-}
-
-.briefing-note > svg { flex: none; margin-top: 2px; color: var(--forest); }
-
 @media (max-width: 1100px) {
   .call-stage { grid-template-columns: minmax(0, 1fr) 330px; gap: 20px; }
 }
@@ -3092,7 +3064,6 @@ blockquote { margin: 0; }
   .coach-rail { min-height: 0; }
   .coach-body { max-height: none; }
   .glossary.page ul { grid-template-columns: minmax(0, 1fr); }
-  .briefing-musts { grid-template-columns: minmax(0, 1fr); }
 }
 
 @media (max-width: 720px) {
@@ -3100,7 +3071,6 @@ blockquote { margin: 0; }
   .share-toggle { font-size: .7rem; }
   .coach-tabs { grid-template-columns: minmax(0, 1fr); }
   .coach-tabs button:last-child:nth-child(odd) { grid-column: auto; }
-  .briefing-arc li { grid-template-columns: minmax(0, 1fr); gap: 2px; }
   .briefing > summary { grid-template-columns: auto minmax(0, 1fr); }
   .briefing > summary > svg:last-child { display: none; }
 }
@@ -3579,8 +3549,6 @@ blockquote { margin: 0; }
 .tour-list small { display: block; color: var(--muted); font-size: .7rem; }
 
 .tour-body { display: grid; gap: 13px; }
-.tour-body section { display: grid; align-content: start; gap: 5px; }
-.tour-body .eyebrow { margin: 0; color: var(--forest); }
 .tour-body p { margin: 0; color: var(--ink); font-size: .93rem; line-height: 1.55; }
 
 .tour-body ul { display: grid; gap: 8px; margin: 0; padding: 0 0 0 17px; }
@@ -3718,6 +3686,8 @@ blockquote { margin: 0; }
   align-items: end;
   gap: 14px;
 }
+/* One field plus its save button — the Prepare screen's inline contact-email capture. */
+.owner-editor-fields.single { grid-template-columns: minmax(0, 1fr) auto; }
 .owner-editor-fields label { display: grid; gap: 7px; }
 .owner-editor > .upload-state { margin: 12px 0 0; }
 

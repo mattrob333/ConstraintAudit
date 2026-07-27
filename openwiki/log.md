@@ -1,6 +1,31 @@
 # Wiki update log
 
-## 2026-07-27
+## 2026-07-27 — walkthrough rebuild and intake re-grounding
+
+A second pass on the same day, against source at `b835bd6`. Two changes had landed since `5f50feb`: the practice walkthrough was rebuilt from 15 prose stops into 8 terse ones, and intake stopped requiring a contact email.
+
+### Pages updated
+
+`index.md`, `quickstart.md`, `workflows/practice-mode.md`, `workflows/throughput-audit-lifecycle.md`, `integrations/status-and-authorization.md`, `operations/local-development-and-deployment.md`, `testing/verification.md`, `roadmap/production-readiness.md`, `log.md`. Outside the wiki: `README.md`, `DEVELOPER_HANDOFF.md`, `NEXT_STEPS.md`, `public/docs/current-state.md`, `tests/rendered-html.test.mjs`.
+
+### False claims corrected
+
+- **"A 15-stop walkthrough."** `practiceTour` in `AdvisorCockpit.tsx` holds **8** stops — intake, research-canvas, call-kit, transcript, synthesis, diagnosis, deliver, report — each a `blurb` plus a `points` list. The old three-section prose format and the Prepare and Call stops are gone, as is the `CallBriefing` panel. Appeared in `roadmap/production-readiness.md`, `README.md`, `NEXT_STEPS.md`, and `public/docs/current-state.md`.
+- **"The readiness-brief send is gated only by artifact approval."** Incomplete since intake stopped collecting a contact email. `readinessBriefAction()` now also refuses `send_intent` when `engagement.email` is blank, and the Prepare screen is where the address is captured. Stated on `workflows/throughput-audit-lifecycle.md` and `integrations/status-and-authorization.md`.
+- **"43 tests (2 rendered-frontend, 40 backend across four `tsx` files)."** Re-derived by running each file: **3 + 16 + 11 + 7 + 7 + 6 = 50**. `tests/bug-review.test.mjs` had been in `package.json` since `4d3f753` and was documented nowhere, and both `rendered-html` and `backend-workflow` had grown by one. Corrected in `index.md`, `quickstart.md`, `operations/`, `testing/`, `README.md`, and `DEVELOPER_HANDOFF.md`.
+- **"Two different practice-id tests; the client uses `id.startsWith("eng_demo_")`."** It does not. `PRACTICE_ID_PREFIX` in `AdvisorCockpit.tsx` is `"eng_demo_practice"`, identical to `DEMO_ENGAGEMENT_ID` in `lib/demo.ts`. `DEVELOPER_HANDOFF.md` gotcha 8 rewritten into the real hazard: the constant is duplicated with nothing enforcing agreement.
+- **"Intake captures the primary contact's role"** stated without saying what intake now requires. Only the company name and the website are required; the contact block and the email are optional. Corrected on `workflows/throughput-audit-lifecycle.md` and `DEVELOPER_HANDOFF.md`.
+
+### Source evidence
+
+`app/components/AdvisorCockpit.tsx` (`practiceTour`, `PracticeTour`, `Intake`, `Prepare`, `Research`, `guidanceHidden`, `PRACTICE_ID_PREFIX`), `lib/actions.ts` (`readinessBriefAction`), `lib/demo.ts`, `package.json`, and every file in `tests/` run individually for its count.
+
+### Gaps recorded as still open
+
+- No test covers the new email send-gate or the Prepare-screen email capture. The gate is source-verified only.
+- `tests/rendered-html.test.mjs` now pins the absence of `CallBriefing`/`ifYouGetLost`/`callArc`/`mustLeaveWith` in the cockpit, but nothing pins the walkthrough's stop count or ids.
+
+## 2026-07-27 — full wiki re-grounding
 
 Re-grounded the whole wiki against source at `5f50feb`. Seven commits had landed since the last pass (`c5ae88f` → `5f50feb`) and several pages had gone from accurate to confidently wrong. Every claim below was verified by reading the code, not by trusting the change list I was given.
 
