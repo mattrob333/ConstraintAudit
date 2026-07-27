@@ -170,7 +170,10 @@ export async function appendOrUpdateRow(
   const existingRow = existingOffset >= 0 ? rows[existingOffset] : [];
   const values = headers.map((name, index) => {
     const key = normalize(name);
-    if (supplied.has(key)) return supplied.get(key) ?? "";
+    // Write the supplied value only into the FIRST column with this name (the one headerIndex
+    // resolved to). Writing every column that normalizes the same would clobber a second,
+    // genuinely distinct column that happened to share a normalized header.
+    if (supplied.has(key) && headerIndex.get(key) === index) return supplied.get(key) ?? "";
     return cellText(existingRow[index]);
   });
   values[matchIndex] = matchValue;

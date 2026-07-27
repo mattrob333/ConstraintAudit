@@ -83,6 +83,7 @@ export const INTENT_STATUSES = [
   "pending_review",
   "approved",
   "rejected",
+  "executing",
   "executed",
   "failed",
 ] as const;
@@ -507,11 +508,26 @@ export function canonicalCanvasBlock(value: unknown): CanvasBlock | null {
   return CANVAS_BLOCK_ALIASES[trimmed.toLowerCase()] ?? null;
 }
 
+const MAGNITUDE: Record<string, number> = { k: 1e3, m: 1e6, bn: 1e9 };
+
+/**
+ * Parse one comparable reading, or null when the value cannot be compared safely.
+ *
+ * Returns null for a RANGE ("3 to 5 days", "3-5"): taking the low end silently invented a
+ * baseline. Honours a magnitude suffix (1.2m, 900k), because reading "$1.2m" as 1.2 and
+ * "$900k" as 900 turned a revenue drop into a 749x "improvement". The suffix must be at a
+ * word boundary — the negative lookahead stops "5 min" being read as five million.
+ */
 function parseMeasure(value: string): number | null {
-  const match = value.replace(/,/g, "").match(/-?\d+(?:\.\d+)?/);
+  const cleaned = value.replace(/,/g, "");
+  // A range is two numbers joined by a dash or "to"; it is not a single reading.
+  if (/\d\s*(?:-|–|—|to)\s*\d/i.test(cleaned)) return null;
+  const match = cleaned.match(/-?\d+(?:\.\d+)?\s*(bn|[km])?(?![a-z])/i);
   if (!match) return null;
-  const parsed = Number(match[0]);
-  return Number.isFinite(parsed) ? parsed : null;
+  const parsed = Number(match[0].replace(/\s*(bn|[km])$/i, "").trim());
+  if (!Number.isFinite(parsed)) return null;
+  const suffix = (match[1] ?? "").toLowerCase();
+  return suffix ? parsed * (MAGNITUDE[suffix] ?? 1) : parsed;
 }
 
 /** "days per estimate" — the period often already reads as a phrase, so don't double the "per". */

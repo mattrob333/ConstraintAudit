@@ -79,6 +79,15 @@ async function advanceWithinEvidence(
 ): Promise<Engagement> {
   let current = engagement;
   const targetIndex = WORKFLOW_STATES.indexOf(target);
+  const hasPatch = Object.keys(patch).some((key) => key !== "expectedVersion");
+  // Already at or past the target — there is no checkpoint to cross, but the data patch still
+  // has to land. Skipping it meant a re-measured outcome created an artifact with new numbers
+  // while the engagement kept the old ones, so the record and the document disagreed.
+  if (WORKFLOW_STATES.indexOf(current.workflowState) >= targetIndex) {
+    return hasPatch
+      ? updateEngagement(current.id, { ...patch, expectedVersion: current.version }, ownerId)
+      : current;
+  }
   while (WORKFLOW_STATES.indexOf(current.workflowState) < targetIndex) {
     const next = WORKFLOW_STATES[WORKFLOW_STATES.indexOf(current.workflowState) + 1];
     current = await updateEngagement(current.id, {
@@ -321,18 +330,38 @@ export async function processTranscript(
       : WORKFLOW_STATES.indexOf(engagement.workflowState) >= WORKFLOW_STATES.indexOf("CANVAS_COMMIT_APPROVED")
         ? "TRANSCRIPT_2_RECONCILED"
         : engagement.workflowState;
-  const sharedData = {
+  // Once the advisor has confirmed the finding, re-importing a transcript must not overwrite
+  // or downgrade it. `client-verified` and `approved` are set only by updateFinding, never by
+  // transcript processing, so they mark advisor-confirmed evidence a fresh import cannot touch.
+  // Below that, a new candidate supersedes and a signal-free import keeps the prior one rather
+  // than deleting it (an undefined value in the patch would drop the stored key entirely).
+  const findingLocked =
+    engagement.findingStatus === "approved" || engagement.findingStatus === "client-verified";
+  const nextFinding = findingLocked
+    ? engagement.data.finding
+    : synthesis.constraintCandidate ?? engagement.data.finding;
+  const nextBaseline = findingLocked
+    ? engagement.data.baseline
+    : synthesis.constraintCandidate?.baselineMetric ?? engagement.data.baseline;
+  const nextBaselineStatus = findingLocked ? engagement.baselineStatus : synthesis.baselineStatus;
+  const nextFindingStatus = findingLocked
+    ? engagement.findingStatus
+    : synthesis.constraintCandidate?.findingStatus ?? engagement.findingStatus;
+
+  const sharedData: Parameters<typeof updateEngagement>[1]["data"] = {
     transcriptSynthesis: [...(engagement.data.transcriptSynthesis ?? []), synthesis],
-    baseline: synthesis.constraintCandidate?.baselineMetric,
-    finding: synthesis.constraintCandidate ?? undefined,
     recordingConsent: engagement.data.recordingConsent,
     canvas,
     roles: synthesis.roles?.length ? synthesis.roles : engagement.data.roles,
   };
+  // Only assign these keys when there is a value: writing `undefined` deletes the stored key.
+  if (nextFinding !== undefined) sharedData.finding = nextFinding;
+  if (nextBaseline !== undefined) sharedData.baseline = nextBaseline;
+
   if (WORKFLOW_STATES.indexOf(target) > WORKFLOW_STATES.indexOf(engagement.workflowState)) {
     engagement = await advanceWithinEvidence(engagement, target, principal.ownerId, {
-      baselineStatus: synthesis.baselineStatus,
-      findingStatus: synthesis.constraintCandidate?.findingStatus ?? "none",
+      baselineStatus: nextBaselineStatus,
+      findingStatus: nextFindingStatus,
       nextAction:
         input.callNumber === 1
           ? "Review synthesis and explicitly approve the Canvas commit"
@@ -342,9 +371,11 @@ export async function processTranscript(
     });
   } else {
     engagement = await updateEngagement(id, {
-      baselineStatus: synthesis.baselineStatus,
-      findingStatus: synthesis.constraintCandidate?.findingStatus ?? "none",
-      nextAction: "Review imported evidence; required approval checkpoints were not advanced automatically",
+      baselineStatus: nextBaselineStatus,
+      findingStatus: nextFindingStatus,
+      nextAction: findingLocked
+        ? "Imported evidence recorded; the confirmed finding was preserved"
+        : "Review imported evidence; required approval checkpoints were not advanced automatically",
       status: "Needs review",
       data: sharedData,
       expectedVersion: engagement.version,
@@ -725,6 +756,14 @@ export async function reviewIntent(
 
   if (status !== "approved") {
     throw new Error(`Execution requires an approved intent (current: ${status}).`);
+  }
+
+  // Claim the intent before doing the external write: an atomic approved -> executing swap.
+  // Only one concurrent request wins, so a double-click or retry cannot send two emails or
+  // create two Google Docs from a single approval.
+  const claim = await updateIntentStatus(intentId, principal.ownerId, "executing", undefined, "approved");
+  if (!claim.changed) {
+    throw new Error(`This intent is already being processed or is no longer approved (current: ${String(claim.status)}).`);
   }
 
   const result = await executeIntent(type, intentId, payload);

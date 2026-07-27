@@ -108,7 +108,7 @@ test("public URL guard rejects local and credential-bearing targets", () => {
 });
 
 test("transcript parser preserves timestamp, speaker, and wording", () => {
-  const lines = parseTranscriptText("[08:42] Morgan: Estimates wait three days for my approval.");
+  const lines = parseTranscriptText("[08:42] Morgan: Estimates wait three days for my approval.", { Morgan: "client" });
   assert.deepEqual(lines[0], {
     timestamp: "08:42",
     speaker: "Morgan",
@@ -119,24 +119,37 @@ test("transcript parser preserves timestamp, speaker, and wording", () => {
 });
 
 test("metric extraction does not invent a confirmed baseline", () => {
-  const partialLines = parseTranscriptText("[00:10] Morgan: It takes about 3 days.");
+  const partialLines = parseTranscriptText("[00:10] Morgan: It takes about 3 days.", { Morgan: "client" });
   const partialMetrics = extractMetrics(partialLines);
   assert.equal(partialMetrics[0].value, "3 days");
   assert.equal(baselineStatusFor(partialMetrics), "Partial");
 
-  const confirmedLines = parseTranscriptText("[00:10] Morgan: We handle 20 bids each week.");
+  const confirmedLines = parseTranscriptText("[00:10] Morgan: We handle 20 bids each week.", { Morgan: "client" });
   assert.equal(baselineStatusFor(extractMetrics(confirmedLines)), "Confirmed");
 });
 
 test("call 1 synthesis remains provisional even with metrics", () => {
   const result = synthesizeTranscript(
     "[00:10] Morgan: We handle 20 bids each week.\n[00:30] Morgan: Approval takes 3 days and the queue waits for me.",
-    { client: "Acme", callNumber: 1, humanOwner: { name: "Morgan", role: "Owner" } },
+    { client: "Acme", callNumber: 1, humanOwner: { name: "Morgan", role: "Owner" }, speakerRoles: { Morgan: "client" } },
   );
   assert.equal(result.baselineStatus, "Confirmed");
   assert.equal(result.constraintCandidate.findingStatus, "provisional");
   assert.equal(result.constraintCandidate.constraintType, "latency");
   assert.equal(result.quotes[0].provenance, "client-stated");
+});
+
+test("an unmapped speaker is NOT assumed to be the client (fail closed)", () => {
+  // A real advisor is named like a person. With no role map, their leading question must not
+  // become a client-stated metric — the failure that voided grounding on the live path.
+  const lines = parseTranscriptText("[00:10] Mike Roberson: So turnaround is about 3 days per quote, right?");
+  assert.notEqual(lines[0].provenance, "client-stated");
+  assert.equal(lines[0].provenance, "gap");
+  assert.equal(extractMetrics(lines).length, 0, "no metric may be drawn from an unattributed speaker");
+
+  // The same line, once the advisor tags that speaker as the client, does become evidence.
+  const tagged = parseTranscriptText("[00:10] Mike Roberson: Turnaround is 9 days per quote.", { "Mike Roberson": "client" });
+  assert.equal(tagged[0].provenance, "client-stated");
 });
 
 test("advisor and unknown speakers never become client evidence", () => {
@@ -220,6 +233,7 @@ test("diagnosis approval requires client evidence and named owner", () => {
       client: "Acme",
       callNumber: 2,
       humanOwner: { name: "Morgan", role: "Owner" },
+      speakerRoles: { Morgan: "client" },
     },
   );
   assert.ok(result.constraintCandidate);

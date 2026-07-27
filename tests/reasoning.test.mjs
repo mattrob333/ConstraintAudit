@@ -80,7 +80,7 @@ const TRANSCRIPT = [
 ].join("\n");
 
 test("a fabricated client quote is rejected, not printed", () => {
-  const lines = parseTranscriptText(TRANSCRIPT);
+  const lines = parseTranscriptText(TRANSCRIPT, { Morgan: "client" });
   const grounded = groundModelSynthesis(
     {
       quotes: [
@@ -107,7 +107,7 @@ test("a fabricated client quote is rejected, not printed", () => {
 });
 
 test("the model cannot promote an advisor line into client evidence", () => {
-  const lines = parseTranscriptText(TRANSCRIPT);
+  const lines = parseTranscriptText(TRANSCRIPT, { Morgan: "client" });
   const grounded = groundModelSynthesis(
     { quotes: [{ text: "And who else can approve them?", reason: "constraint evidence" }] },
     lines,
@@ -117,7 +117,7 @@ test("the model cannot promote an advisor line into client evidence", () => {
 });
 
 test("grounded quotes are rewritten from the transcript, not from the model", () => {
-  const lines = parseTranscriptText(TRANSCRIPT);
+  const lines = parseTranscriptText(TRANSCRIPT, { Morgan: "client" });
   const grounded = groundModelSynthesis(
     {
       quotes: [{

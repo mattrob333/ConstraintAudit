@@ -106,7 +106,7 @@ export function requirePatchCommand(value: unknown): EngagementPatchCommand {
       throw new Error("update_metadata requires a fields object.");
     }
     const allowed = new Set([
-      "client", "website", "primaryContact", "email", "advisor", "notes",
+      "client", "website", "primaryContact", "primaryContactRole", "email", "advisor", "notes",
       "dueDate", "call1At", "call2At", "lastContact", "engagementFolder",
     ]);
     const keys = Object.keys(input.fields as object);
@@ -117,6 +117,14 @@ export function requirePatchCommand(value: unknown): EngagementPatchCommand {
   }
   if (input.command === "advance_workflow") {
     if (typeof input.nextState !== "string") throw new Error("nextState is required.");
+    // Every other workflow state is entered as a side effect of real evidence: transcript
+    // processing sets the synthesis states, and the diagnosis/sprint/outcome/catalog states
+    // each have a dedicated action enforcing their own gate. The generic advance would bypass
+    // all of that, so it is allowed to reach exactly one checkpoint — the Canvas commit, which
+    // is a pure advisor decision with no evidence precondition — and nothing else.
+    if (input.nextState !== "CANVAS_COMMIT_APPROVED") {
+      throw new Error(`${input.nextState} cannot be reached by a direct workflow advance; use its own reviewed action.`);
+    }
     return input as unknown as EngagementPatchCommand;
   }
   throw new Error("Unsupported PATCH command.");

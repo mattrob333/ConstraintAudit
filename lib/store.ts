@@ -27,6 +27,7 @@ export const INTENT_STATUSES = [
   "pending_review",
   "approved",
   "rejected",
+  "executing",
   "executed",
   "failed",
 ] as const;
@@ -140,6 +141,15 @@ function requireOwner(ownerId: string): string {
   const owner = typeof ownerId === "string" ? ownerId.trim() : "";
   if (!owner) throw new Error("ownerId is required");
   return owner;
+}
+
+/** Shallow-merge engagement data, ignoring keys whose patch value is `undefined`. */
+function mergeData(existing: EngagementData, patch: EngagementData): EngagementData {
+  const merged: EngagementData = { ...existing };
+  for (const [key, value] of Object.entries(patch)) {
+    if (value !== undefined) merged[key] = value;
+  }
+  return merged;
 }
 
 function mapEngagement(row: DbRow): Engagement {
@@ -359,7 +369,10 @@ function validatePatch(existing: Engagement, patch: EngagementPatch): Engagement
     readinessBriefStatus,
     baselineStatus,
     findingStatus,
-    data: patch.data ? { ...existing.data, ...patch.data } : existing.data,
+    // Merge, but never let an `undefined` value in the patch delete a stored key. A caller
+    // that means to clear a field sets it to null or an empty value, not undefined — which is
+    // usually an accidental `obj?.maybeMissing` that would otherwise erase confirmed evidence.
+    data: patch.data ? mergeData(existing.data, patch.data) : existing.data,
     version: existing.version + 1,
     createdAt: existing.createdAt,
     updatedAt: new Date().toISOString(),
@@ -630,12 +643,18 @@ export async function listIntents(ownerId: string, engagementId?: string): Promi
   return (result.results ?? []).map(mapIntent);
 }
 
+/**
+ * Move an intent to a new status. When `expectedStatus` is given the update is a
+ * compare-and-swap: the row changes only if it is still in that status, so two concurrent
+ * requests cannot both claim the same intent. `changed` reports whether this call won.
+ */
 export async function updateIntentStatus(
   id: string,
   ownerId: string,
   status: string,
   result?: unknown,
-): Promise<DbRow> {
+  expectedStatus?: string,
+): Promise<DbRow & { changed: boolean }> {
   await ensureDatabase();
   const owner = requireOwner(ownerId);
   if (!(INTENT_STATUSES as readonly string[]).includes(status)) {
@@ -647,13 +666,15 @@ export async function updateIntentStatus(
     `UPDATE intents SET status = ?, updated_at = ?,
        executed_at = COALESCE(?, executed_at),
        result_json = COALESCE(?, result_json)
-     WHERE id = ? AND owner_id = ?`
-  ).bind(
+     WHERE id = ? AND owner_id = ?${expectedStatus ? " AND status = ?" : ""}`
+  ).bind(...[
     status, now, terminal ? now : null,
     result === undefined ? null : JSON.stringify(result), id, owner,
-  ).run();
-  if (!outcome.meta.changes) throw new Error("Intent not found");
+    ...(expectedStatus ? [expectedStatus] : []),
+  ]).run();
+  const changed = Boolean(outcome.meta.changes);
+  if (!changed && !expectedStatus) throw new Error("Intent not found");
   const updated = await getIntent(id, owner);
   if (!updated) throw new Error("Intent not found");
-  return updated;
+  return { ...updated, changed };
 }

@@ -188,12 +188,14 @@ function timeLabel(totalSeconds: number): string {
 
 function cueStartSeconds(timingLine: string): number | null {
   const before = timingLine.split("-->")[0];
-  const matched = before.match(/(\d{1,3}):(\d{1,2})(?::(\d{1,2}))?[.,](\d{1,3})/);
+  // Milliseconds are optional: some tools emit `00:00:12 --> 00:00:16` with no fractional
+  // part. Requiring `[.,]mmm` silently dropped those cues and lost their client evidence.
+  const matched = before.match(/(\d{1,3}):(\d{1,2})(?::(\d{1,2}))?(?:[.,]\d{1,3})?/);
   if (!matched) return null;
   const a = Number(matched[1]);
   const b = Number(matched[2]);
   const c = matched[3] === undefined ? null : Number(matched[3]);
-  // `HH:MM:SS.mmm` when three groups are present, otherwise `MM:SS.mmm`.
+  // `HH:MM:SS` when three groups are present, otherwise `MM:SS`.
   return c === null ? a * 60 + b : a * 3600 + b * 60 + c;
 }
 

@@ -252,12 +252,22 @@ function namedInTranscript(index: GroundingIndex, person: string): boolean {
     new RegExp(`(?:^|[^a-z0-9])${escapeRegExp(candidate)}(?:[^a-z0-9]|$)`).test(index.corpus));
 }
 
-/** Digits are compared comma-free so "12,500" still matches a line that writes it "12500". */
+/**
+ * Every number in the model's value must appear in the cited line as a WHOLE number, not a
+ * substring. A substring check let a fabricated "500" ground against a line that only said
+ * "1500", which then satisfied every baseline field — the model inventing a client metric.
+ * Digits are compared comma-free so "12,500" still matches a line that writes it "12500".
+ */
 function valueAppearsInLine(value: string, lineText: string): boolean {
   const haystack = normalize(lineText).replace(/,/g, "");
   const numbers = value.replace(/,/g, "").match(/\d+(?:\.\d+)?/g);
-  if (!numbers) return haystack.includes(normalize(value).replace(/,/g, ""));
-  return numbers.every((number) => haystack.includes(number));
+  if (!numbers) {
+    const needle = normalize(value).replace(/,/g, "");
+    return needle.length > 0 && haystack.includes(needle);
+  }
+  // A digit run bounded by non-digits (so "500" does not match inside "1500" or "500.7").
+  return numbers.every((number) =>
+    new RegExp(`(?:^|[^\\d.])${escapeRegExp(number)}(?:[^\\d.]|$)`).test(haystack));
 }
 
 function emptySynthesis(): GroundedSynthesis {

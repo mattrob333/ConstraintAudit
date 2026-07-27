@@ -62,13 +62,21 @@ function canonicalSource(value: string): string {
   try {
     const url = new URL(value);
     if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) return "";
-    const host = url.hostname.toLowerCase();
+    // Kept in step with validatePublicUrl in research.ts: link-local / cloud-metadata /
+    // unspecified / IPv6-literal targets are rejected here too, so the two allow-lists cannot
+    // drift. Defense in depth — a retained source URL is only ever rendered, never fetched.
+    const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
     if (
       host === "localhost" ||
+      host === "localhost.localdomain" ||
+      host === "metadata.google.internal" ||
+      host === "0.0.0.0" ||
       host.endsWith(".local") ||
+      host.includes(":") ||
       /^127\./.test(host) ||
       /^10\./.test(host) ||
       /^192\.168\./.test(host) ||
+      /^169\.254\./.test(host) ||
       /^172\.(1[6-9]|2\d|3[01])\./.test(host)
     ) return "";
     url.hash = "";

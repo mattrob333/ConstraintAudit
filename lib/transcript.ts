@@ -171,7 +171,11 @@ function speakerProvenance(
   if (explicit === "unknown") return "gap";
   if (/^(advisor|consultant|tier\s*4|facilitator)\b/i.test(speaker)) return "advisor-note";
   if (/^unknown\b/i.test(speaker)) return "gap";
-  return "client-stated";
+  // Fail closed. A speaker we were not told the role of is NOT assumed to be the client:
+  // in a real call the advisor is named like a person, and defaulting them to client-stated
+  // would let their own leading questions and suggested numbers become client evidence.
+  // An unmapped speaker is a gap until the advisor tags them.
+  return "gap";
 }
 
 export function parseTranscriptText(
@@ -182,7 +186,10 @@ export function parseTranscriptText(
   const parsed: TranscriptLine[] = [];
   let syntheticSeconds = 0;
   for (const raw of rawLines) {
-    const matched = raw.match(/^\[?(\d{1,2}:\d{2}(?::\d{2})?)\]?\s*(?:-\s*)?([^:]{1,80}):\s*(.+)$/);
+    // Accept an optional .mmm / ,mmm fractional part inside the bracket so a timestamp like
+    // [00:01:02.500] does not leak its milliseconds into the speaker field (which then breaks
+    // role mapping and, before the fail-closed default, mislabelled the line client-stated).
+    const matched = raw.match(/^\[?(\d{1,2}:\d{2}(?::\d{2})?)(?:[.,]\d{1,3})?\]?\s*(?:-\s*)?([^:]{1,80}):\s*(.+)$/);
     if (matched) {
       parsed.push({
         timestamp: matched[1],
@@ -262,6 +269,8 @@ export function baselineStatusFor(metrics: ExtractedMetric[]): BaselineStatus {
       metric.value.trim() &&
       // A baseline needs a counted number, not an approximate phrase like "a couple of weeks".
       /\d/.test(metric.value) &&
+      // A range ("3 to 5 days") is not a single confirmed reading — it cannot anchor a delta.
+      !/\d\s*(?:-|–|—|to)\s*\d/i.test(metric.value) &&
       metric.unit.trim() &&
       metric.period.trim() &&
       metric.quote.trim() &&

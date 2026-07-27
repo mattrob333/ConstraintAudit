@@ -219,7 +219,7 @@ test("VTT and SRT decode into speaker-attributed transcript lines", () => {
     "00:01:20.500 --> 00:01:24.000",
     "Advisor: And who signs off on those?",
   ].join("\n"));
-  const vttLines = parseTranscriptText(vtt);
+  const vttLines = parseTranscriptText(vtt, { Morgan: "client" });
   assert.equal(vttLines[0].timestamp, "00:05");
   assert.equal(vttLines[0].speaker, "Morgan");
   assert.equal(vttLines[0].text, "Estimates wait three days for my approval.");
@@ -231,7 +231,7 @@ test("VTT and SRT decode into speaker-attributed transcript lines", () => {
     "1",
     "00:00:05,000 --> 00:00:09,000",
     "Morgan: We turn around twenty bids each week.",
-  ].join("\n")));
+  ].join("\n")), { Morgan: "client" });
   assert.equal(srtLines[0].speaker, "Morgan");
   assert.equal(srtLines[0].timestamp, "00:05");
 });
@@ -250,7 +250,7 @@ test("uploaded transcript files carry real content, not a filename", async () =>
   // The old build submitted "Transcript file selected: <name>" and nothing else.
   assert.doesNotMatch(decoded.text, /Transcript file selected/);
 
-  const synthesis = synthesizeTranscript(decoded.text, { client: "Acme", callNumber: 1 });
+  const synthesis = synthesizeTranscript(decoded.text, { client: "Acme", callNumber: 1, speakerRoles: { Morgan: "client" } });
   assert.ok(synthesis.constraintCandidate, "real file content produces real evidence");
   assert.equal(synthesis.quotes[0].provenance, "client-stated");
 });
