@@ -1,7 +1,7 @@
 ---
 type: Architecture Overview
 title: Tier 4 Advisor Cockpit System Architecture
-description: Source-grounded overview of the vinext application, Cloudflare runtime, owner-scoped D1 persistence, research and transcript paths, the canonical Canvas, approval-gated external adapters, and remaining architectural gaps.
+description: Source-grounded overview of the vinext application, the Cloudflare Worker runtime, owner-scoped D1 persistence, research and transcript paths, the canonical Canvas, approval-gated external adapters, and remaining architectural gaps.
 tags: [architecture, cloudflare, d1, vinext, data-flow, tenancy, canvas]
 ---
 
@@ -9,45 +9,55 @@ tags: [architecture, cloudflare, d1, vinext, data-flow, tenancy, canvas]
 
 ## Runtime
 
-The application is a Next-compatible React application built with vinext and Vite for a Cloudflare Worker runtime. OpenAI Sites supplies the current hosting environment, D1 binding, outer access control, and production environment variables.
+The application is a Next-compatible React application built with vinext and Vite for a Cloudflare Worker runtime. The whole advisor UI is one client component, `AdvisorCockpit.tsx`, mounted by `app/page.tsx`.
+
+Hosting is in transition. OpenAI Sites was the original host and still supplies the `oai-authenticated-user-*` identity headers `lib/auth.ts` reads. `wrangler.jsonc` and `docs/DEPLOYMENT.md` now configure and document a self-hosted **Cloudflare Workers** deployment with Cloudflare Access in front of it. Both paths exist in the source; see [Identity and access](identity-and-access.md) for which identity source is in force under which configuration.
 
 ```mermaid
 flowchart TB
     Browser["Advisor browser"] --> UI["AdvisorCockpit React client"]
-    UI --> API["App API routes"]
-    API --> Auth["requirePrincipal (lib/auth.ts)"]
+    UI --> API["App API routes (25 files)"]
+    API --> Auth["requirePrincipalAsync (lib/auth.ts)"]
+    Auth --> Access["lib/access-jwt.ts — verified Access assertion"]
     Auth --> Actions["lib/actions.ts"]
     Actions --> Guards["Evidence and approval guards"]
     Actions --> Research["Website and OpenAI research"]
-    Actions --> Files["Transcript file decoding"]
-    Files --> Transcript["Deterministic transcript synthesis"]
+    Actions --> Files["Transcript and source-document decoding"]
+    Files --> Det["Deterministic transcript synthesis"]
+    Det --> Model["Model pass + groundModelSynthesis()"]
     Actions --> Canvas["lib/canvas.ts — canonical Canvas"]
+    Actions --> Direction["lib/metric-direction.ts"]
+    Actions --> Demo["lib/demo.ts — Practice mode"]
     Actions --> Docs["Markdown renderers + printable HTML"]
     Actions --> Intents["Intent review and execution"]
     Intents --> Adapters["lib/integrations — Resend, Sheets, Drive/Docs"]
     Actions --> Store["Owner-scoped D1 store"]
     Store --> DB[("Cloudflare D1")]
     Research --> Web["Public web"]
-    Transcript -. optional .-> Fireflies["Fireflies API"]
+    Det -. optional .-> Fireflies["Fireflies API"]
 ```
 
 ## Source responsibilities
 
 | Layer | Responsibility |
 | --- | --- |
-| `AdvisorCockpit.tsx` | Client workflow and screen state. Value flow, call script, and integration statuses are read from the server, not hardcoded |
-| `app/api/` | HTTP boundary, input routing, and principal resolution |
-| `lib/auth.ts` | Principal resolution from Sites identity headers, dev fallback, and the derived `ownerId` |
-| `lib/actions.ts` | Engagement actions, workflow orchestration, intent review, and the single place external writes are invoked |
-| `lib/guards.ts` | Consent, immutable-artifact, approval, and evidence requirements |
+| `AdvisorCockpit.tsx` | Client workflow and screen state, the seven-stage stepper, the live-call coaching rail, the Practice-mode bar and walkthrough, and resume routing |
+| `app/api/` | HTTP boundary, input routing, and principal resolution — 25 route files, all async |
+| `lib/auth.ts` | Principal resolution in precedence order, `advisorAuthMode()`, and the derived `ownerId` |
+| `lib/access-jwt.ts` | RS256 verification of the Cloudflare Access assertion, JWKS caching, claim checks |
+| `lib/actions.ts` | Engagement actions, workflow orchestration, intent review, demo seeding, and the single place external writes are invoked |
+| `lib/guards.ts` | Consent, immutable-artifact, approval, patch-command, and evidence requirements |
 | `lib/canvas.ts` | The one canonical Canvas: build, merge, apply client corrections, coverage, confirmation test |
 | `lib/research.ts` | URL normalization, SSRF/DNS/redirect/size protection, public fetch, deterministic research including value flow and discovery questions |
 | `lib/openai-research*.ts` | Structured OpenAI web research and strict source filtering |
-| `lib/transcript-files.ts` | TXT, VTT, SRT, JSON, and DOCX decoding into speaker-attributed lines |
+| `lib/transcript-files.ts` | TXT, VTT, SRT, JSON, and DOCX decoding into speaker-attributed lines; also used for source-document ingest |
 | `lib/transcript.ts` | Deterministic transcript synthesis: contradictions, Canvas updates, flow confirmations, decisions, tasks, roles, metrics, constraint selection |
-| `lib/integrations/` | Resend, Google Sheets, Google Drive/Docs adapters and OAuth |
-| `lib/deliverables.ts` | Markdown templates and `renderMarkdownToHtml()` |
-| `lib/store.ts` | Owner-scoped D1 reads and writes, optimistic versioning, schema reconciliation |
+| `lib/openai-transcript*.ts` | The model transcript pass and the grounding gate every model citation must pass |
+| `lib/metric-direction.ts` | Four-tier inference of which way a metric has to move to count as an improvement |
+| `lib/demo.ts` | Practice mode: one pure, deterministic, entirely fictional worked engagement |
+| `lib/integrations/` | Resend, Google Sheets, Google Drive/Docs adapters, OAuth, and runtime status |
+| `lib/deliverables.ts` | Markdown templates, the fixed sprint price, the findings agenda, and `renderMarkdownToHtml()` |
+| `lib/store.ts` | Owner-scoped D1 reads and writes, optimistic versioning, schema reconciliation, cascade delete |
 | `lib/workflow.ts` | Shared domain types, workflow-state order, Canvas-block canonicalization, metric-delta arithmetic |
 
 ## Persistence and tenancy
@@ -55,7 +65,7 @@ flowchart TB
 D1 tables are:
 
 - `engagements` — the structured engagement record and JSON data payload;
-- `artifacts` — generated internal documents;
+- `artifacts` — generated internal documents and captured source documents;
 - `transcripts` — immutable raw text plus synthesis metadata;
 - `activities` — audit history;
 - `intents` — external-action payloads, status, and execution result.
@@ -64,25 +74,23 @@ Every one of these tables carries `owner_id`, and every query in `lib/store.ts` 
 
 `ownerId` is derived synchronously from the normalized advisor email by `ownerIdForEmail()` in `lib/auth.ts`. It is a stable short handle, not a secret; the normalized email remains the authority.
 
-Migration is `drizzle/0001_tenancy.sql`, which adds `owner_id` to all five tables plus `result_json`, `updated_at`, and `executed_at` on `intents`. SQLite has no `ADD COLUMN IF NOT EXISTS`, so `ensureDatabase()` in `lib/store.ts` performs the same reconciliation guarded by `PRAGMA table_info` and then claims any row still holding `owner_id = ''` for `LEGACY_OWNER_EMAIL`. On a database that has already booted against the migration the ALTERs are a no-op.
+There are three migrations:
 
-Still absent: foreign-key enforcement, an organization or team layer above the individual advisor, retention and deletion policy, and rate limiting.
+| File | Adds |
+| --- | --- |
+| `drizzle/0000_tier4_advisor.sql` | The five tables |
+| `drizzle/0001_tenancy.sql` | `owner_id` on all five tables, plus `result_json`, `updated_at`, and `executed_at` on `intents`, and the owner indexes |
+| `drizzle/0002_contact_role.sql` | `primary_contact_role` on `engagements` |
 
-## Authentication boundary
+SQLite has no `ADD COLUMN IF NOT EXISTS`, so `reconcileColumns()` in `lib/store.ts` performs the same reconciliation guarded by `PRAGMA table_info`, and `backfillOwners()` then claims any row still holding `owner_id = ''` for `LEGACY_OWNER_EMAIL`. On a database that has already booted against the migrations the ALTERs are a no-op. `0002_contact_role.sql` says as much in its own comment.
 
-`lib/auth.ts` resolves a `Principal` from the `oai-authenticated-user-email` header set by the hosting layer. `requirePrincipal()` raises `HttpError(401)` when no identity can be established.
+`primaryContactRole` exists so the named human owner required at diagnosis approval does not have to be retyped: `updateFinding()` falls back to the intake contact and role when the finding carries no owner and the request supplies none. An explicit `humanOwner` on the request always wins.
 
-- In development, and in the test suite, an absent header falls back to a single local advisor (`LOCAL_ADVISOR_EMAIL`, default `local-advisor@localhost`).
-- Setting `REQUIRE_ADVISOR_AUTH=1` disables that fallback, so an unauthenticated request receives 401. Set it in any deployment reachable by more than one person.
-- `app/chatgpt-auth.ts` remains the server-component counterpart for Sites sign-in redirects.
-
-Every API route calls `requirePrincipal`, including `GET /api/integrations`. That route returns only per-provider `configured` / `not_configured` booleans, capability descriptions, and the names of expected environment variables — never a credential value — but which providers a deployment has wired up still describes the deployment, so it is scoped like everything else.
+Still absent: foreign-key enforcement, an organization or team layer above the individual advisor, retention and deletion policy, and rate limiting. `deleteEngagementCascade()` exists, but only Practice mode calls it — there is no advisor-facing deletion of a real engagement.
 
 ## The canonical Canvas
 
-This resolves the source-of-truth defect the earlier wiki recorded, where the research UI read `research.facts` while `generateAuditReport()` read `engagement.data.canvas` and nothing ever wrote it, so every report block rendered "Missing".
-
-`runResearch()` in `lib/actions.ts` now writes `engagement.data.canvas` by merging the existing Canvas with `buildCanvasFromResearch(synthesis)`. `processTranscript()` then applies `applyCanvasUpdates()` from client-stated transcript evidence. The rules in `lib/canvas.ts` are:
+`runResearch()` in `lib/actions.ts` writes `engagement.data.canvas` by merging the existing Canvas with `buildCanvasFromResearch(synthesis)`. `processTranscript()` then applies `applyCanvasUpdates()` from client-stated transcript evidence. The rules in `lib/canvas.ts` are:
 
 - all nine blocks always exist, in canonical order;
 - research claims are capped at `public-research` no matter what the payload asserts;
@@ -135,12 +143,29 @@ Two details matter and are deliberate:
 - `not-configured` means no network call was attempted, so the approval survives and the same intent can be executed again once the credential exists.
 - A genuine failure moves to `failed` and needs a fresh approval, because the app cannot know whether the write landed.
 
-## Transcript ingestion
+## Transcript and document ingestion
 
-`lib/transcript-files.ts` decodes an uploaded file into `[MM:SS] Speaker: text` lines using web APIs only — `atob`, `Uint8Array`, `TextDecoder`, and `DecompressionStream` with a minimal ZIP reader for DOCX. This replaces the earlier defect where the client submitted only `File.name` and analysis ran against a synthetic line. The browser reads the file, base64-encodes binary content, and posts it as `file` to `POST /api/engagements/:id/transcripts`; `processTranscript()` rejects a request carrying both `rawText` and `file`.
+`lib/transcript-files.ts` decodes an uploaded file into `[MM:SS] Speaker: text` lines using web APIs only — `atob`, `Uint8Array`, `TextDecoder`, and `DecompressionStream` with a minimal ZIP reader for DOCX. The browser reads the file, base64-encodes binary content, and posts it as `file` to `POST /api/engagements/:id/transcripts` (or `/synthesis`); `processTranscript()` rejects a request carrying both `rawText` and `file`.
 
 Format detection uses extension, then MIME type, then content sniffing, and records a warning when it falls back. Decoded text is stored as the immutable raw transcript.
 
+The same decoder backs `POST /api/engagements/:id/sources`, which attaches a document the advisor already had — a prior proposal, an email thread, notes — to the source register. Two rules distinguish it from a transcript:
+
+- the artifact is written with `provenance: "doc"`, never `client-stated`. Advisor-supplied material is not something the client said on a recorded call;
+- **PDF is refused**, not partially handled. `ingestSourceDocument()` throws `HttpError(400, "PDF text extraction is not supported yet. Convert to DOCX, TXT, or Markdown first.")` on either a `.pdf` filename or an `application/pdf` MIME type, and the intake file picker omits `.pdf` from its `accept` list and pre-checks for it client-side.
+
+## Transcript reasoning path
+
+`processTranscript()` always runs the deterministic analyzer first, then hands the same lines and the full business context to `synthesizeTranscriptWithOpenAI()`. The model result never replaces the deterministic result wholesale: it is merged as a union, and every model citation must survive `groundModelSynthesis()` first. See [Model-assisted synthesis and metric direction](../domain/model-assisted-synthesis.md).
+
+## Advisor-only client surface
+
+`AdvisorCockpit.tsx` runs the live call on a screen the client may be looking at, so anything that is not client-safe is wrapped in an `AdvisorOnly` component that returns `null` when hidden. It is **removed from the DOM**, not merely `display: none` — a client cannot find it in a screen share, and cannot find it in the page source either.
+
+- The coaching rail (`CoachRail`) mounts only while `presenting` is false, and offers five tabs: Go deeper, They don't know, Steer back, Pushback, Plain English.
+- `Escape` is a one-way panic key. A document-level `keydown` listener over the whole call view sets `presenting` to `true` and never toggles it back, so an advisor who is suddenly asked to share has a single keystroke.
+- The Practice-mode walkthrough is hidden by the same mechanism, and additionally whenever the Findings Call presentation view is open.
+
 ## Portability
 
-The source is portable. Cloudflare Workers is the lowest-friction non-Sites host. Moving to another runtime requires replacing `cloudflare:workers` environment access, D1, Worker bindings, the Sites identity headers read by `lib/auth.ts`, and any Sites access assumptions.
+The source is portable, and `wrangler.jsonc` plus `docs/DEPLOYMENT.md` make Cloudflare Workers the documented target. Moving to a third runtime requires replacing `cloudflare:workers` environment access, D1, Worker bindings, the Cloudflare Access verification in `lib/access-jwt.ts`, and the Sites identity headers read by `lib/auth.ts`.
