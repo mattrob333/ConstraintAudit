@@ -34,16 +34,17 @@ function senderLooksValid(from: string): boolean {
  * so a retry is the caller's decision and must reuse the same key.
  */
 export async function sendEmail(input: SendEmailInput): Promise<AdapterResult<SendEmailData>> {
-  if (!resendConfigured()) {
+  const credentials = input.credentials;
+  if (!resendConfigured(credentials)) {
     return {
       ok: false,
       status: "not-configured",
       provider: PROVIDER,
-      detail: `Resend is not configured. Missing: ${missingResendVars().join(", ")}.`,
+      detail: `Resend is not configured. Missing: ${missingResendVars(credentials).join(", ")}.`,
     };
   }
 
-  const from = emailFrom();
+  const from = emailFrom(credentials);
   if (!senderLooksValid(from)) {
     return fail("EMAIL_FROM is not a usable sender. Use `Tier 4 <advisor@verified.example>` or a bare address on the verified domain.");
   }
@@ -66,14 +67,14 @@ export async function sendEmail(input: SendEmailInput): Promise<AdapterResult<Se
   const html = input.htmlBody?.trim() || markdownToHtml(text);
   if (!text && !html) return fail("Refusing to send an empty email body.");
 
-  const replyTo = emailReplyTo();
+  const replyTo = emailReplyTo(credentials);
   const payload: Record<string, unknown> = { from, to: recipients, subject };
   if (text) payload.text = text;
   if (html) payload.html = html;
   if (replyTo) payload.reply_to = replyTo;
 
   const headers: Record<string, string> = {
-    Authorization: `Bearer ${resendApiKey()}`,
+    Authorization: `Bearer ${resendApiKey(credentials)}`,
     "Content-Type": "application/json",
     "User-Agent": USER_AGENT,
   };

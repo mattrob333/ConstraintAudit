@@ -11,7 +11,7 @@ The governing outcome is:
 Practice mode is a complete, fictional engagement — Meridian Millwork — seeded into your own account so you can walk the whole arc before you sit in front of a client.
 
 - **It needs no API keys and no configuration.** Everything in it is written into the repository (`lib/demo.ts`) and is deterministic; no model is called and no network request is made to seed it.
-- **Open it from the Home screen**: the *Practice mode · walk a worked example* card. That calls `GET /api/demo`, and `POST /api/demo {"action":"seed"}` the first time.
+- **Open it from the Home screen**: the *Practice mode* card. That calls `GET /api/demo`, and `POST /api/demo {"action":"seed"}` the first time.
 - **It is a real record in the real database**, scoped to you. The id is `eng_demo_practice_<your owner id>`, so two advisors never share one. Practice records are listed under their own heading, never interleaved with clients.
 - **It is labelled everywhere**: a sticky hazard bar that cannot be dismissed and is deliberately *not* hidden on the client-facing screens, a lock mark in the header and in every list, `PRACTICE MODE — fictional training data, never send to a client` in the record itself, and a practice footer on all 14 generated documents.
 - **It covers the whole engagement**: research, Canvas, value flow, both transcripts, synthesis, diagnosis, all deliverables, sprint, measured outcome, catalog entry. A 15-stop walkthrough docks beside the *real* screens rather than rebuilding fake ones; while the walkthrough is running, creating new engagements is disabled.

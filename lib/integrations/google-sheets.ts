@@ -87,9 +87,10 @@ async function sheetsRequest(
 export async function appendOrUpdateRow(
   input: AppendOrUpdateRowInput,
 ): Promise<AdapterResult<AppendOrUpdateRowData>> {
-  const spreadsheetId = (input.spreadsheetId ?? defaultSpreadsheetId()).trim();
-  if (!googleConfigured() || !spreadsheetId) {
-    const missing = missingGoogleSheetsVars();
+  const credentials = input.credentials;
+  const spreadsheetId = (input.spreadsheetId ?? defaultSpreadsheetId(credentials)).trim();
+  if (!googleConfigured(credentials) || !spreadsheetId) {
+    const missing = missingGoogleSheetsVars(credentials);
     return {
       ok: false,
       status: "not-configured",
@@ -107,7 +108,7 @@ export async function appendOrUpdateRow(
     return fail(`Refusing to write: no value for match column "${matchKey}". Blind appends would duplicate rows.`);
   }
 
-  const token = await getAccessTokenResult([DRIVE_FILE_SCOPE]);
+  const token = await getAccessTokenResult([DRIVE_FILE_SCOPE], credentials);
   if (!token.ok) {
     return {
       ok: false,

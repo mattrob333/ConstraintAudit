@@ -49,11 +49,11 @@ Seeding writes a real engagement row plus real artifacts, activities, and both c
 | Intake lockout | "Creating engagements is off in practice mode" |
 | Fictional contact details | Every address is `@example.com`, every URL is under a reserved example domain |
 
-The practice bar's text is explicit: *"Meridian Millwork is not a real company. Everything on screen — the quotes, the numbers, the documents — was written as training material. Never send, quote, paste or screen-share any of it as a client's."*
+The practice bar's text is explicit: *"Meridian Millwork is not a real company. Every quote, number, and document on screen is training material — never send or share any of it as a client's."*
 
 ## The walkthrough
 
-`PracticeTour` is a 15-stop docked panel: intake → research-canvas → research-flow → research-questions → prepare → call → transcript → synthesis → canvas-commit → findings → diagnosis → deliver → sprint → measure → catalog. Each stop carries "What you are looking at", "With a real client", and "Worth a look". Position persists in `localStorage`, and on completion the advisor can walk it again, reset the data, leave practice mode, or delete the practice engagement.
+`PracticeTour` is a 15-stop docked panel: intake → research-canvas → research-flow → research-questions → prepare → call → transcript → synthesis → canvas-commit → findings → diagnosis → deliver → sprint → measure → catalog. Each stop carries "On this screen", "With a real client", and "Worth a look". Position persists in `localStorage`, and on completion the advisor can walk it again, reset the data, leave practice mode, or delete the practice engagement.
 
 The tour is wrapped in `AdvisorOnly` and additionally hidden whenever the Findings Call presentation view is open or the advisor is presenting during Call 1 — a client watching a screen share never sees the training scaffolding, only the practice bar warning them that what they are looking at is fictional.
 

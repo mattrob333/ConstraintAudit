@@ -1,6 +1,6 @@
+import type { Credentials } from "../secrets";
 import { CRM_COLUMNS, CRM_MATCH_KEY, DEFAULT_CRM_SHEET_TAB } from "../settings";
 import {
-  configuredValue,
   defaultSpreadsheetId,
   emailFrom,
   extractErrorMessage,
@@ -8,6 +8,7 @@ import {
   missingGoogleVars,
   missingResendVars,
   readJsonBody,
+  readerFor,
   resendApiKey,
 } from "./env";
 import { DRIVE_FILE_SCOPE, getAccessTokenResult } from "./google-oauth";
@@ -73,9 +74,10 @@ interface ValueRange {
   values?: unknown[][];
 }
 
-async function verifyOpenAI(fetcher: typeof fetch): Promise<VerificationResult> {
-  // Mirror openai-research.ts: the key is read from the OPENAI_API_KEY binding.
-  const key = configuredValue("OPENAI_API_KEY");
+async function verifyOpenAI(fetcher: typeof fetch, credentials?: Credentials): Promise<VerificationResult> {
+  // Mirror openai-research.ts: the key is read from the OPENAI_API_KEY binding, or
+  // from the advisor's saved value when one was supplied.
+  const key = readerFor(credentials)("OPENAI_API_KEY");
   if (!key) return notConfigured("openai", ["OPENAI_API_KEY"]);
   let response: Response;
   try {
@@ -94,10 +96,10 @@ async function verifyOpenAI(fetcher: typeof fetch): Promise<VerificationResult> 
   return fail("openai", `OpenAI returned HTTP ${response.status}: ${extractErrorMessage(body, "no error detail")}.`);
 }
 
-async function verifyResend(fetcher: typeof fetch): Promise<VerificationResult> {
+async function verifyResend(fetcher: typeof fetch, credentials?: Credentials): Promise<VerificationResult> {
   // The credential being tested is the API key; a read of /domains never sends an email.
-  const key = resendApiKey();
-  if (!key) return notConfigured("resend", missingResendVars());
+  const key = resendApiKey(credentials);
+  if (!key) return notConfigured("resend", missingResendVars(credentials));
   let response: Response;
   try {
     response = await fetcher(RESEND_DOMAINS_URL, {
@@ -109,7 +111,7 @@ async function verifyResend(fetcher: typeof fetch): Promise<VerificationResult> 
   }
   const body = await readJsonBody(response);
   if (response.ok) {
-    const senderNote = emailFrom() ? "" : " Set EMAIL_FROM before sending.";
+    const senderNote = emailFrom(credentials) ? "" : " Set EMAIL_FROM before sending.";
     return verified("resend", `Resend API key is valid.${senderNote}`);
   }
   if (response.status === 401) {
@@ -119,14 +121,15 @@ async function verifyResend(fetcher: typeof fetch): Promise<VerificationResult> 
 }
 
 async function verifyGoogleSheets(
-  opts: { spreadsheetId?: string; sheetTab?: string } | undefined,
+  opts: VerifyOptions | undefined,
   fetcher: typeof fetch,
 ): Promise<VerificationResult> {
-  if (!googleConfigured()) return notConfigured("google_sheets", missingGoogleVars());
+  const credentials = opts?.credentials;
+  if (!googleConfigured(credentials)) return notConfigured("google_sheets", missingGoogleVars(credentials));
 
   // BYO sheet: the id comes from the advisor's saved settings (passed in opts). Fall back to any
   // deployment-wide GOOGLE_SHEETS_ID only if one is set; otherwise the advisor must connect a sheet.
-  const spreadsheetId = (opts?.spreadsheetId ?? "").trim() || defaultSpreadsheetId();
+  const spreadsheetId = (opts?.spreadsheetId ?? "").trim() || defaultSpreadsheetId(credentials);
   if (!spreadsheetId) {
     return {
       ok: false,
@@ -138,7 +141,7 @@ async function verifyGoogleSheets(
   }
   const tab = (opts?.sheetTab ?? "").trim() || DEFAULT_CRM_SHEET_TAB;
 
-  const token = await getAccessTokenResult([DRIVE_FILE_SCOPE]);
+  const token = await getAccessTokenResult([DRIVE_FILE_SCOPE], credentials);
   if (!token.ok) {
     return {
       ok: false,
@@ -207,10 +210,10 @@ interface DriveAbout {
   user?: { emailAddress?: string; displayName?: string };
 }
 
-async function verifyGoogleDocs(fetcher: typeof fetch): Promise<VerificationResult> {
-  if (!googleConfigured()) return notConfigured("google_docs", missingGoogleVars());
+async function verifyGoogleDocs(fetcher: typeof fetch, credentials?: Credentials): Promise<VerificationResult> {
+  if (!googleConfigured(credentials)) return notConfigured("google_docs", missingGoogleVars(credentials));
 
-  const token = await getAccessTokenResult([DRIVE_FILE_SCOPE]);
+  const token = await getAccessTokenResult([DRIVE_FILE_SCOPE], credentials);
   if (!token.ok) {
     return {
       ok: false,
@@ -255,9 +258,10 @@ interface FirefliesUser {
   errors?: Array<{ message?: string }>;
 }
 
-async function verifyFireflies(fetcher: typeof fetch): Promise<VerificationResult> {
-  // Mirror fireflies.ts: the key is read from the FIREFLIES_API_KEY binding.
-  const key = configuredValue("FIREFLIES_API_KEY");
+async function verifyFireflies(fetcher: typeof fetch, credentials?: Credentials): Promise<VerificationResult> {
+  // Mirror fireflies.ts: the key is read from the FIREFLIES_API_KEY binding, or from
+  // the advisor's saved value when one was supplied.
+  const key = readerFor(credentials)("FIREFLIES_API_KEY");
   if (!key) return notConfigured("fireflies", ["FIREFLIES_API_KEY"]);
   let response: Response;
   try {
@@ -286,26 +290,37 @@ async function verifyFireflies(fetcher: typeof fetch): Promise<VerificationResul
   return verified("fireflies", `Fireflies key is valid${user.name ? ` (authenticated as ${user.name})` : ""}.`);
 }
 
+export interface VerifyOptions {
+  spreadsheetId?: string;
+  sheetTab?: string;
+  /**
+   * Credentials resolved for the advisor whose "Test" button was pressed. Without it the
+   * deployment environment is tested, which is the pre-existing behaviour.
+   */
+  credentials?: Credentials;
+}
+
 /**
  * Verify a single provider with a read-only call. `opts` carries the advisor's BYO CRM sheet id/tab
- * for google_sheets. `fetcher` is injectable for testing; it defaults to the platform `fetch`.
+ * for google_sheets and the credentials to test. `fetcher` is injectable for testing; it defaults to
+ * the platform `fetch`.
  */
 export async function verifyProvider(
   provider: VerifiableProvider,
-  opts?: { spreadsheetId?: string; sheetTab?: string },
+  opts?: VerifyOptions,
   fetcher: typeof fetch = fetch,
 ): Promise<VerificationResult> {
   switch (provider) {
     case "openai":
-      return verifyOpenAI(fetcher);
+      return verifyOpenAI(fetcher, opts?.credentials);
     case "resend":
-      return verifyResend(fetcher);
+      return verifyResend(fetcher, opts?.credentials);
     case "google_sheets":
       return verifyGoogleSheets(opts, fetcher);
     case "google_docs":
-      return verifyGoogleDocs(fetcher);
+      return verifyGoogleDocs(fetcher, opts?.credentials);
     case "fireflies":
-      return verifyFireflies(fetcher);
+      return verifyFireflies(fetcher, opts?.credentials);
     default:
       return fail(String(provider), `Unknown provider "${String(provider)}".`);
   }

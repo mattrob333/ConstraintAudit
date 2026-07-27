@@ -71,7 +71,7 @@ The allowed values and plain-language stage definitions used by the workbook and
 4. Set stage to `Client`.
 5. Set next action to `Research this business`.
 
-### External migration
+### Bring in existing work (external migration)
 
 1. Create or match an engagement.
 2. Attach source links.
@@ -79,7 +79,7 @@ The allowed values and plain-language stage definitions used by the workbook and
 4. Determine the furthest supported stage from imported evidence.
 5. Mark unsupported information as missing rather than assuming completion.
 
-### Update an engagement
+### Continue an engagement
 
 1. Select by engagement ID.
 2. Load the current stage and next action.

@@ -108,6 +108,16 @@ type AdvisorSettings = { crmSpreadsheetId: string; crmSheetTab: string; driveFol
 type SettingsTestProvider = "openai" | "resend" | "google_sheets" | "google_docs" | "fireflies";
 /** The `result` POST /api/settings/test returns. `detail` is human-readable and never contains a secret. */
 type SettingsTestResult = { ok?: boolean; status?: string; provider?: string; detail?: string };
+/**
+ * Where a credential's current value comes from. `server-secret` is set in the deployment
+ * environment and always wins over anything saved in the app; `saved-in-app` lives encrypted
+ * in the database.
+ */
+type CredentialSource = "server-secret" | "saved-in-app" | "none";
+/** One row from /api/settings/keys. A raw value is NEVER returned — `hint` is a masked tail only. */
+type CredentialState = { field: string; set: boolean; source: CredentialSource; hint: string };
+/** The whole /api/settings/keys payload, returned identically by GET, PUT and DELETE. */
+type CredentialsPayload = { credentials: CredentialState[]; encryptionMode: "app-key" | "generated-key" };
 type TranscriptFile = { name: string; mimeType: string; content: string; encoding: "utf8" | "base64" };
 
 type ResearchPayload = {
@@ -630,8 +640,10 @@ function isPracticeEngagement(id: string | null | undefined): boolean {
   return typeof id === "string" && id.startsWith(PRACTICE_ID_PREFIX);
 }
 
-type TourMode = "off" | "guiding" | "exploring" | "done";
-type TourState = { step: number; mode: TourMode };
+type TourMode = "off" | "guiding" | "done";
+/** Where the walkthrough docks. Both positions reflow the app; neither ever overlays it. */
+type TourDock = "side" | "bottom";
+type TourState = { step: number; mode: TourMode; dock: TourDock; collapsed: boolean };
 type ResearchTab = "canvas" | "flow" | "questions";
 
 type TourStop = {
@@ -662,13 +674,13 @@ const practiceTour: TourStop[] = [
     stage: "Step one · Client",
     title: "Where every engagement starts",
     looking:
-      "The intake form, holding what was captured for Meridian Millwork — a twenty-two person architectural millwork shop that builds custom casework and store fixtures for commercial contractors. A company, a website, one named person and an email address is genuinely all it takes to begin.",
+      "The intake form, already filled in for Meridian Millwork — a 22-person shop that builds custom cabinetry and store fixtures. A company, a website, one contact, and an email is all it takes to begin.",
     real:
-      "With a real client you would fill this in during or just after the first phone call and press “Research this business”. Everything downstream — the questions, the brief, the diagnosis — hangs off that one press, so it is worth getting the contact's name and role right.",
+      "Fill this in right after your first phone call and press “Research this business”. Everything that follows — the questions, the brief, the diagnosis — builds on it, so get the contact's name and role right.",
     watch: [
-      "The contact's name and role are their own fields, not a line in the notes. The audit reuses them later as the named human owner of whatever gets prescribed.",
-      "The email is required because the readiness brief has nowhere to go without one.",
-      "Nothing is sent anywhere by this screen. Intake is private, and research runs on public sources only.",
+      "The contact's name and role later become the named owner of whatever gets prescribed.",
+      "The email is where the pre-call brief goes — that is why it is required.",
+      "Nothing on this screen is sent anywhere. Research uses public sources only.",
     ],
   },
   {
@@ -678,13 +690,13 @@ const practiceTour: TourStop[] = [
     stage: "Step two · Research",
     title: "What we learned without asking",
     looking:
-      "The Business Model Canvas — one page describing how the business works. It was drafted from Meridian's public website before anyone spoke to them, and then corrected by what Dana and Rosa actually said on the two calls. Green is the client's own words. Everything else is public research or an honest gap.",
+      "A one-page picture of how the business works, drafted from Meridian's public website before anyone spoke to them, then corrected by what Dana and Rosa said on the calls. Green is the client's own words. Everything else is public research or an honest gap.",
     real:
-      "You would read this the day before the call and hunt for the blocks that look thin. The first pass is not trying to be right — it is trying to be specific enough to be corrected, because a correction is the most valuable thing you can get out of an hour.",
+      "Read this the day before the call and look for the thin blocks. It does not need to be right — it needs to be specific enough for the client to correct, because a correction is the most valuable thing an hour can produce.",
     watch: [
-      "Under Value Propositions, “quote turnaround is about nine days” is marked Client stated. It replaced the 48-hour promise on the website — corrected on the record, not quietly overwritten.",
-      "Cost Structure had nothing public behind it at all until Dana said “payroll is the whole thing”. A block with no public source is normal and is not a failure.",
-      "No block is ever filled in with a plausible guess. Where nothing is known it says Missing and stays Missing.",
+      "Under Value Propositions, “quote turnaround is about nine days” is marked Client stated — it corrected the website's 48-hour promise, on the record.",
+      "Cost Structure was empty until Dana said “payroll is the whole thing”. An empty block is normal, not a failure.",
+      "Where nothing is known it says Missing. No block is ever filled with a plausible guess.",
     ],
   },
   {
@@ -694,13 +706,13 @@ const practiceTour: TourStop[] = [
     stage: "Step two · Research",
     title: "How the work actually moves",
     looking:
-      "The value flow: the route one job takes from a contractor's email to installed millwork. Six steps, each with the person who does it, the system it lives in, and a question written for this business that you can ask on the call to confirm it.",
+      "The route one job takes from a contractor's email to installed millwork, in six steps — each with who does it, where it lives, and a ready-made question to confirm it on the call.",
     real:
-      "You would walk this on the call one step at a time and invite the client to tell you where you have it wrong. Being slightly wrong out loud is a technique, not an accident — people correct a specific claim far more readily than they answer an open question.",
+      "Walk this on the call one step at a time and invite the client to correct you. Being slightly wrong out loud is a technique — people correct a specific claim far more readily than they answer an open question.",
     watch: [
-      "Step 2, Quote pricing, is marked as a gap. Nothing public said who prices a job — and that step turned out to be the entire engagement.",
-      "Every step carries its own confirmation question, so you are never improvising the next thing to say.",
-      "Nothing here is client-confirmed until a client traces a real job through it. The labels are honest about that.",
+      "Step 2, Quote pricing, is marked as a gap — nothing public said who prices a job. That gap turned out to be the entire engagement.",
+      "Every step has its own confirmation question, so you never improvise the next thing to say.",
+      "No step counts as confirmed until the client traces a real job through it.",
     ],
   },
   {
@@ -710,13 +722,13 @@ const practiceTour: TourStop[] = [
     stage: "Step two · Research",
     title: "The questions the research produced",
     looking:
-      "Ten discovery questions grouped by what they hunt for, each tied to a Canvas block or a flow step, each saying plainly what was found publicly so you never assert something you only assumed. Beneath them, three competing hypotheses about where the constraint is — with the condition that would kill each one.",
+      "Ten discovery questions built from the research gaps, each showing what was found publicly so you never assert a guess. Beneath them, three competing hypotheses about where the constraint is.",
     real:
-      "You would skim this the morning of the call. There is nothing to memorise: the guided call puts these on screen one at a time, in order, with the follow-ups beside them.",
+      "Skim this the morning of the call — there is nothing to memorise. The guided call puts each question on screen, in order, with follow-ups beside it.",
     watch: [
-      "Every question exists because of a specific gap in the research. There is no generic script here — a different company produces a different list.",
-      "The hypotheses are internal and are never read to a client as fact. The job is to arrive with three and leave with one.",
-      "Notice how many are marked Required. Those are the ones the diagnosis cannot be built without.",
+      "Every question exists because of a specific gap. A different company produces a different list — there is no generic script.",
+      "The hypotheses are yours alone, never read to a client as fact. Arrive with three, leave with one.",
+      "The ones marked Required are what the diagnosis cannot be built without.",
     ],
   },
   {
@@ -725,13 +737,13 @@ const practiceTour: TourStop[] = [
     stage: "Step three · Prepare",
     title: "The brief the client sees",
     looking:
-      "On the right, the pre-call readiness brief exactly as the client receives it. Above it, the advisor briefing that never leaves this app: the arc of the hour, the three things you must leave with, and what to say if you lose the thread.",
+      "On the right, the pre-call brief exactly as the client receives it. Above it, your private briefing: the shape of the hour, the three things you must leave with, and what to say if you lose the thread.",
     real:
-      "You would send this a few days ahead so the client has rough numbers within reach and the right people in the room. Approving it records a reviewed send intent — the email itself is a second, deliberate step you take from Reviewed actions.",
+      "Send the brief a few days ahead so the client has rough numbers handy and the right people in the room. Approving it here only queues the send — the email itself is a second, deliberate step in Reviewed actions.",
     watch: [
-      "The Canvas, your discovery questions and your constraint hypotheses are all excluded from the client's copy, on purpose.",
-      "The advisor briefing sits in a dashed box flagged “Advisor only”. That is the same boundary the call view uses, and it is worth reading once before your first real call.",
-      "The brief asks for approximate numbers. Sending a client hunting through spreadsheets before a call is the fastest way to lose the hour.",
+      "The Canvas, your questions, and your hypotheses are all left out of the client's copy, on purpose.",
+      "The dashed “Advisor only” box never reaches the client. Read it once before your first real call.",
+      "The brief asks for rough numbers only. Sending a client hunting through spreadsheets is the fastest way to lose the hour.",
     ],
   },
   {
@@ -740,13 +752,13 @@ const practiceTour: TourStop[] = [
     stage: "Step four · The discovery call",
     title: "The call, one question at a time",
     looking:
-      "The guided call. One question fills the screen so you can share it, and a coaching rail sits beside it that the client never sees: follow-ups written for this client, what to say when they do not know, how to steer back from a tangent, answers to predictable pushback, and plain English for every bit of jargon.",
+      "The guided call. One question fills the screen so you can share it. Beside it, a coaching rail the client never sees: follow-ups, answers to pushback, and plain English for every bit of jargon.",
     real:
-      "You would open this at the top of the hour, confirm recording consent out loud, and work down the questions. Answers are captured as “That’s right”, “Correct it”, or “We don’t know yet” — and an “I don’t know” gets flagged as a gap to chase rather than quietly passing as an answer.",
+      "Open this at the top of the hour, confirm recording consent out loud, and work down the questions. “We don't know yet” gets flagged as a gap to chase — it never quietly passes as an answer.",
     watch: [
-      "Press Escape, or tap the bar at the top of this screen, and every word of the coaching vanishes from the page. Not hidden — gone. Try it now, before you ever need it live.",
-      "The practice bar above does not vanish with it. That is deliberate: the one thing that must never disappear is the warning that this is invented data.",
-      "You are not expected to diagnose anything on the call. Your job is the flow, the waiting, and a name. The diagnosis happens afterwards with the transcript in front of you.",
+      "Press Escape now. Every word of coaching vanishes — not hidden, gone. Practice it before you ever need it live.",
+      "The practice bar above stays. The one thing that must never disappear is the warning that this data is invented.",
+      "You are not there to diagnose on the call. Get the flow, the waiting, and a name — the diagnosis comes later, from the transcript.",
     ],
   },
   {
@@ -756,13 +768,13 @@ const practiceTour: TourStop[] = [
     stage: "Step five · Evidence",
     title: "The call becomes evidence",
     looking:
-      "Where a recording turns into quotable evidence. Paste the text, upload the file, or pull it from Fireflies — always the full transcript rather than a summary, so that every finding can point back at a line somebody actually said.",
+      "Where the recording becomes quotable evidence. Paste the text, upload the file, or pull it from Fireflies — always the full transcript, never a summary, so every finding can point to a line somebody actually said.",
     real:
-      "You would do this the same afternoon, while you still remember the room. Consent has to be confirmed for this specific call before anything can be captured; the analyse button stays shut otherwise, and it is recorded separately for call one and call two.",
+      "Do this the same afternoon, while you still remember the room. Consent must be confirmed for this specific call first — the analyse button stays locked otherwise.",
     watch: [
-      "Meridian's two transcripts are already processed. The sentence the whole engagement rests on is Rosa's, at 04:43: “It is more like 9 days per quote.”",
-      "Speaker roles matter more than they look. Your own lines are recorded as advisor notes and can never become client evidence, however quotable they sound.",
-      "A summary would have lost the nine days. Dana said four or five; the log said nine. Only the full transcript carries the correction.",
+      "The sentence the whole engagement rests on is Rosa's, at 04:43: “It is more like 9 days per quote.”",
+      "Your own lines are recorded as advisor notes. They can never become client evidence, however quotable they sound.",
+      "A summary would have lost the nine days — Dana said four or five. Only the full transcript carries the correction.",
     ],
   },
   {
@@ -771,13 +783,13 @@ const practiceTour: TourStop[] = [
     stage: "Step six · Synthesis",
     title: "What the transcript actually supports",
     looking:
-      "The evidence diff. Every client-attributed line that carries weight, with the speaker and the timestamp, plus the baseline status, the open gaps, and one provisional constraint candidate.",
+      "Every client quote that carries weight, with speaker and timestamp — plus the baseline, the open gaps, and one proposed constraint.",
     real:
-      "You would read this line by line and argue with it where it is wrong. It is a proposal, not a verdict, and the tool would rather show you nothing than fill the screen with something the transcript does not support.",
+      "Read it line by line and argue with it where it is wrong. It is a proposal, not a verdict — the tool would rather show nothing than something the transcript does not support.",
     watch: [
-      "Baseline reads Confirmed — because Rosa read it off her own log, not because anything here assumed a number.",
-      "The candidate is one constraint. Not a ranked list of nine opportunities, and not a score.",
-      "Anything the analysis could not tie to a real quote is discarded and shown as discarded. A silent drop would be worse than a visible rejection.",
+      "Baseline reads Confirmed because Rosa read it off her own log — not because anything was assumed.",
+      "One constraint. Not a ranked list of nine opportunities, and not a score.",
+      "Anything that could not be tied to a real quote is shown as discarded, never silently dropped.",
     ],
   },
   {
@@ -786,12 +798,12 @@ const practiceTour: TourStop[] = [
     stage: "Step six · Checkpoint",
     title: "The first thing you have to approve",
     looking:
-      "The same screen, at its bottom edge. “Approve Canvas commit” is a human checkpoint: nothing the transcript proposed is written into the canonical Canvas until a person says so.",
+      "The bottom of this same screen. “Approve Canvas commit” is a human checkpoint: nothing is written into the official Canvas until you say so.",
     real:
-      "You would press this only after reading the quotes above it. It approves the evidence and the Canvas — it does not approve the diagnosis. That is a separate decision, later, after a second call with the client.",
+      "Press it only after reading the quotes above it. It approves the evidence — not the diagnosis. That is a separate decision, after a second call with the client.",
     watch: [
-      "Two approvals, two calls, in that order. It is the main thing standing between a confident guess and a client-facing finding.",
-      "If you approve this and later change your mind, the evidence is still all here with names and timestamps against it. Nothing becomes anonymous.",
+      "Two approvals, two calls, in that order. That is what stands between a confident guess and a client-facing finding.",
+      "If you change your mind later, every quote is still here with a name and timestamp against it.",
     ],
   },
   {
@@ -800,13 +812,13 @@ const practiceTour: TourStop[] = [
     stage: "Step seven · The findings call",
     title: "Reconcile first. Reveal second.",
     looking:
-      "The second call, in two halves. First you read the business back to them and let them correct you. Only then — in part B — do you show the constraint, the prescription, the metric and the owner.",
+      "The second call, in two halves. First read the business back to them and let them correct you. Only then show the constraint, the prescription, the metric and the owner.",
     real:
-      "You would share your screen and walk the client through the client-facing version of this. Press “Enter presentation view” and look at it: one section per screen, their own words quoted exactly, nothing internal on show.",
+      "Share your screen and press “Enter presentation view”: one section per screen, their own words quoted exactly, nothing internal on show.",
     watch: [
-      "Go into the presentation view now. The walkthrough disappears exactly like the coaching does — and the practice bar stays. That is the guarantee: you cannot screen-share this believing it is real.",
-      "Dana's correction about who draws shop drawings came out of this half of the call. Reconciliation is where a finding gets stress-tested, and it is the half people skip.",
-      "Nothing numeric can be claimed while a baseline is missing. Here it is confirmed, so the numbers are allowed.",
+      "Try the presentation view now. The walkthrough disappears — and the practice bar stays. You cannot screen-share this believing it is real.",
+      "Dana's correction about who draws shop drawings came out of the read-back half. It is the half people skip, and it is where a finding gets stress-tested.",
+      "Numbers are only allowed here because the baseline is confirmed. No baseline, no numeric claims.",
     ],
   },
   {
@@ -815,13 +827,13 @@ const practiceTour: TourStop[] = [
     stage: "Step seven · Checkpoint",
     title: "Approving the diagnosis",
     looking:
-      "The second and final checkpoint. The constraint, the prescription, the evidence count, the Canvas block and the named human owner, with the approval beneath them.",
+      "The second and final checkpoint: the constraint, the prescription, the evidence, and the named human owner, with the approval beneath them.",
     real:
-      "You cannot approve without a named person and a supported candidate. For Meridian that person is Dana Whitfield, Owner — she said on the record that a bad number off her own price book is hers and not Rosa's, which is what ownership actually means.",
+      "You cannot approve without a named person. For Meridian that is Dana Whitfield, Owner — she said on the record that a bad price-book number is hers, not Rosa's. That is what ownership means.",
     watch: [
-      "Nine days is a client number from a client log. No delta can ever be claimed against a baseline the tool invented, because it will not invent one.",
-      "The prescription is deliberately small: write down the six or seven assemblies she already prices the same way every time. No hire, no software, no new system, and she can stop using it on any Monday.",
-      "The predicted next constraint — shop drawings — is named here, before the sprint, so that when it shows up nobody thinks the sprint failed.",
+      "Nine days is a client number from a client log. The tool will not invent a baseline, so no delta can ever rest on one.",
+      "The prescription is deliberately small: write down the six or seven assemblies she already prices the same way. No hire, no software, and she can stop any Monday.",
+      "The next constraint — shop drawings — is predicted here, before the sprint, so when it shows up nobody thinks the sprint failed.",
     ],
   },
   {
@@ -830,12 +842,12 @@ const practiceTour: TourStop[] = [
     stage: "Step eight · Deliver",
     title: "The documents",
     looking:
-      "Six documents generated from the approved record: the diagnosis package, the audit report, a fixed-sprint proposal, an implementation roadmap, a developer specification, and a roles map. Every one carries the same evidence labels and the same named owner.",
+      "Six documents generated from the approved record — diagnosis, audit report, sprint proposal, roadmap, developer spec, and roles map. Each carries the same evidence labels and the same named owner.",
     real:
-      "You would generate the suite, read it, then queue the ones the client should see. Sending is two steps on purpose — “Send to client” queues a reviewed intent and nothing leaves this app until you approve it in Reviewed actions, so nothing can go out mid-call by accident.",
+      "Generate the suite, read it, then queue what the client should see. Sending is two steps on purpose: “Send to client” only queues it, and nothing leaves this app until you approve it in Reviewed actions.",
     watch: [
-      "None of these documents contains a number nobody said. The proposal shows the formula rather than a projected return.",
-      "Every practice document says so on its own face. Open one from the Documents menu and read the last line.",
+      "No document contains a number nobody said. The proposal shows the formula rather than a projected return.",
+      "Open any document from the Documents menu and read the last line — every practice document says on its own face that it is fictional.",
       "The roles map is the one clients react to hardest. It is where “everything waits on one person” stops being a feeling.",
     ],
   },
@@ -847,10 +859,10 @@ const practiceTour: TourStop[] = [
     looking:
       "The prescription turned into five tasks with owners, and a measurement clock started against the confirmed nine-day baseline.",
     real:
-      "You would activate this in front of the client, agree the review date, and then largely get out of the way. Meridian's sprint cost Dana two evenings — one to write the price book, one to sit with Rosa while she used it.",
+      "Activate it in front of the client, agree the review date, then largely get out of the way. Meridian's sprint cost Dana two evenings — one to write the price book, one to sit with Rosa while she used it.",
     watch: [
-      "The last task is the kill condition in the client's own words: if quotes go out in three days and the win rate does not move, speed was never the constraint.",
-      "Agreeing how you would be proved wrong, in writing, before you start, is the whole discipline. In four weeks one of you will be tempted to explain the number away.",
+      "The last task is the kill condition, in the client's own words: if quotes go out in three days and the win rate does not move, speed was never the constraint.",
+      "Agreeing in writing, before you start, how you would be proved wrong is the whole discipline.",
       "Nothing here is scheduled or emailed externally. The sprint lives in the record.",
     ],
   },
@@ -860,13 +872,13 @@ const practiceTour: TourStop[] = [
     stage: "Step ten · Operate",
     title: "What actually changed",
     looking:
-      "The before and the after. Nine days to three days — a delta of minus six, read as an improvement because shorter elapsed time is better, with the reason for that judgement written out beside it.",
+      "The before and the after. Nine days to three — read as an improvement because shorter is better, with the reason for that judgement written out beside it.",
     real:
-      "You would take the ending reading from the same log, kept the same way, and read it back to the client before recording it. If the log had changed, the comparison would be worthless and this screen would say so.",
+      "Take the ending reading from the same log, kept the same way, and read it back to the client before recording it. If the log had changed, the comparison would be worthless — and this screen would say so.",
     watch: [
-      "The browser never calculates any of this. Every number came back from the server, including the judgement about which direction is better — and you can correct that direction if it reads wrong.",
-      "The constraint moved to shop drawings, exactly where Dana predicted on the first call. That is what success looks like, not a fix that failed.",
-      "If no direction can be established, the result is shown as “not interpreted” rather than being quietly called a win.",
+      "Every number here came from the server, including which direction counts as better — and you can correct that direction if it reads wrong.",
+      "The constraint moved to shop drawings, exactly where Dana predicted. That is what success looks like — not a fix that failed.",
+      "If no direction can be established, the result reads “not interpreted” rather than being quietly called a win.",
     ],
   },
   {
@@ -875,9 +887,9 @@ const practiceTour: TourStop[] = [
     stage: "Step eleven · Catalog",
     title: "What you keep",
     looking:
-      "The reusable pattern: owner-held pricing knowledge behaving as a queue, the smallest change that moved it, and the measured result — attached to this engagement and no other.",
+      "The reusable pattern: one person's knowledge behaving as a queue, the smallest change that moved it, and the measured result — attached to this engagement and no other.",
     real:
-      "You would add where you think the pattern transfers and where it probably does not. The measured result is never detached from the engagement that produced it and never quoted to a prospect as a benchmark.",
+      "Add where you think the pattern transfers, and where it does not. The result stays tied to the engagement that produced it and is never quoted to a prospect as a benchmark.",
     watch: [
       "One engagement, one pattern. This is how a practice compounds without anybody inventing a case study.",
       "The next Meridian is not another millwork shop. It is any business where one person's judgement is the queue.",
@@ -892,8 +904,11 @@ function readTourState(): TourState | null {
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<TourState>;
     const step = typeof parsed.step === "number" && parsed.step >= 0 && parsed.step < practiceTour.length ? parsed.step : 0;
+    // Anything that is not an explicit "done" resumes as guiding, including the retired
+    // "exploring" mode, whose job the collapsed dock now does.
     const mode: TourMode = parsed.mode === "done" ? "done" : "guiding";
-    return { step, mode };
+    const dock: TourDock = parsed.dock === "bottom" ? "bottom" : "side";
+    return { step, mode, dock, collapsed: parsed.collapsed === true };
   } catch {
     return null;
   }
@@ -1236,6 +1251,11 @@ export default function AdvisorCockpit() {
   const [practiceError, setPracticeError] = useState("");
   const [tourStep, setTourStep] = useState(0);
   const [tourMode, setTourMode] = useState<TourMode>("off");
+  /** The advisor's saved dock preference. What is actually used is `activeDock`, below. */
+  const [tourDock, setTourDock] = useState<TourDock>("side");
+  const [tourCollapsed, setTourCollapsed] = useState(false);
+  /** 0 until the first client-side measurement, which is the signal to leave the preference alone. */
+  const [viewport, setViewport] = useState(0);
   const [researchTab, setResearchTab] = useState<ResearchTab | undefined>(undefined);
   /** Per-button in-flight guards so a double-click cannot fire a mutating request twice. */
   const [analyzing, setAnalyzing] = useState(false);
@@ -1251,6 +1271,7 @@ export default function AdvisorCockpit() {
   const [speakerRoles, setSpeakerRoles] = useState<Record<string, "client" | "advisor" | "unknown">>({});
   const [speakerReq, setSpeakerReq] = useState("");
   const modalRef = useRef<HTMLDivElement>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
   const currentStage = stageFor(screen);
   const practiceActive = isPracticeEngagement(activeId);
   /**
@@ -1260,6 +1281,17 @@ export default function AdvisorCockpit() {
    * NOT gated by this — it is the one thing that has to survive a screen share.
    */
   const guidanceHidden = screen === "findings-call" || (screen === "call" && presenting);
+  /**
+   * Dock geometry. The walkthrough is a real layout column, so the only question is which
+   * edge it takes. The coaching rail always owns the right of the guided call; a walkthrough
+   * column on the left of that same screen makes three columns and crushes the question in
+   * the middle, so below ~1600px that screen forces the bottom strip. Narrow viewports force
+   * it too. Both are overrides, not writes: the saved preference comes back when there is room.
+   */
+  const tourVisible = practiceActive && !guidanceHidden && tourMode !== "off";
+  const coachRailOnScreen = screen === "call" && !presenting;
+  const dockForced = viewport > 0 && (viewport < 1080 || (coachRailOnScreen && viewport < 1600));
+  const activeDock: TourDock = tourCollapsed || dockForced ? "bottom" : tourDock;
   const displayCompany = company || "Untitled engagement";
   const script = callScriptFor(researchResult);
   const callQuestion = script.questions[Math.min(callIndex, script.questions.length - 1)];
@@ -1344,15 +1376,26 @@ export default function AdvisorCockpit() {
     return () => { active = false; };
   }, []);
 
-  /** The advisor's place in the walkthrough survives a reload, a tab close, and a laptop restart. */
+  /** The advisor's place in the walkthrough — and how they like it docked — survives a reload. */
   useEffect(() => {
     if (!practiceActive || tourMode === "off") return;
-    writeTourState({ mode: tourMode === "done" ? "done" : "guiding", step: tourStep });
-  }, [practiceActive, tourMode, tourStep]);
+    writeTourState({ mode: tourMode, step: tourStep, dock: tourDock, collapsed: tourCollapsed });
+  }, [practiceActive, tourMode, tourStep, tourDock, tourCollapsed]);
+
+  /** The dock's shape depends on how much room there is, so the width has to be a real measurement. */
+  useEffect(() => {
+    const measure = () => setViewport(window.innerWidth);
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, []);
 
   function go(next: Screen) {
     setScreen(next); setNotice(""); setMobileNav(false); setResumed(null);
     window.scrollTo({ top: 0, behavior: "smooth" });
+    // While the walkthrough is docked the content column is the scroll container, not the
+    // window, so the window call above is a no-op and this is the one that does the work.
+    bodyRef.current?.scrollTo({ top: 0, behavior: "smooth" });
   }
 
   async function save<T = unknown>(path: string, body: unknown, method = "POST") {
@@ -1586,6 +1629,8 @@ export default function AdvisorCockpit() {
     setEngagements((items) => [toEngagement(record), ...items.filter((item) => item.id !== record.id)]);
     await resume(toEngagement(record));
     const saved = restart ? null : readTourState();
+    setTourDock(saved?.dock ?? "side");
+    setTourCollapsed(saved?.collapsed ?? false);
     if (saved?.mode === "done") {
       setTourStep(practiceTour.length - 1);
       setTourMode("done");
@@ -2102,10 +2147,20 @@ export default function AdvisorCockpit() {
     }
   }
 
-  return <div className={`cockpit ${isClientFacing(screen) ? "client-call" : ""} ${practiceActive ? "practice" : ""}`}>
+  return <div className={`cockpit ${isClientFacing(screen) ? "client-call" : ""} ${practiceActive ? "practice" : ""} ${tourVisible ? `tour-docked tour-${activeDock}${tourCollapsed ? " tour-collapsed" : ""}` : ""}`}>
     <a className="skip" href="#main">Skip to main content</a>
-    {/* Outside <main> and outside every screen, so no screen can suppress it. No dismiss control exists. */}
+    {/* Outside <main> and outside every screen, so no screen can suppress it. No dismiss control exists.
+        It is also outside the dock frame below, so collapsing or moving the walkthrough cannot touch it. */}
     {practiceActive ? <PracticeBar busy={practiceBusy} onLeave={() => leavePractice()} onReset={resetPractice} /> : null}
+    {/*
+      The dock and the app share one frame. When the walkthrough is up the frame is a flex
+      row (side) or reversed column (bottom) and `.cockpit-body` scrolls inside what is left,
+      so no content ever passes under the dock. When it is not up — including the moment
+      Escape hides it — the frame is a plain block and the app is full width again.
+    */}
+    <div className="cockpit-frame">
+    {practiceActive ? <PracticeTour busy={practiceBusy} collapsed={tourCollapsed} dock={activeDock} dockLocked={dockForced} hidden={guidanceHidden} index={tourStep} mode={tourMode} onCollapse={setTourCollapsed} onDock={setTourDock} onFinish={() => setTourMode("done")} onJump={goToStop} onLeave={() => leavePractice()} onNext={() => goToStop(tourStep + 1)} onPrevious={() => goToStop(tourStep - 1)} onRemove={removePractice} onReset={resetPractice} onRestart={() => goToStop(0)} onScreen={screen === practiceTour[Math.min(tourStep, practiceTour.length - 1)].screen} /> : null}
+    <div className="cockpit-body" ref={bodyRef}>
     <header className="app-header">
       <button className="brand" onClick={() => go("home")} type="button"><span><Icon name="shield" size={18} /></span>TIER 4 <em>AUDIT</em></button>
       {screen !== "home" ? <div className="header-context"><i />{displayCompany}{practiceActive ? <PracticeMark compact /> : null}<Pill tone={isClientFacing(screen) ? "known" : "neutral"}>{isClientFacing(screen) ? "Client call view" : "Advisor view"}</Pill></div> : null}
@@ -2164,7 +2219,8 @@ export default function AdvisorCockpit() {
       {screen === "call" && !callQuestion ? <section className="guided narrow"><PageHead eyebrow="Call · guided script" title="No call question is available.">Run research for this engagement so the guided call can be driven by client-specific discovery questions.</PageHead><Button icon="back" onClick={() => go("research")}>Back to research</Button></section> : null}
     </main>
     {screen !== "home" && !isClientFacing(screen) ? <div aria-live="polite" className="save-state"><i className={apiState} />{apiState === "saving" ? "Saving…" : apiState === "saved" ? "Saved" : apiState === "error" ? "Action failed" : "Ready"}</div> : null}
-    {practiceActive ? <PracticeTour busy={practiceBusy} hidden={guidanceHidden} index={tourStep} mode={tourMode} onExplore={() => setTourMode("exploring")} onFinish={() => setTourMode("done")} onJump={goToStop} onLeave={() => leavePractice()} onNext={() => goToStop(tourStep + 1)} onPrevious={() => goToStop(tourStep - 1)} onRemove={removePractice} onReset={resetPractice} onRestart={() => goToStop(0)} onResume={() => goToStop(tourStep)} onScreen={screen === practiceTour[Math.min(tourStep, practiceTour.length - 1)].screen} /> : null}
+    </div>
+    </div>
     {confirmSend ? <div className="modal-layer"><div aria-describedby="send-description" aria-labelledby="send-title" aria-modal="true" className="modal" ref={modalRef} role="dialog">
       <button aria-label="Close" className="modal-close" onClick={() => setConfirmSend(false)} type="button"><Icon name="close" size={17} /></button>
       <span className="modal-icon"><Icon name="mail" size={21} /></span><p className="eyebrow">External intent</p><h2 id="send-title">Approve this send intent</h2>
@@ -2199,25 +2255,25 @@ function Home({ engagements, loading, onFresh, onMigration, onPractice, onResume
   const opening = practiceBusy === "open";
   return <section className="home">
     <div className="ambient one" /><div className="ambient two" />
-    <div className="home-copy"><Pill tone="known"><Icon name="spark" size={12} /> Guided throughput audit</Pill><h1>Find the constraint.<br />Measure what changes.</h1><p>Begin a new client conversation or continue an evidence-grounded audit. One constraint, one prescription, one metric, one named human owner.</p></div>
+    <div className="home-copy"><Pill tone="known"><Icon name="spark" size={12} /> Guided throughput audit</Pill><h1>Find the constraint.<br />Measure what changes.</h1><p>Every audit ends the same way: one constraint, one prescription, one metric, one named owner.</p></div>
     <div className="entry-grid">
-      <button className="entry primary" onClick={onFresh} type="button"><span className="entry-icon"><Icon name="plus" size={25} /></span><span><small>Start here</small><strong>Fresh engagement</strong><p>Give us a client starting point. We’ll research publicly, draft the operating model, and prepare the questions that matter.</p></span><b>Start a new audit <Icon name="arrow" size={17} /></b></button>
+      <button className="entry primary" onClick={onFresh} type="button"><span className="entry-icon"><Icon name="plus" size={25} /></span><span><small>Real client</small><strong>Fresh engagement</strong><p>Name the client. We research the business from public sources and prepare the questions for your call.</p></span><b>Start a new audit <Icon name="arrow" size={17} /></b></button>
       <div className="secondary-entries">
-        <button className="entry secondary" onClick={onMigration} type="button"><span className="entry-icon"><Icon name="upload" size={21} /></span><span><strong>External migration</strong><p>Bring an existing audit, transcript, notes, or workspace into the same guided structure.</p></span><Icon name="chevron" size={17} /></button>
-        <button className="entry secondary" onClick={onUpdate} type="button"><span className="entry-icon"><Icon name="refresh" size={21} /></span><span><strong>Update an engagement</strong><p>Continue from the current stage in your inspectable engagement registry.</p></span><Icon name="chevron" size={17} /></button>
+        <button className="entry secondary" onClick={onMigration} type="button"><span className="entry-icon"><Icon name="upload" size={21} /></span><span><strong>Bring in existing work</strong><p>Import a past audit, transcript, or notes into the same guided structure.</p></span><Icon name="chevron" size={17} /></button>
+        <button className="entry secondary" onClick={onUpdate} type="button"><span className="entry-icon"><Icon name="refresh" size={21} /></span><span><strong>Continue an engagement</strong><p>Pick up any client from their current stage.</p></span><Icon name="chevron" size={17} /></button>
         <button className="entry secondary practice-entry" disabled={opening} onClick={onPractice} type="button"><span className="entry-icon"><Icon name="people" size={21} /></span>
-          <span><small>No client involved</small><strong>{practiceProbe === "ready" && practiceExists ? "Practice mode · pick up where you left off" : "Practice mode · walk a worked example"}</strong>
-            <p>Walk one complete engagement end to end before you run a real one — the research, both calls, the diagnosis, the sprint and the measured result, with a short note at every screen explaining what you are looking at. The company is invented, nothing can reach a client, and you can reset it as often as you like.</p></span>
+          <span><small>{practiceProbe === "ready" && practiceExists ? "Pick up where you left off" : "New here? Start with this"}</small><strong>Practice mode</strong>
+            <p>Walk one complete engagement on an invented client — research, both calls, the diagnosis, the sprint, the measured result — with a short note explaining every screen. Nothing can reach a real client, and you can reset it anytime.</p></span>
           {opening ? <span className="entry-busy" role="status">Opening…</span> : <Icon name="chevron" size={17} />}</button>
       </div>
     </div>
     {practice.length ? <div className="practice-recent">
-      <div className="practice-recent-head"><PracticeMark /><span>Kept apart from your client work. Nothing in this record describes a real company.</span></div>
+      <div className="practice-recent-head"><PracticeMark /><span>Kept apart from your client work — nothing in it describes a real company.</span></div>
       <div className="recent-list">{practice.map((item) => <RecentRow item={item} key={item.id} onResume={onResume} />)}</div>
     </div> : null}
     <div className="recent-head"><div><p className="eyebrow">Continue the work</p><h2>Recent engagements</h2></div><button onClick={onUpdate} type="button">View all engagements <Icon name="arrow" size={14} /></button></div>
     <div className="recent-list">{loading ? <p className="registry-empty" role="status">Loading the engagement registry…</p> : null}{!loading && clients.length === 0 ? <p className="registry-empty">{practice.length ? "No client engagements yet — only the practice record above. Start a fresh engagement to create your first real one." : "No engagements yet. Start a fresh engagement to create the first record."}</p> : null}{clients.map((item) => <RecentRow item={item} key={item.id} onResume={onResume} />)}</div>
-    <div className="local-note"><Icon name="shield" size={18} /><span><strong>Deterministic local mode is ready.</strong> No OpenAI key or paid enrichment is required. External connectors run only after explicit setup and approval.</span></div>
+    <div className="local-note"><Icon name="shield" size={18} /><span><strong>Works without setup.</strong> No API keys required. External connections run only after you set them up and approve each one.</span></div>
   </section>;
 }
 
@@ -2238,14 +2294,14 @@ function Intake(props: {
   const busy = props.apiState === "saving" || props.fileState?.tone === "reading";
   return <section className="guided narrow"><Back onClick={props.onBack}>Entry options</Back><PageHead eyebrow="Client · Starting point" title="Who are we learning about?">Give us a starting point. We’ll research the business, draft a first-pass business model, and prepare the questions that matter for your call.</PageHead>
     <form className="intake-form" onSubmit={props.locked ? (event) => event.preventDefault() : props.onSubmit}>
-      <div className="field-row"><label><span>Company name <em>Required</em></span><input autoFocus onChange={(e) => props.onCompany(e.target.value)} placeholder="Acme Industrial" required value={props.company} /></label><label className="field-note"><span>Company website <em>Required</em></span><input autoCapitalize="none" inputMode="url" onBlur={(e) => props.onWebsite(normalizeWebsiteInput(e.target.value))} onChange={(e) => props.onWebsite(e.target.value)} placeholder="tier4advisors.com" spellCheck={false} type="text" value={props.website} /><small>Research runs on the public website, so we need one before we can start. Without it the engagement has nothing to research.</small></label></div>
-      <div className="field-row"><label><span>Primary contact name</span><input onChange={(e) => props.onContact(e.target.value)} placeholder="Maya Chen" value={props.contact} /></label><label className="field-note"><span>Primary contact role</span><input onChange={(e) => props.onRole(e.target.value)} placeholder="Chief Operating Officer" value={props.role} /><small>Stored as its own field, not buried in notes. Diagnosis approval reuses the name and role as the named human owner.</small></label></div>
+      <div className="field-row"><label><span>Company name <em>Required</em></span><input autoFocus onChange={(e) => props.onCompany(e.target.value)} placeholder="Acme Industrial" required value={props.company} /></label><label className="field-note"><span>Company website <em>Required</em></span><input autoCapitalize="none" inputMode="url" onBlur={(e) => props.onWebsite(normalizeWebsiteInput(e.target.value))} onChange={(e) => props.onWebsite(e.target.value)} placeholder="tier4advisors.com" spellCheck={false} type="text" value={props.website} /><small>Research starts from the public website, so we need one to begin.</small></label></div>
+      <div className="field-row"><label><span>Primary contact name</span><input onChange={(e) => props.onContact(e.target.value)} placeholder="Maya Chen" value={props.contact} /></label><label className="field-note"><span>Primary contact role</span><input onChange={(e) => props.onRole(e.target.value)} placeholder="Chief Operating Officer" value={props.role} /><small>This person becomes the named owner when the diagnosis is approved.</small></label></div>
       <label className="field-note"><span>Primary contact email <em>Required</em></span><input autoCapitalize="none" className={emailTouched && !emailValid ? "invalid" : ""} inputMode="email" onChange={(e) => props.onEmail(e.target.value)} placeholder="maya@acmeindustrial.com" spellCheck={false} type="email" value={props.email} />
-        <small>{emailTouched && !emailValid ? "That does not look like an email address yet." : "We’ll send the pre-call readiness brief here. Without it the brief has nowhere to go and cannot be sent."}</small></label>
+        <small>{emailTouched && !emailValid ? "That does not look like an email address yet." : "The pre-call brief is sent here."}</small></label>
       <label><span>What prompted this conversation? <small>Optional</small></span><textarea onChange={(e) => props.onContext(e.target.value)} placeholder="What is changing, stuck, or important right now?" rows={5} value={props.context} /></label>
       <label className="upload"><input accept={sourceAccept} onChange={(e) => props.onFile(e.target.files?.[0] ?? null)} type="file" /><span><Icon name="upload" size={20} /></span><span><strong>{props.fileName || "Add an email, notes, proposal, or prior document"}</strong><small>Optional · TXT, Markdown, CSV, DOCX, VTT, SRT, or JSON. PDF cannot be read — export it first.</small></span></label>
       {props.fileState ? <p className={`upload-state ${props.fileState.tone === "error" ? "error" : props.fileState.tone === "reading" ? "" : "ready"}`} role={props.fileState.tone === "error" ? "alert" : "status"}><Icon name={props.fileState.tone === "error" ? "info" : props.fileState.tone === "reading" ? "refresh" : "check"} size={15} />{props.fileState.message}</p> : null}
-      {props.locked ? <p className="upload-state ready" role="status"><Icon name="shield" size={15} />You are walking the practice example, so this form is here to read rather than to submit. Creating a new engagement is switched off until you leave practice mode — nothing you do on this screen can create a record.</p> : null}
+      {props.locked ? <p className="upload-state ready" role="status"><Icon name="shield" size={15} />This is the practice example, so the form is here to read, not submit. Leave practice mode to create a real engagement.</p> : null}
       <div className="action-row"><p><Icon name="shield" size={18} /><span><strong>Public sources first.</strong> Nothing is sent to the client, and paid enrichment never runs automatically.</span></p><Button disabled={props.locked || !props.company.trim() || !websiteValid || !emailValid || busy} icon="arrow" type="submit">{props.locked ? "Creating engagements is off in practice mode" : props.apiState === "saving" ? "Preparing research…" : "Research this business"}</Button></div>
     </form>
   </section>;
@@ -2278,7 +2334,7 @@ function Migration({ onBack, onStage }: {
     }
   }
   const blocked = fileState?.tone === "reading" || fileState?.tone === "error";
-  return <section className="guided narrow"><Back onClick={onBack}>Entry options</Back><PageHead eyebrow="Client · External migration" title="Bring the existing work with you.">Import an audit, transcript, notes, or workspace export. It is attached to the new engagement’s source register once you add the client anchor.</PageHead>
+  return <section className="guided narrow"><Back onClick={onBack}>Entry options</Back><PageHead eyebrow="Client · Existing work" title="Bring the existing work with you.">Import an audit, transcript, notes, or workspace export. It is attached to the new engagement’s sources once you add the client details.</PageHead>
     <div className="panel"><label className="upload large"><input accept={sourceAccept} onChange={(e) => choose(e.target.files?.[0] ?? null)} type="file" /><span><Icon name="upload" size={23} /></span><span><strong>{fileName || "Choose a source file"}</strong><small>TXT, Markdown, CSV, DOCX, VTT, SRT, or JSON. PDF cannot be read — export it first.</small></span></label>
       {fileState ? <p className={`upload-state ${fileState.tone === "error" ? "error" : fileState.tone === "reading" ? "" : "ready"}`} role={fileState.tone === "error" ? "alert" : "status"}><Icon name={fileState.tone === "error" ? "info" : fileState.tone === "reading" ? "refresh" : "check"} size={15} />{fileState.message}</p> : null}
       <div className="or"><span>or paste source material</span></div><label><span>Existing notes or transcript</span><textarea onChange={(e) => setText(e.target.value)} placeholder="Paste the material exactly as received…" rows={9} value={text} /></label>
@@ -2304,7 +2360,7 @@ function Engagements({ engagements, loading, onBack, onFresh, onResume }: { enga
     {!loading && engagements.length === 0 ? <p className="registry-empty">No engagement records were returned.</p> : null}
     {engagements.length ? <div className="table-wrap"><table className="registry"><thead><tr><th>Client</th><th>Stage</th><th>Status & next action</th><th>Updated</th><th /></tr></thead>
       {practice.length ? <tbody className="registry-practice">
-        <tr className="registry-group"><td colSpan={5}><PracticeMark /><span>Training records. Fictional companies, invented quotes, invented numbers — never client work and never quotable.</span></td></tr>
+        <tr className="registry-group"><td colSpan={5}><PracticeMark /><span>Training records — fictional companies, invented numbers. Never client work, never quotable.</span></td></tr>
         {practice.map(row)}
       </tbody> : null}
       <tbody>
@@ -2419,7 +2475,7 @@ function PracticeBar({ busy, onLeave, onReset }: {
 }) {
   return <div className="practice-bar">
     <strong><Icon name="shield" size={14} />Practice mode</strong>
-    <p><b>{PRACTICE_CLIENT} is not a real company.</b> Everything on screen — the quotes, the numbers, the documents — was written as training material. Never send, quote, paste or screen-share any of it as a client’s.</p>
+    <p><b>{PRACTICE_CLIENT} is not a real company.</b> Every quote, number, and document on screen is training material — never send or share any of it as a client’s.</p>
     <span className="practice-bar-actions">
       <button disabled={Boolean(busy)} onClick={onReset} type="button">{busy === "reset" ? "Resetting…" : "Reset practice data"}</button>
       <button disabled={Boolean(busy)} onClick={onLeave} type="button">Leave practice mode</button>
@@ -2434,13 +2490,18 @@ function PracticeBar({ busy, onLeave, onReset }: {
  * it returns null on a client-facing screen — absent from the DOM, not styled
  * out of view — and everything it does render lives inside <AdvisorOnly>.
  *
- * It never rebuilds a screen. It docks beside the real one and explains it.
+ * It never rebuilds a screen, and it never covers one. It is a DOCK: a real column
+ * (side) or strip (bottom) in the cockpit's layout, so the app reflows into the space
+ * that is left rather than being overlaid. Collapsing it to a single bar is the one
+ * "get out of my way" control — there is no second, competing explore mode.
  */
 function PracticeTour(props: {
-  busy: "" | "open" | "reset" | "remove"; hidden: boolean; index: number; mode: TourMode; onScreen: boolean;
-  onExplore: () => void; onFinish: () => void; onJump: (index: number) => void; onLeave: () => void;
+  busy: "" | "open" | "reset" | "remove"; collapsed: boolean; dock: TourDock; dockLocked: boolean;
+  hidden: boolean; index: number; mode: TourMode; onScreen: boolean;
+  onCollapse: (collapsed: boolean) => void; onDock: (dock: TourDock) => void;
+  onFinish: () => void; onJump: (index: number) => void; onLeave: () => void;
   onNext: () => void; onPrevious: () => void; onRemove: () => void; onReset: () => void;
-  onRestart: () => void; onResume: () => void;
+  onRestart: () => void;
 }) {
   const [listOpen, setListOpen] = useState(false);
   if (props.hidden || props.mode === "off") return null;
@@ -2448,60 +2509,75 @@ function PracticeTour(props: {
   const index = Math.min(Math.max(props.index, 0), total - 1);
   const stop = practiceTour[index];
   const last = index === total - 1;
+  const done = props.mode === "done";
 
-  if (props.mode === "exploring") return <div className="tour-dock collapsed">
+  // The slim bar. Everything needed to keep stepping is here, so collapsing never costs
+  // the advisor their place — which is exactly what "explore on my own" used to be for.
+  if (props.collapsed) return <div className="tour-dock">
     <AdvisorOnly hidden={false} label="Advisor only · practice walkthrough">
-      <button className="tour-rejoin" onClick={props.onResume} type="button">
-        <Icon name="refresh" size={16} />
-        <span><strong>Back to the walkthrough</strong><small>Step {index + 1} of {total} · {stop.title}</small></span>
-      </button>
-    </AdvisorOnly>
-  </div>;
-
-  if (props.mode === "done") return <div className="tour-dock">
-    <AdvisorOnly hidden={false} label="Advisor only · practice walkthrough, never shown to a client">
-      <div className="tour-panel">
-        <header><div><p className="eyebrow">Practice walkthrough · complete</p><h2>That is the whole arc.</h2></div></header>
-        <p className="tour-lead">You have now seen every screen you will use with a real client: what you can learn before you speak to them, how the call is driven, where the two approvals sit, what gets written, and how the result is measured. None of it needed an API key, and nothing left this app without a second, deliberate press.</p>
-        <p className="tour-lead">The thing worth carrying out of here is the shape, not the detail. One constraint. One smallest change. One number, taken from the client’s own record. One person’s name against it. If your first real call gets you a traced flow, a step everything waits at, and a name — the call worked.</p>
-        <p className="tour-note"><Icon name="info" size={15} />{PRACTICE_CLIENT} stays here for as long as you want it. Reset it and walk it again, leave it and start a real engagement, or delete it entirely — it can always be rebuilt exactly as it was.</p>
-        <div className="tour-actions">
-          <Button icon="refresh" onClick={props.onRestart} variant="secondary">Walk it again</Button>
-          <Button disabled={Boolean(props.busy)} onClick={props.onReset} variant="secondary">{props.busy === "reset" ? "Resetting…" : "Reset practice data"}</Button>
-          <Button icon="arrow" onClick={props.onLeave}>Leave practice mode</Button>
-        </div>
-        <button className="tour-remove" disabled={Boolean(props.busy)} onClick={props.onRemove} type="button">{props.busy === "remove" ? "Deleting…" : "Delete the practice engagement"}</button>
+      <div className="tour-slim">
+        <span className="tour-slim-step"><Icon name="shield" size={13} />{done ? "Complete" : `Step ${index + 1} of ${total}`}</span>
+        <strong className="tour-slim-title">{done ? "That is the whole arc." : stop.title}</strong>
+        {done ? null : <span className="tour-slim-nav">
+          <button aria-label="Previous step" disabled={index === 0} onClick={props.onPrevious} type="button"><Icon name="back" size={15} /></button>
+          <button aria-label={last ? "Finish the walkthrough" : "Next step"} onClick={last ? props.onFinish : props.onNext} type="button"><Icon name={last ? "check" : "arrow"} size={15} /></button>
+        </span>}
+        <button className="tour-icon" onClick={() => props.onCollapse(false)} type="button"><Icon name="upload" size={14} />Expand</button>
       </div>
     </AdvisorOnly>
   </div>;
 
+  const tools = <span className="tour-tools">
+    {props.dockLocked ? null : <button className="tour-icon" onClick={() => props.onDock(props.dock === "side" ? "bottom" : "side")} type="button">
+      <Icon name={props.dock === "side" ? "download" : "back"} size={14} />{props.dock === "side" ? "Move to bottom" : "Move to side"}
+    </button>}
+    <button className="tour-icon" onClick={() => props.onCollapse(true)} type="button"><Icon name="download" size={14} />Collapse</button>
+  </span>;
+
   return <div className="tour-dock">
     <AdvisorOnly hidden={false} label="Advisor only · practice walkthrough, never shown to a client">
       <div className="tour-panel">
-        <header>
-          <div><p className="eyebrow">{stop.stage}</p><h2>{stop.title}</h2></div>
-          <button aria-expanded={listOpen} className="tour-count" onClick={() => setListOpen(!listOpen)} type="button">Step {index + 1} of {total}<Icon name="chevron" size={13} /></button>
+        {/* Pinned: the step, the title and the navigation stay reachable however long the body runs. */}
+        <header className="tour-head">
+          <div className="tour-head-top"><p className="eyebrow">{done ? "Practice walkthrough · complete" : stop.stage}</p>{tools}</div>
+          <h2>{done ? "That is the whole arc." : stop.title}</h2>
+          {done ? null : <>
+            <div className="tour-head-meter">
+              <button aria-expanded={listOpen} className="tour-count" onClick={() => setListOpen(!listOpen)} type="button">Step {index + 1} of {total}<Icon name="chevron" size={13} /></button>
+              <div className="tour-progress"><i style={{ width: `${((index + 1) / total) * 100}%` }} /></div>
+            </div>
+            <div className="tour-actions">
+              <Button disabled={index === 0} onClick={props.onPrevious} variant="secondary"><Icon name="back" size={16} />Previous</Button>
+              <Button icon={last ? "check" : "arrow"} onClick={last ? props.onFinish : props.onNext}>{last ? "Finish the walkthrough" : "Next"}</Button>
+            </div>
+          </>}
         </header>
-        <div className="tour-progress"><i style={{ width: `${((index + 1) / total) * 100}%` }} /></div>
-        {listOpen ? <ol className="tour-list">{practiceTour.map((item, position) => <li key={item.id}>
-          <button aria-current={position === index ? "step" : undefined} className={position === index ? "active" : position < index ? "done" : ""} onClick={() => { setListOpen(false); props.onJump(position); }} type="button">
-            <b>{position + 1}</b><span><strong>{item.title}</strong><small>{item.stage}</small></span>
-          </button>
-        </li>)}</ol> : null}
-        {!props.onScreen ? <p className="tour-note" role="status"><Icon name="info" size={15} />You have moved off this step. <button className="call-link" onClick={() => props.onJump(index)} type="button">Take me back to step {index + 1}</button>, or carry on looking around — the walkthrough will wait.</p> : null}
-        <div className="tour-body">
-          <section><p className="eyebrow">What you are looking at</p><p>{stop.looking}</p></section>
-          <section><p className="eyebrow">With a real client</p><p>{stop.real}</p></section>
-          <section><p className="eyebrow">Worth a look</p><ul>{stop.watch.map((line) => <li key={line}>{line}</li>)}</ul></section>
+        <div className="tour-scroll">
+          {listOpen ? <ol className="tour-list">{practiceTour.map((item, position) => <li key={item.id}>
+            <button aria-current={position === index ? "step" : undefined} className={position === index ? "active" : position < index ? "done" : ""} onClick={() => { setListOpen(false); props.onJump(position); }} type="button">
+              <b>{position + 1}</b><span><strong>{item.title}</strong><small>{item.stage}</small></span>
+            </button>
+          </li>)}</ol> : null}
+          {done ? <>
+            <p className="tour-lead">You have now seen every screen you will use with a real client — and nothing left this app without a second, deliberate press.</p>
+            <p className="tour-lead">Carry the shape, not the detail: one constraint, one smallest change, one number from the client’s own record, one name against it. If your first real call gets you a traced flow, a step everything waits at, and a name — the call worked.</p>
+            <p className="tour-note"><Icon name="info" size={15} />{PRACTICE_CLIENT} stays here as long as you want. Walk it again, reset it, or delete it — it can always be rebuilt exactly as it was.</p>
+            <div className="tour-actions">
+              <Button icon="refresh" onClick={props.onRestart} variant="secondary">Walk it again</Button>
+              <Button disabled={Boolean(props.busy)} onClick={props.onReset} variant="secondary">{props.busy === "reset" ? "Resetting…" : "Reset practice data"}</Button>
+              <Button icon="arrow" onClick={props.onLeave}>Leave practice mode</Button>
+            </div>
+            <button className="tour-remove" disabled={Boolean(props.busy)} onClick={props.onRemove} type="button">{props.busy === "remove" ? "Deleting…" : "Delete the practice engagement"}</button>
+          </> : <>
+            {!props.onScreen ? <p className="tour-note" role="status"><Icon name="info" size={15} />You have moved off this step. <button className="call-link" onClick={() => props.onJump(index)} type="button">Take me back</button>, or keep looking around — the walkthrough will wait.</p> : null}
+            <div className="tour-body">
+              <section><p className="eyebrow">On this screen</p><p>{stop.looking}</p></section>
+              <section><p className="eyebrow">With a real client</p><p>{stop.real}</p></section>
+              <section><p className="eyebrow">Worth a look</p><ul>{stop.watch.map((line) => <li key={line}>{line}</li>)}</ul></section>
+            </div>
+            <p className="tour-foot"><Icon name="info" size={13} />Wander anywhere — your place is saved. Collapse this to a bar when you want the screen to yourself.</p>
+          </>}
         </div>
-        <div className="tour-actions">
-          <Button disabled={index === 0} onClick={props.onPrevious} variant="secondary"><Icon name="back" size={16} />Previous</Button>
-          <Button icon={last ? "check" : "arrow"} onClick={last ? props.onFinish : props.onNext}>{last ? "Finish the walkthrough" : "Next"}</Button>
-        </div>
-        <footer className="tour-foot">
-          <button onClick={props.onExplore} type="button"><Icon name="search" size={13} />Explore on my own</button>
-          <small>You can wander anywhere. This panel keeps your place and waits for you.</small>
-        </footer>
       </div>
     </AdvisorOnly>
   </div>;
@@ -3137,15 +3213,6 @@ function IntegrationCenter({ onBack }: { onBack: () => void }) {
   </section>;
 }
 
-/** Which live integration ids can be verified, and the provider name POST /api/settings/test expects for each. */
-const TESTABLE_PROVIDERS: Partial<Record<string, SettingsTestProvider>> = {
-  openai: "openai",
-  resend: "resend",
-  google_sheets: "google_sheets",
-  google_drive_docs: "google_docs",
-  fireflies: "fireflies",
-};
-
 /** Reads a test result into a tone and label. ok → pass, not-configured → not set up, anything else → fail. */
 function testResultView(result: SettingsTestResult | undefined): { tone: Tone; label: string } | null {
   if (!result) return null;
@@ -3156,17 +3223,77 @@ function testResultView(result: SettingsTestResult | undefined): { tone: Tone; l
 
 type SettingsTestState = { running: boolean; result?: SettingsTestResult; error?: string };
 
-/** One selectable, copyable shell command. The command is always visible, so a manual copy works even without clipboard access. */
-function CopyLine({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false);
-  return <div className="copy-line">
-    <code>{text}</code>
-    <button aria-label={`Copy command: ${text}`} className="copy-button" onClick={() => {
-      if (typeof navigator.clipboard?.writeText !== "function") return;
-      navigator.clipboard.writeText(text).then(() => { setCopied(true); window.setTimeout(() => setCopied(false), 1600); }).catch(() => setCopied(false));
-    }} type="button">{copied ? <><Icon name="check" size={13} />Copied</> : <><Icon name="document" size={13} />Copy</>}</button>
-  </div>;
+/** Plain-language description of one savable credential. `secret` decides password-vs-text input. */
+type CredentialFieldMeta = { label: string; secret: boolean; placeholder: string; note?: string };
+
+/**
+ * Every field /api/settings/keys accepts, in plain words. The server's response is still the
+ * source of truth for which fields exist — anything it returns that is missing here falls back
+ * to `fallbackFieldMeta`, so a server-side addition shows up rather than disappearing.
+ */
+const CREDENTIAL_FIELDS: Record<string, CredentialFieldMeta> = {
+  OPENAI_API_KEY: { label: "OpenAI API key", secret: true, placeholder: "sk-…" },
+  OPENAI_RESEARCH_MODEL: { label: "Research model", secret: false, placeholder: "gpt-4.1", note: "Optional. Leave empty to use the server's default model." },
+  OPENAI_TRANSCRIPT_MODEL: { label: "Transcript model", secret: false, placeholder: "gpt-4.1-mini", note: "Optional. Leave empty to use the server's default model." },
+  FIREFLIES_API_KEY: { label: "Fireflies API key", secret: true, placeholder: "Paste your Fireflies key" },
+  RESEND_API_KEY: { label: "Resend API key", secret: true, placeholder: "re_…" },
+  EMAIL_FROM: { label: "Send from", secret: false, placeholder: "advisor@yourdomain.com", note: "Must be an address on a domain you have verified with Resend." },
+  EMAIL_REPLY_TO: { label: "Replies go to", secret: false, placeholder: "you@yourdomain.com", note: "Optional. Where a client's reply lands." },
+  GOOGLE_CLIENT_ID: { label: "Google client ID", secret: true, placeholder: "…apps.googleusercontent.com" },
+  GOOGLE_CLIENT_SECRET: { label: "Google client secret", secret: true, placeholder: "Paste the client secret" },
+  GOOGLE_REFRESH_TOKEN: { label: "Google refresh token", secret: true, placeholder: "Paste the refresh token" },
+};
+
+/** A readable label and a safe default for a field the server knows about but this build does not. */
+function fallbackFieldMeta(field: string): CredentialFieldMeta {
+  const label = field.toLowerCase().replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
+  return { label, secret: /KEY|SECRET|TOKEN|PASSWORD/.test(field), placeholder: `Paste the ${label.toLowerCase()}` };
 }
+
+function fieldMeta(field: string): CredentialFieldMeta {
+  return CREDENTIAL_FIELDS[field] ?? fallbackFieldMeta(field);
+}
+
+/** One provider's box: what its keys unlock, where to get them, its fields, and its tests. */
+type CredentialGroup = {
+  id: string; name: string; icon: IconName; unlocks: string; where: string;
+  fields: string[]; tests: Array<{ provider: SettingsTestProvider; label: string }>;
+};
+
+const CREDENTIAL_GROUPS: CredentialGroup[] = [
+  {
+    id: "openai", name: "OpenAI", icon: "spark",
+    unlocks: "Web research on the recon brief, and model-assisted reading of a call transcript. Without a key both still run, just on the plain deterministic path.",
+    where: "Go to platform.openai.com, open API keys, and create a new secret key. It begins with sk- and is only shown to you once.",
+    fields: ["OPENAI_API_KEY", "OPENAI_RESEARCH_MODEL", "OPENAI_TRANSCRIPT_MODEL"],
+    tests: [{ provider: "openai", label: "Test" }],
+  },
+  {
+    id: "fireflies", name: "Fireflies", icon: "mic",
+    unlocks: "Pulling a recorded call transcript straight into the audit instead of pasting it in by hand.",
+    where: "Go to app.fireflies.ai, open Settings, then Developer settings, and copy the API key.",
+    fields: ["FIREFLIES_API_KEY"],
+    tests: [{ provider: "fireflies", label: "Test" }],
+  },
+  {
+    id: "resend", name: "Email (Resend)", icon: "mail",
+    unlocks: "Sending an approved readiness brief by email. Every send still needs your explicit approval first.",
+    where: "Go to resend.com, open API Keys, and create one. The two addresses below must be on a domain you have verified with Resend.",
+    fields: ["RESEND_API_KEY", "EMAIL_FROM", "EMAIL_REPLY_TO"],
+    tests: [{ provider: "resend", label: "Test" }],
+  },
+  {
+    id: "google", name: "Google Sheets & Drive", icon: "folder",
+    unlocks: "Writing engagement rows into your Google Sheet CRM, and filing generated documents in your Drive folder.",
+    where: "Go to console.cloud.google.com, open APIs & Services then Credentials, and create an OAuth client to get the ID and secret. The refresh token comes from the one-time Google consent step.",
+    fields: ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REFRESH_TOKEN"],
+    tests: [{ provider: "google_sheets", label: "Test CRM sheet" }, { provider: "google_docs", label: "Test Drive & Docs" }],
+  },
+];
+
+/** Per-field UI state. `busy` is the in-flight guard: while it is set, Save and Clear are both disabled. */
+type CredentialFieldState = { busy: "save" | "clear" | null; saved: boolean; error: string; reveal: boolean; confirmClear: boolean };
+const EMPTY_FIELD_STATE: CredentialFieldState = { busy: null, saved: false, error: "", reveal: false, confirmClear: false };
 
 /** The pass / not set up / fail line under a Test button. `detail` is shown verbatim — the server promises it never carries a secret. */
 function TestOutcome({ test }: { test: SettingsTestState | undefined }) {
@@ -3180,15 +3307,20 @@ function TestOutcome({ test }: { test: SettingsTestState | undefined }) {
 
 /**
  * The advisor-only Settings screen. Two sections:
- *  1. API keys — live status, what each unlocks, the required env-var NAMES, the exact
- *     `wrangler secret put` command, and a Test button. No key is ever entered or displayed.
+ *  1. API keys — one real input per credential. You paste a key, press Save, and the server
+ *     stores it encrypted. A saved key is never sent back: only a masked tail (`hint`) is.
+ *     A field held in the deployment environment is shown as server-managed and has no input,
+ *     because saving over it would silently do nothing.
  *  2. My connections — the non-secret, per-advisor connection settings behind GET/PUT /api/settings.
  * Reachable only from the top nav, which is hidden on the client-facing call and presentation views.
  */
 function SettingsScreen({ onBack, onIntegrations }: { onBack: () => void; onIntegrations: () => void }) {
-  const [integrations, setIntegrations] = useState<IntegrationItem[]>([]);
-  const [integrationsLoading, setIntegrationsLoading] = useState(true);
-  const [integrationsError, setIntegrationsError] = useState("");
+  const [credentials, setCredentials] = useState<CredentialState[] | null>(null);
+  const [encryptionMode, setEncryptionMode] = useState<CredentialsPayload["encryptionMode"] | null>(null);
+  const [keysLoading, setKeysLoading] = useState(true);
+  const [keysError, setKeysError] = useState("");
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [fieldStates, setFieldStates] = useState<Record<string, CredentialFieldState>>({});
   const [tests, setTests] = useState<Partial<Record<SettingsTestProvider, SettingsTestState>>>({});
 
   const [settings, setSettings] = useState<AdvisorSettings | null>(null);
@@ -3203,10 +3335,14 @@ function SettingsScreen({ onBack, onIntegrations }: { onBack: () => void; onInte
 
   useEffect(() => {
     let active = true;
-    api<{ integrations: IntegrationItem[] }>("/api/integrations")
-      .then((result) => { if (active) setIntegrations(result.integrations ?? []); })
-      .catch((reason: Error) => { if (active) { setIntegrations([]); setIntegrationsError(`Integration status could not be read: ${reason.message}`); } })
-      .finally(() => { if (active) setIntegrationsLoading(false); });
+    api<CredentialsPayload>("/api/settings/keys")
+      .then((result) => {
+        if (!active) return;
+        setCredentials(result.credentials ?? []);
+        setEncryptionMode(result.encryptionMode ?? null);
+      })
+      .catch((reason: Error) => { if (active) { setCredentials(null); setKeysError(`Your saved keys could not be read: ${reason.message}`); } })
+      .finally(() => { if (active) setKeysLoading(false); });
     return () => { active = false; };
   }, []);
 
@@ -3226,6 +3362,50 @@ function SettingsScreen({ onBack, onIntegrations }: { onBack: () => void; onInte
       .finally(() => { if (active) setSettingsLoading(false); });
     return () => { active = false; };
   }, []);
+
+  function fieldState(field: string): CredentialFieldState {
+    return fieldStates[field] ?? EMPTY_FIELD_STATE;
+  }
+
+  function patchField(field: string, patch: Partial<CredentialFieldState>) {
+    setFieldStates((prev) => ({ ...prev, [field]: { ...(prev[field] ?? EMPTY_FIELD_STATE), ...patch } }));
+  }
+
+  /**
+   * Saves one credential. Guarded against double-submit: while `busy` is set, this field's
+   * Save and Clear are both disabled and a second call returns immediately. The typed value is
+   * dropped from state as soon as the server confirms, so no plaintext key survives the save.
+   */
+  async function saveField(field: string) {
+    if (fieldState(field).busy) return;
+    const value = (drafts[field] ?? "").trim();
+    if (!value) return;
+    patchField(field, { busy: "save", error: "", saved: false, confirmClear: false });
+    try {
+      const result = await api<CredentialsPayload>("/api/settings/keys", { method: "PUT", body: JSON.stringify({ field, value }) });
+      setCredentials(result.credentials ?? []);
+      setEncryptionMode(result.encryptionMode ?? null);
+      setDrafts((prev) => ({ ...prev, [field]: "" }));
+      patchField(field, { busy: null, saved: true, error: "", reveal: false });
+    } catch (reason) {
+      patchField(field, { busy: null, saved: false, error: `Not saved: ${reason instanceof Error ? reason.message : "unknown request failure"}` });
+    }
+  }
+
+  /** Removes a credential saved in the app. Same in-flight guard as `saveField`. */
+  async function clearField(field: string) {
+    if (fieldState(field).busy) return;
+    patchField(field, { busy: "clear", error: "", saved: false });
+    try {
+      const result = await api<CredentialsPayload>("/api/settings/keys", { method: "DELETE", body: JSON.stringify({ field }) });
+      setCredentials(result.credentials ?? []);
+      setEncryptionMode(result.encryptionMode ?? null);
+      setDrafts((prev) => ({ ...prev, [field]: "" }));
+      patchField(field, { busy: null, saved: false, error: "", reveal: false, confirmClear: false });
+    } catch (reason) {
+      patchField(field, { busy: null, confirmClear: false, error: `Not cleared: ${reason instanceof Error ? reason.message : "unknown request failure"}` });
+    }
+  }
 
   /** Guarded against double-submit: a second click while a provider is in flight is ignored. */
   async function runTest(provider: SettingsTestProvider) {
@@ -3275,43 +3455,104 @@ function SettingsScreen({ onBack, onIntegrations }: { onBack: () => void; onInte
     : dirty ? "Unsaved changes" : "Up to date";
   const sheetsTest = tests.google_sheets;
 
+  // The server's list decides which fields exist; the local catalog only supplies wording and order.
+  // Anything the server returns that this build does not recognise still gets a row, in a trailing group.
+  const credentialByField = new Map((credentials ?? []).map((item) => [item.field, item]));
+  const catalogued = new Set(CREDENTIAL_GROUPS.flatMap((group) => group.fields));
+  const unrecognised = (credentials ?? []).filter((item) => !catalogued.has(item.field)).map((item) => item.field);
+  const groups: CredentialGroup[] = [
+    ...CREDENTIAL_GROUPS
+      .map((group) => ({ ...group, fields: group.fields.filter((field) => credentialByField.has(field)) }))
+      .filter((group) => group.fields.length > 0),
+    ...(unrecognised.length ? [{
+      id: "other", name: "Other credentials", icon: "integration" as IconName,
+      unlocks: "The server accepts these as well.",
+      where: "Check with whoever set this deployment up for where each value comes from.",
+      fields: unrecognised, tests: [],
+    }] : []),
+  ];
+
   return <section className="guided wide settings"><Back onClick={onBack}>Start</Back>
-    <PageHead eyebrow="Advisor setup" side={<Button icon="integration" onClick={onIntegrations} variant="secondary">Integration Center</Button>} title="Settings">Two things live here: the API keys your server holds (status and a test, never the key itself), and the connections stored against your advisor account. This screen is advisor-only and is not reachable from a client call.</PageHead>
+    <PageHead eyebrow="Advisor setup" side={<Button icon="integration" onClick={onIntegrations} variant="secondary">Integration Center</Button>} title="Settings">Two things live here: the API keys the app uses, which you paste in and save below, and the connections stored against your advisor account. This screen is advisor-only and is not reachable from a client call.</PageHead>
 
-    <div className="settings-keys-banner"><Icon name="lock" size={20} /><div><strong>API keys are server secrets — you never type one here.</strong><p>Keys are set on the server with <code>wrangler secret put</code> and are never sent to the browser or written to the database. This screen shows only whether each key is present and lets you test it.</p></div></div>
+    <div className="settings-keys-banner"><Icon name="lock" size={20} /><div>
+      <strong>Paste a key, press Save. It is stored encrypted in your database.</strong>
+      <p>That is deliberate so you can get set up and test in minutes. It is still weaker than holding a key in the deployment environment itself, so before you run this for real, move these keys to server secrets. A key set on the server always wins over one saved here.</p>
+      {encryptionMode === "generated-key" ? <p className="settings-keys-extra"><Icon name="info" size={14} />The encryption key was generated for you automatically and is stored alongside the data, so anyone who can read the database can read both. Setting <code>APP_ENCRYPTION_KEY</code> in the deployment environment is the stronger option.</p> : null}
+    </div></div>
 
-    <div className="settings-section"><header className="settings-section-head"><p className="eyebrow">Section 1 · API keys</p><h2>Status &amp; test — no key entry</h2><p>Read live from the server. For each provider you can see what it unlocks, the exact command to set its secret, and — where supported — a test that reports pass, not set up, or fail.</p></header>
-      {integrationsLoading ? <p className="registry-empty" role="status">Reading connector status…</p> : null}
-      {integrationsError ? <p className="ops-error" role="alert"><Icon name="info" size={15} />{integrationsError}</p> : null}
-      {!integrationsLoading && !integrationsError && integrations.length === 0 ? <p className="registry-empty">The server returned no integrations.</p> : null}
-      <div className="settings-providers">{integrations.map((item) => {
-        const provider = TESTABLE_PROVIDERS[item.id];
-        const test = provider ? tests[provider] : undefined;
-        return <article className="settings-provider" key={item.id}>
-          <span className="settings-provider-icon"><Icon name={modeIcon(item.mode)} size={21} /></span>
-          <div className="settings-provider-body">
-            <header><h3>{item.name}</h3><Pill tone={statusTone[item.status] ?? "neutral"}>{item.status.replace(/_/g, " ")}</Pill>{item.model ? <Pill tone="inferred">{item.model}</Pill> : null}</header>
-            <p className="settings-provider-unlocks">{item.setup || `Unlocks the ${(item.mode || "declared").replace(/_/g, " ")} mode.`}</p>
-            {item.environmentVariables?.length ? <div className="settings-secret">
-              <p className="settings-secret-lead"><Icon name="lock" size={14} />Required env var names — set each as a server secret. This keeps the key out of the database and out of this browser.</p>
-              <div className="copy-lines">{item.environmentVariables.map((name) => <CopyLine key={name} text={`wrangler secret put ${name}`} />)}</div>
-            </div> : <p className="settings-nokeys"><Icon name="check" size={14} />No credential is required for this provider.</p>}
-            {provider ? <div className="settings-test">
-              <Button disabled={Boolean(test?.running)} icon="refresh" onClick={() => runTest(provider)} variant="secondary">{test?.running ? "Testing…" : "Test"}</Button>
+    <div className="settings-section"><header className="settings-section-head"><p className="eyebrow">Section 1 · API keys</p><h2>Paste your keys and save them</h2><p>One box per provider. Each shows whether a value is saved, what it unlocks, and where to get it. A saved key is never shown back to you — only its last few characters, so you can tell which one is in there. The plain settings mixed in below (addresses, model names) are not secrets and are stored as typed.</p></header>
+      {keysLoading ? <p className="registry-empty" role="status">Reading your saved keys…</p> : null}
+      {keysError ? <p className="ops-error" role="alert"><Icon name="info" size={15} />{keysError}</p> : null}
+      {!keysLoading && !keysError && groups.length === 0 ? <p className="registry-empty">The server returned no credential fields.</p> : null}
+      <div className="settings-providers">{groups.map((group) => <article className="settings-provider" key={group.id}>
+        <span className="settings-provider-icon"><Icon name={group.icon} size={21} /></span>
+        <div className="settings-provider-body">
+          <header><h3>{group.name}</h3></header>
+          <p className="settings-provider-unlocks">{group.unlocks}</p>
+          <p className="cred-where"><Icon name="search" size={14} /><span>Where to get it: {group.where}</span></p>
+          <div className="cred-fields">{group.fields.map((field) => {
+            const meta = fieldMeta(field);
+            const credential = credentialByField.get(field);
+            const state = fieldState(field);
+            const draft = drafts[field] ?? "";
+            const managed = credential?.source === "server-secret";
+            const savedInApp = credential?.set === true && credential.source === "saved-in-app";
+            const busy = state.busy !== null;
+            const inputId = `credential-${field}`;
+            return <div className="cred-field" key={field}>
+              <div className="cred-field-head">
+                <label htmlFor={inputId}><span>{meta.label}</span></label>
+                {managed ? <Pill tone="known">Set on the server</Pill> : savedInApp ? <Pill tone="success">Saved</Pill> : <Pill tone="neutral">Not set</Pill>}
+                {savedInApp && credential?.hint ? <span className="cred-hint">{meta.secret ? `ends in ${credential.hint.replace(/^…/, "")}` : credential.hint}</span> : null}
+                <code className="cred-name">{field}</code>
+              </div>
+              {managed
+                ? <p className="cred-managed"><Icon name="lock" size={14} /><span>This one is already set in the deployment environment, so there is nothing to paste. A key set on the server takes priority over anything saved in the app — saving one here would have no effect.</span></p>
+                : <>
+                  <div className="cred-row">
+                    <div className="cred-input">
+                      <input autoCapitalize="none" autoComplete="off" disabled={busy} id={inputId}
+                        onChange={(event) => {
+                          const next = event.target.value;
+                          setDrafts((prev) => ({ ...prev, [field]: next }));
+                          if (state.saved || state.error) patchField(field, { saved: false, error: "" });
+                        }}
+                        placeholder={savedInApp ? "Paste a new value to replace the saved one" : meta.placeholder}
+                        spellCheck={false} type={meta.secret && !state.reveal ? "password" : "text"} value={draft} />
+                      {meta.secret ? <button aria-label={state.reveal ? `Hide ${meta.label}` : `Show ${meta.label}`} aria-pressed={state.reveal} className="cred-reveal" disabled={busy} onClick={() => patchField(field, { reveal: !state.reveal })} type="button">{state.reveal ? "Hide" : "Show"}</button> : null}
+                    </div>
+                    <Button disabled={busy || draft.trim() === ""} icon="check" onClick={() => saveField(field)}>{state.busy === "save" ? "Saving…" : "Save"}</Button>
+                    {savedInApp ? state.confirmClear
+                      ? <><Button disabled={busy} icon="close" onClick={() => clearField(field)} variant="secondary">{state.busy === "clear" ? "Clearing…" : "Confirm clear"}</Button><Button disabled={busy} onClick={() => patchField(field, { confirmClear: false })} variant="quiet">Cancel</Button></>
+                      : <Button disabled={busy} onClick={() => patchField(field, { confirmClear: true })} variant="quiet">Clear</Button>
+                    : null}
+                  </div>
+                  {meta.note ? <small className="cred-note">{meta.note}</small> : null}
+                  {state.saved ? <p className="cred-feedback" role="status"><Icon name="check" size={14} />{meta.secret ? "Saved. It is stored encrypted and will not be shown back to you." : "Saved."}</p> : null}
+                  {state.error ? <p className="upload-state error" role="alert"><Icon name="info" size={15} />{state.error}</p> : null}
+                </>}
+            </div>;
+          })}</div>
+          {group.tests.map((entry) => {
+            const test = tests[entry.provider];
+            return <div className="settings-test" key={entry.provider}>
+              <Button disabled={Boolean(test?.running)} icon="refresh" onClick={() => runTest(entry.provider)} variant="secondary">{test?.running ? "Testing…" : entry.label}</Button>
+              <small>Checks the key the app would actually use. Save first, then test.</small>
               <TestOutcome test={test} />
-            </div> : null}
-          </div>
-        </article>;
-      })}</div>
+            </div>;
+          })}
+        </div>
+      </article>)}</div>
     </div>
 
-    <div className="settings-section"><header className="settings-section-head"><p className="eyebrow">Section 2 · My connections</p><h2>Stored against your advisor account</h2><p>Non-secret connection settings only. None of these fields is a key — they are saved to your account and can be changed at any time.</p></header>
+    <div className="settings-section"><header className="settings-section-head"><p className="eyebrow">Section 2 · My connections</p><h2>Stored against your advisor account</h2><p>Where your work is written, not how the app authenticates. None of these fields is a key — the keys are in Section 1 above. These are saved to your account and can be changed at any time.</p></header>
       {settingsLoading ? <p className="registry-empty" role="status">Reading your connection settings…</p> : null}
       {settingsError ? <p className="ops-error" role="alert"><Icon name="info" size={15} />{settingsError}</p> : null}
       {!settingsLoading && !settingsError ? <form className="panel settings-connections" onSubmit={saveConnections}>
         <div className="settings-crm">
           <h3>Connect your CRM — bring your own Google Sheet</h3>
-          <p className="settings-sub">The app writes engagement rows through the Google identity configured on the server. You share a sheet with it and paste the link here — you never paste a key.</p>
+          <p className="settings-sub">The app writes engagement rows through the Google identity configured on the server. You share a sheet with it and paste the link here — this field is the sheet, not a key.</p>
           <ol className="settings-guide">
             <li><span>1</span><div><strong>Download the CRM template</strong><p>Start from the exact columns the app writes back.</p><a className="button secondary settings-download" download href="/api/crm-template">Download CRM template<Icon name="download" size={15} /></a></div></li>
             <li><span>2</span><div><strong>Import it into Google Sheets</strong><p>In Sheets, File → Import → Upload, and keep it as a new spreadsheet.</p></div></li>
@@ -3333,12 +3574,12 @@ function SettingsScreen({ onBack, onIntegrations }: { onBack: () => void; onInte
           <label className="field-note"><span>Drive folder id <small>Optional</small></span><input autoCapitalize="none" onChange={(e) => setFolder(e.target.value)} placeholder="Google Drive folder id" spellCheck={false} value={folder} /><small>Where generated Google Docs are filed.</small></label>
           <label className="field-note"><span>From name <small>Optional</small></span><input onChange={(e) => setFromName(e.target.value)} placeholder="Tier 4 Advisors" value={fromName} /><small>The display name on outgoing email.</small></label>
         </div>
-        <p className="settings-nosecret"><Icon name="lock" size={15} />These are the only editable fields, and not one of them is a secret. Set API keys with the <code>wrangler secret put</code> commands in Section 1.</p>
+        <p className="settings-nosecret"><Icon name="lock" size={15} />Nothing on this section is a key — these are just pointers to your sheet, folder and sender name. API keys go in Section 1.</p>
         {saveError ? <p className="upload-state error" role="alert"><Icon name="info" size={15} />{saveError}</p> : null}
         <div className="action-row"><p aria-live="polite" className={`settings-save-state ${saveState}`}>{saveLabel}</p><Button disabled={saveState === "saving" || settingsLoading} icon="check" type="submit">{saveState === "saving" ? "Saving…" : "Save connections"}</Button></div>
       </form> : null}
     </div>
 
-    <div className="security"><Icon name="lock" size={18} /><div><strong>Authorization boundary</strong><p>No secret is ever entered or displayed here. External writes, connector imports, paid enrichment, and customer sends still require explicit review and approval.</p></div></div>
+    <div className="security"><Icon name="lock" size={18} /><div><strong>Authorization boundary</strong><p>A key you save here is stored encrypted and is never displayed again — only its last few characters. External writes, connector imports, paid enrichment, and customer sends still require explicit review and approval.</p></div></div>
   </section>;
 }

@@ -334,8 +334,8 @@ It contains:
 The entry screen supports:
 
 1. Fresh engagement.
-2. External migration.
-3. Update an existing engagement.
+2. Bring in existing work (external migration).
+3. Continue an existing engagement.
 
 The interface emits reviewed write-back intents. Since the Google Sheets adapter shipped, an approved `crm_write_back` intent is executed by the application's own trusted server runtime, which appends or updates the matched row. The browser still never holds a Google credential and never writes to Sheets itself, and creating the intent remains a separate decision from approving it.
 

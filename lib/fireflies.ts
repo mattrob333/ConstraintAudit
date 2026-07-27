@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import type { Credentials } from "./secrets";
 import type { TranscriptLine } from "./workflow";
 
 const FIREFLIES_URL = "https://api.fireflies.ai/graphql";
@@ -20,12 +21,21 @@ interface FirefliesTranscript {
   sentences?: FirefliesSentence[];
 }
 
-export function firefliesConfigured(): boolean {
+/** With credentials the resolver owns precedence (server secret wins); without, env only. */
+function apiKey(credentials?: Credentials): string {
+  if (credentials) return credentials.get("FIREFLIES_API_KEY").trim();
   const bindings = env as unknown as Record<string, unknown>;
-  return typeof bindings.FIREFLIES_API_KEY === "string" && bindings.FIREFLIES_API_KEY.trim().length > 0;
+  return typeof bindings.FIREFLIES_API_KEY === "string" ? bindings.FIREFLIES_API_KEY.trim() : "";
 }
 
-export async function fetchFirefliesTranscript(transcriptId: string): Promise<{
+export function firefliesConfigured(credentials?: Credentials): boolean {
+  return apiKey(credentials).length > 0;
+}
+
+export async function fetchFirefliesTranscript(
+  transcriptId: string,
+  credentials?: Credentials,
+): Promise<{
   id: string;
   title: string;
   transcriptUrl: string;
@@ -34,8 +44,7 @@ export async function fetchFirefliesTranscript(transcriptId: string): Promise<{
   retrievedAt: string;
   lines: TranscriptLine[];
 }> {
-  const bindings = env as unknown as Record<string, unknown>;
-  const key = typeof bindings.FIREFLIES_API_KEY === "string" ? bindings.FIREFLIES_API_KEY.trim() : "";
+  const key = apiKey(credentials);
   if (!key) throw new Error("Fireflies is not configured. Connect it securely before importing.");
   if (!transcriptId.trim()) throw new Error("transcriptId is required");
   const query = `query Transcript($transcriptId: String!) {

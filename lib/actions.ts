@@ -28,6 +28,7 @@ import { HttpError } from "./http";
 import { resolveMetricDirection } from "./metric-direction";
 import { createDocument, appendOrUpdateRow, sendEmail, type CellValue } from "./integrations";
 import { researchPublicWebsite } from "./research";
+import { resolveCredentials, type Credentials } from "./secrets";
 import { CRM_COLUMNS, CRM_MATCH_KEY, DEFAULT_CRM_SHEET_TAB, getSettings } from "./settings";
 import { enrichResearchWithOpenAI } from "./openai-research";
 import {
@@ -105,7 +106,13 @@ export async function runResearch(id: string, principal: Principal, sourceUrl?: 
   const url = sourceUrl?.trim() || engagement.website;
   if (!url) throw new Error("website or sourceUrl is required");
   const websiteResearch = await researchPublicWebsite(url, engagement.client);
-  const synthesis = await enrichResearchWithOpenAI(websiteResearch, engagement.client);
+  const credentials = await resolveCredentials(principal.ownerId);
+  const synthesis = await enrichResearchWithOpenAI(
+    websiteResearch,
+    engagement.client,
+    fetch,
+    credentials,
+  );
   const canonicalUrl = synthesis.sourceUrl;
   const sourceCandidates = [
     {
@@ -253,6 +260,8 @@ export async function processTranscript(
     consentAttestation?: ConsentAttestation;
     sourceData?: unknown;
   },
+  /** Supplied by callers that already resolved them (Fireflies import); resolved here otherwise. */
+  credentials?: Credentials,
 ) {
   let engagement = await requireEngagement(id, principal.ownerId);
   if (input.callNumber !== 1 && input.callNumber !== 2) throw new Error("callNumber must be 1 or 2");
@@ -300,17 +309,22 @@ export async function processTranscript(
   // The model reads the call with the full business context, then every claim it makes is
   // checked back against the real transcript lines. Anything it cannot ground is discarded
   // and recorded. With no key, or on any failure, the deterministic reading stands.
-  const synthesis = await synthesizeTranscriptWithOpenAI(deterministic, {
-    lines: parseTranscriptText(rawText, input.speakerRoles),
-    client: engagement.client,
-    callNumber: input.callNumber,
-    transcriptUrl: input.sourceUrl,
-    research: engagement.data.research,
-    canvas: engagement.data.canvas,
-    valueFlow,
-    questions: engagement.data.research?.discoveryQuestions,
-    priorSynthesis: engagement.data.transcriptSynthesis,
-  });
+  const synthesis = await synthesizeTranscriptWithOpenAI(
+    deterministic,
+    {
+      lines: parseTranscriptText(rawText, input.speakerRoles),
+      client: engagement.client,
+      callNumber: input.callNumber,
+      transcriptUrl: input.sourceUrl,
+      research: engagement.data.research,
+      canvas: engagement.data.canvas,
+      valueFlow,
+      questions: engagement.data.research?.discoveryQuestions,
+      priorSynthesis: engagement.data.transcriptSynthesis,
+    },
+    fetch,
+    credentials ?? await resolveCredentials(principal.ownerId),
+  );
   // Client words correct the canonical Canvas; research claims are superseded, never deleted.
   const canvas = applyCanvasUpdates(
     engagement.data.canvas as Record<CanvasBlock, EvidenceClaim[]> | undefined,
@@ -410,7 +424,9 @@ export async function importFireflies(
     speakerRoles?: Record<string, "client" | "advisor" | "unknown">;
   },
 ) {
-  const fetched = await fetchFirefliesTranscript(input.transcriptId);
+  // One lookup covers both the Fireflies read and the transcript synthesis that follows.
+  const credentials = await resolveCredentials(principal.ownerId);
+  const fetched = await fetchFirefliesTranscript(input.transcriptId, credentials);
   return processTranscript(id, principal, {
     callNumber: input.callNumber,
     rawText: fetched.rawText,
@@ -425,7 +441,7 @@ export async function importFireflies(
       retrievedAt: fetched.retrievedAt,
       speakerConfidence: "unknown",
     },
-  });
+  }, credentials);
 }
 
 export async function updateFinding(
@@ -783,6 +799,10 @@ export async function reviewIntent(
     throw new Error(`Execution requires an approved intent (current: ${status}).`);
   }
 
+  // Resolved before the claim: approve and reject never look a credential up, and a lookup
+  // failure here leaves the intent approved rather than stranded in `executing`.
+  const credentials = await resolveCredentials(principal.ownerId);
+
   // Claim the intent before doing the external write: an atomic approved -> executing swap.
   // Only one concurrent request wins, so a double-click or retry cannot send two emails or
   // create two Google Docs from a single approval.
@@ -791,7 +811,7 @@ export async function reviewIntent(
     throw new Error(`This intent is already being processed or is no longer approved (current: ${String(claim.status)}).`);
   }
 
-  const result = await executeIntent(type, intentId, payload);
+  const result = await executeIntent(type, intentId, payload, credentials);
   // "not-configured" means nothing was attempted, so the approval survives and the same
   // intent can be executed again once the credential exists. A genuine failure stays
   // failed and needs a fresh approval, because we cannot know whether the write landed.
@@ -814,6 +834,7 @@ async function executeIntent(
   type: string,
   intentId: string,
   payload: Record<string, unknown>,
+  credentials: Credentials,
 ) {
   const str = (key: string): string => typeof payload[key] === "string" ? payload[key] as string : "";
   if (type === "readiness_brief_send") {
@@ -822,6 +843,7 @@ async function executeIntent(
       subject: str("subject"),
       markdownBody: str("body"),
       idempotencyKey: intentId,
+      credentials,
     });
   }
   if (type === "crm_write_back") {
@@ -833,6 +855,7 @@ async function executeIntent(
       matchKey: str("matchKey") || CRM_MATCH_KEY,
       row: (payload.row ?? {}) as Record<string, CellValue>,
       idempotencyKey: intentId,
+      credentials,
     });
   }
   if (type === "document_publish") {
@@ -854,6 +877,7 @@ async function executeIntent(
       markdown,
       html,
       folderId: str("folderId") || undefined,
+      credentials,
     });
   }
   throw new HttpError(400, `Unsupported intent type: ${type}`);
@@ -984,10 +1008,12 @@ export async function measureOutcome(
   const starting = engagement.data.baseline ?? sprint.startingMetric;
   // Which way is better is inferred from the metric itself, but the advisor's own
   // declaration always wins and the basis is recorded so the reasoning is visible.
-  const directionInference = await resolveMetricDirection(ending, {
-    constraintType: finding.constraintType,
-    advisorDeclared: input.improvedWhen,
-  });
+  const directionInference = await resolveMetricDirection(
+    ending,
+    { constraintType: finding.constraintType, advisorDeclared: input.improvedWhen },
+    fetch,
+    await resolveCredentials(principal.ownerId),
+  );
   const { delta, blockedReason: deltaBlockedReason } = computeMetricDelta(starting, ending, {
     baselineConfirmed: engagement.baselineStatus === "Confirmed",
     improvedWhen: directionInference.improvedWhen ?? undefined,
