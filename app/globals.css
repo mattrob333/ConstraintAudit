@@ -3819,3 +3819,290 @@ blockquote { margin: 0; }
 @media (max-width: 620px) {
   .client-add-row { grid-template-columns: 1fr; }
 }
+
+/* ---------------------------------------------------------------------------
+ * Letterhead (Settings section 3) and the omitted-deliverable note.
+ * Appended; nothing above is modified.
+ * ------------------------------------------------------------------------- */
+
+.settings-letterhead { display: grid; gap: 1.1rem; }
+
+.letterhead-logo {
+  display: grid;
+  gap: 0.75rem;
+  padding: 1rem 1.1rem;
+  border: 1px solid var(--line, #e2e2dd);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.015);
+}
+
+.letterhead-logo-copy strong { display: block; margin-bottom: 0.25rem; }
+.letterhead-logo-copy p { margin: 0; font-size: 0.88rem; opacity: 0.78; }
+
+.letterhead-logo-preview {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+  padding: 0.75rem 0.9rem;
+  border: 1px solid var(--line, #e2e2dd);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.letterhead-logo-preview img {
+  width: 150px;
+  max-width: 100%;
+  height: auto;
+  display: block;
+}
+
+.letterhead-logo-preview > div { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
+
+.letterhead-logo-empty {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0;
+  font-size: 0.88rem;
+  opacity: 0.78;
+}
+
+.letterhead-logo input[type="file"] { font: inherit; font-size: 0.9rem; max-width: 100%; }
+
+.deliver-omitted {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+  margin: 1rem 0 0;
+  padding: 0.85rem 1rem;
+  border: 1px dashed var(--line, #e2e2dd);
+  border-radius: 10px;
+  font-size: 0.9rem;
+  line-height: 1.55;
+  opacity: 0.85;
+}
+
+/* ===========================================================================
+ * THE ADVISOR'S JUDGMENT — the findings editor, the kill-condition test
+ * ======================================================================== */
+
+/* Findings: "Edit the finding". Collapsed by default; the model's reading is the start. */
+.finding-editor {
+  margin-bottom: 22px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  overflow: hidden;
+}
+.finding-editor.empty { padding: 16px 20px; }
+.finding-editor.empty small { color: var(--muted); font-size: .8rem; }
+.finding-editor-toggle {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px 18px;
+  width: 100%;
+  border: 0;
+  background: none;
+  padding: 15px 20px;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.finding-editor-toggle:hover { background: var(--soft); }
+.finding-editor-toggle > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  font-weight: 600;
+}
+.finding-editor-toggle small { color: var(--muted); font-size: .78rem; }
+.finding-editor-body {
+  display: grid;
+  gap: 16px;
+  border-top: 1px solid var(--line);
+  padding: 18px 20px 20px;
+}
+.finding-editor-body label { display: grid; gap: 7px; }
+.finding-editor-body label > span {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.finding-editor-note {
+  display: flex;
+  gap: 10px;
+  margin: 0;
+  border-left: 3px solid var(--forest);
+  background: var(--soft);
+  padding: 11px 14px;
+  color: var(--muted);
+  font-size: .82rem;
+}
+.finding-editor-body fieldset {
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 14px 16px 16px;
+}
+.finding-editor-body legend {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 7px;
+  color: var(--forest);
+  font-family: "JetBrains Mono", monospace;
+  font-size: .72rem;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+}
+.finding-editor-body fieldset > small { display: block; margin-bottom: 12px; color: var(--muted); font-size: .78rem; }
+.finding-editor-body fieldset .field-row { margin: 0 0 12px; }
+.finding-editor-body fieldset .field-row:last-of-type { margin-bottom: 0; }
+.kill-spec-state { display: block; margin-top: 10px; color: var(--muted); }
+
+/* The provenance chip. Small, permanent, and never removable by an edit. */
+.advisor-chip {
+  border: 1px solid var(--provisional);
+  border-radius: 999px;
+  background: #fdf6e3;
+  padding: 1px 9px;
+  color: #6b5312;
+  font-family: "JetBrains Mono", monospace;
+  font-size: .64rem;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  white-space: nowrap;
+}
+
+/* Evidence and appendix selection. Checkboxes only — never a text field over a quote. */
+.evidence-select ul,
+.appendix-editor ul {
+  display: grid;
+  gap: 9px;
+  max-height: 300px;
+  margin: 0 0 12px;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+.evidence-select li label,
+.appendix-editor li label {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper);
+  padding: 9px 12px;
+  cursor: pointer;
+}
+.evidence-select li span { display: grid; gap: 3px; font-size: .84rem; }
+.evidence-select li b {
+  color: var(--muted);
+  font-family: "JetBrains Mono", monospace;
+  font-size: .7rem;
+  font-weight: 500;
+}
+.appendix-editor li span { font-size: .84rem; }
+.evidence-select input[type="checkbox"],
+.appendix-editor input[type="checkbox"] { margin-top: 4px; }
+
+/* Findings: the approval gates, stated before the button is pressed rather than after. */
+.approval-blocks {
+  margin: 14px 0 16px;
+  border: 1px solid var(--provisional);
+  border-radius: 9px;
+  background: #fdf6e3;
+  padding: 12px 15px;
+}
+.approval-blocks ul { display: grid; gap: 7px; margin: 8px 0 0; padding: 0; list-style: none; }
+.approval-blocks li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 9px;
+  font-size: .84rem;
+}
+
+/* Measure: the kill-condition test. Compact, and never pre-answered. */
+.kill-block {
+  display: grid;
+  gap: 14px;
+  margin: 18px 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--paper);
+  padding: 15px 17px 17px;
+}
+.kill-condition {
+  margin: 0;
+  border-left: 3px solid var(--forest);
+  background: var(--surface);
+  padding: 11px 14px;
+  font-size: .88rem;
+}
+.kill-condition small { display: block; margin-top: 7px; color: var(--muted); font-size: .76rem; }
+.kill-business > p { margin: 0 0 11px; color: var(--muted); font-size: .82rem; }
+.kill-business b { color: var(--ink); }
+.kill-readings { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.kill-readings fieldset {
+  display: grid;
+  gap: 9px;
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface);
+  padding: 12px 14px 14px;
+}
+.kill-readings legend {
+  padding: 0 6px;
+  color: var(--forest);
+  font-family: "JetBrains Mono", monospace;
+  font-size: .68rem;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+}
+.kill-readings label { display: grid; gap: 5px; }
+.kill-readings label span { color: var(--muted); font-size: .76rem; }
+.kill-choices { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.kill-choices button {
+  display: grid;
+  gap: 5px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface);
+  padding: 11px 13px;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.kill-choices button:hover { border-color: var(--forest); }
+.kill-choices button.selected { border-color: var(--forest); background: var(--step); }
+.kill-choices strong { font-size: .88rem; }
+.kill-choices small { color: var(--muted); font-size: .75rem; line-height: 1.45; }
+.kill-block > .upload-state { margin: 0; }
+
+/* Catalog: the write-back is blocked while nobody has tested the condition. */
+.catalog-blocked {
+  display: grid;
+  gap: 11px;
+  justify-items: start;
+  margin-bottom: 20px;
+  border: 1px solid var(--provisional);
+  border-radius: 10px;
+  background: #fdf6e3;
+  padding: 15px 18px 17px;
+}
+.catalog-blocked p { margin: 0; font-size: .86rem; }
+.catalog-blocked em { color: var(--ink); }
+
+@media (max-width: 860px) {
+  .kill-readings,
+  .kill-choices { grid-template-columns: 1fr; }
+}

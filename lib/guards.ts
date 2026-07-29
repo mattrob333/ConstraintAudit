@@ -1,4 +1,5 @@
 import type { ClientRecord } from "./clients";
+import { baselineMetricIsBound } from "./workflow";
 import type {
   ConsentAttestation,
   ConstraintFinding,
@@ -56,19 +57,43 @@ export function requireApprovedReadinessArtifact(
   return artifact;
 }
 
+/** A constraint needs corroboration, not one line read twice. Same bar as the grounding layer. */
+const MIN_APPROVAL_QUOTES = 2;
+
+function quoteKey(quote: string): string {
+  return quote.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+/**
+ * The approval bar, matched to the grounding layer's own bar rather than sitting under it.
+ *
+ * One quote was enough here while `groundConstraint` required two distinct client lines, so a
+ * finding the evidence layer would never have built could still be approved once the advisor
+ * edited it — and a baseline reading `Missing` could be approved beside a `Confirmed`
+ * engagement column (audit F3/F4/F6). Both are now checked on the finding itself.
+ */
 export function requireDiagnosisApprovalEvidence(finding: ConstraintFinding): void {
   if (!finding.humanOwner.name.trim() || !finding.humanOwner.role.trim()) {
     throw new Error("Diagnosis approval requires a named human owner and role.");
   }
-  const evidence = finding.evidence.filter(
-    (item) =>
-      item.provenance === "client-stated" &&
-      item.quote.trim() &&
-      item.speaker.trim() &&
-      item.timestamp.trim(),
+  const distinct = new Set(
+    finding.evidence
+      .filter(
+        (item) =>
+          item.provenance === "client-stated" &&
+          item.quote.trim() &&
+          item.speaker.trim() &&
+          item.timestamp.trim(),
+      )
+      .map((item) => `${item.timestamp.trim()}|${quoteKey(item.quote)}`),
   );
-  if (evidence.length === 0) {
-    throw new Error("Diagnosis approval requires at least one client-stated quote with speaker and timestamp.");
+  if (distinct.size < MIN_APPROVAL_QUOTES) {
+    throw new Error(
+      `Diagnosis approval requires at least ${MIN_APPROVAL_QUOTES} distinct client-stated quotes with speaker and timestamp; this finding carries ${distinct.size}.`,
+    );
+  }
+  if (!baselineMetricIsBound(finding.baselineMetric)) {
+    throw new Error("Diagnosis approval requires a baseline metric bound to the constraint; this finding's baseline is Missing.");
   }
 }
 

@@ -1,6 +1,7 @@
 import {
   findingStatusFor,
   groundMetricSpans,
+  killConditionSpecFrom,
   metricCanConfirmBaseline,
   metricNameFor,
   selectBaselineMetric,
@@ -811,6 +812,20 @@ export function synthesizeTranscript(
         source: `${metric.speaker} at ${metric.timestamp}: ${metric.quote}`,
       }
     : { name: "", value: "", unit: "", period: "", source: "Missing" };
+  /**
+   * The testable form of the kill condition, derived only where every part of it is real.
+   * Word-by-word reading gives a metric and a threshold at best: nothing in a transcript
+   * parsed deterministically establishes how long the client agreed to watch the number for,
+   * and a window nobody agreed to is an invented commitment. So this resolves to null and the
+   * verbatim sentence carries the condition alone — written as the rule rather than as a
+   * constant, so a pass that can name a window flows straight through it.
+   */
+  const killConditionSpec = killConditionSpecFrom({
+    metric: metric?.label ?? "",
+    comparator: "does-not-move",
+    threshold: metric ? `no change from ${metric.value} ${metric.unit}`.trim() : "",
+    window: "",
+  });
   // Verification requires call 2, a confirmed baseline, AND that the baseline measures this
   // constraint; a conflict with call 1 blocks it. One rule, shared with the model path.
   const findingStatus = findingStatusFor({
@@ -855,6 +870,8 @@ export function synthesizeTranscript(
     humanOwner: owner,
     predictedNextConstraint: "Reassess after the intervention; do not infer the next constraint before measurement.",
     killCondition: `Client evidence or measurements show ${candidate.type} is not limiting throughput.`,
+    // The structured form of the same condition — present only when every part of it is real.
+    ...(killConditionSpec ? { killConditionSpec } : {}),
     // The readings this transcript also supports and this finding did not take.
     appendixItems: rivalAppendixItems(scored, winner),
   };

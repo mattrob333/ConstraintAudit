@@ -261,8 +261,14 @@ test("approved readiness send binding rejects regenerated or mismatched artifact
 });
 
 test("diagnosis approval requires client evidence and named owner", () => {
+  // Two client lines and a bound baseline: the same bar the grounding layer applies before it
+  // will build a constraint at all. One line used to be enough here, so a finding the evidence
+  // layer would have refused could still be approved (audit F3/F4/F6).
   const result = synthesizeTranscript(
-    "[00:10] Morgan: We process 20 bids each week and the queue waits for my approval.",
+    [
+      "[00:10] Morgan: We process 20 bids each week and the queue waits for my approval.",
+      "[00:41] Morgan: Every bid sits 6 days per bid before I get to it, and nothing moves while I am away.",
+    ].join("\n"),
     {
       client: "Acme",
       callNumber: 2,
@@ -271,6 +277,11 @@ test("diagnosis approval requires client evidence and named owner", () => {
     },
   );
   assert.ok(result.constraintCandidate);
+  assert.ok(
+    result.constraintCandidate.evidence.length >= 2,
+    "the fixture must carry the two distinct client lines the bar now requires",
+  );
+  assert.notEqual(result.constraintCandidate.baselineMetric.source, "Missing");
   assert.doesNotThrow(() => requireDiagnosisApprovalEvidence(result.constraintCandidate));
   assert.throws(
     () => requireDiagnosisApprovalEvidence({
@@ -278,6 +289,31 @@ test("diagnosis approval requires client evidence and named owner", () => {
       humanOwner: { name: "", role: "" },
     }),
     /named human owner/,
+  );
+  // One quote, or the same quote twice, is not corroboration.
+  assert.throws(
+    () => requireDiagnosisApprovalEvidence({
+      ...result.constraintCandidate,
+      evidence: result.constraintCandidate.evidence.slice(0, 1),
+    }),
+    /at least 2 distinct client-stated quotes/,
+  );
+  const duplicated = result.constraintCandidate.evidence[0];
+  assert.throws(
+    () => requireDiagnosisApprovalEvidence({
+      ...result.constraintCandidate,
+      evidence: [duplicated, { ...duplicated }],
+    }),
+    /at least 2 distinct client-stated quotes/,
+  );
+  // A baseline the grounding layer recorded as Missing cannot be approved beside a finding
+  // whose engagement column happens to read Confirmed.
+  assert.throws(
+    () => requireDiagnosisApprovalEvidence({
+      ...result.constraintCandidate,
+      baselineMetric: { name: "", value: "", unit: "", period: "", source: "Missing" },
+    }),
+    /baseline metric bound to the constraint/,
   );
 });
 

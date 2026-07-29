@@ -1,5 +1,3 @@
-import { env } from "cloudflare:workers";
-import { openAIResearchModel } from "./openai-research";
 import {
   EVIDENCE_ROLES,
   findingStatusFor,
@@ -14,6 +12,7 @@ import {
 import type { Credentials } from "./secrets";
 import { baselineStatusFor } from "./transcript";
 import {
+  KILL_COMPARATORS,
   makeId,
   type CanvasUpdate,
   type ConstraintFinding,
@@ -57,24 +56,28 @@ export type TranscriptModelInput = {
   priorSynthesis?: TranscriptSynthesis[];
 };
 
-function bindings(): Record<string, unknown> {
-  return env as unknown as Record<string, unknown>;
-}
-
-/** With credentials the resolver owns precedence (server secret wins); without, env only. */
-function configuredValue(name: string, credentials?: Credentials): string {
+/**
+ * The Worker binding and the research module that also reads it are imported lazily, so this
+ * module — grounding rules, merge rules, retry policy — stays importable outside the Worker
+ * runtime and can be tested directly under `node --test`. Nothing is read until a call is
+ * actually about to be made, and with credentials no binding is touched at all.
+ */
+async function configuredValue(name: string, credentials?: Credentials): Promise<string> {
   if (credentials) return credentials.get(name).trim();
-  const value = bindings()[name];
+  const { env } = await import("cloudflare:workers");
+  const value = (env as unknown as Record<string, unknown>)[name];
   return typeof value === "string" ? value.trim() : "";
 }
 
-export function openAITranscriptConfigured(credentials?: Credentials): boolean {
-  return configuredValue("OPENAI_API_KEY", credentials).length > 0;
+export async function openAITranscriptConfigured(credentials?: Credentials): Promise<boolean> {
+  return (await configuredValue("OPENAI_API_KEY", credentials)).length > 0;
 }
 
-export function openAITranscriptModel(credentials?: Credentials): string {
-  return configuredValue("OPENAI_TRANSCRIPT_MODEL", credentials)
-    || openAIResearchModel(credentials);
+export async function openAITranscriptModel(credentials?: Credentials): Promise<string> {
+  const configured = await configuredValue("OPENAI_TRANSCRIPT_MODEL", credentials);
+  if (configured) return configured;
+  const { openAIResearchModel } = await import("./openai-research");
+  return openAIResearchModel(credentials);
 }
 
 function outputText(response: OpenAIResponse): string {
@@ -126,7 +129,7 @@ const transcriptSchema = {
       additionalProperties: false,
       required: [
         "constraint_type", "canvas_block", "reasoning", "symptom_vs_constraint",
-        "prescription", "why_smallest_intervention", "kill_condition",
+        "prescription", "why_smallest_intervention", "kill_condition", "kill_condition_spec",
         "predicted_next_constraint", "evidence",
         "baseline_metric_index", "baseline_reason",
       ],
@@ -138,6 +141,22 @@ const transcriptSchema = {
         prescription: { type: "string" },
         why_smallest_intervention: { type: "string" },
         kill_condition: { type: "string" },
+        /**
+         * The same stop condition in a shape the outcome screen can actually test. Every part
+         * is required by the schema and every part may be `""`; an incomplete spec is dropped
+         * whole, so the client's verbatim sentence is never padded with an invented threshold.
+         */
+        kill_condition_spec: {
+          type: "object",
+          additionalProperties: false,
+          required: ["metric", "comparator", "threshold", "window"],
+          properties: {
+            metric: { type: "string" },
+            comparator: { type: "string", enum: ["", ...KILL_COMPARATORS] },
+            threshold: { type: "string" },
+            window: { type: "string" },
+          },
+        },
         predicted_next_constraint: { type: "string" },
         evidence: { type: "array", items: constraintCitation },
         /** 0-based index into `metrics`, or -1 when no metric measures this constraint. */
@@ -316,6 +335,7 @@ const INSTRUCTIONS = [
   "metrics: when the unit is a percentage, denominator_span must be the span of the cited line saying what the percentage is out of (\"of what we quote\", \"of jobs\"). A percentage with no client-stated denominator is not a measurement; leave it empty and let the metric stay partial.",
   "constraint.evidence: every citation carries a role — symptom (what hurts), mechanism (how throughput is actually limited), magnitude (how big it is), or single_point_dependency (one person or step is the only path). A constraint needs at least two distinct client-stated lines and at least one mechanism citation; without a mechanism citation, return null for constraint and say why in gaps.",
   "constraint.baseline_metric_index: the 0-based index into your own metrics array of the one metric that measures this constraint, or -1 if none does. It must match the constraint's dimension — latency is measured in time, capacity in a count over a period, quality as a rate. baseline_reason says why that metric measures this constraint, and is required for knowledge and policy constraints.",
+  "constraint.kill_condition_spec: the same stop condition as a test — metric is the BUSINESS number the constraint was supposed to move (not the operational metric being worked on), comparator is one of increases/decreases/reaches/does-not-move, threshold is how far it had to move in the client's own terms, window is how long it is watched for. Fill it in only from what the client actually committed to; if any part was never said, return \"\" for every field and let the verbatim kill_condition carry the condition alone. A window nobody agreed to is an invented commitment.",
   "rejected_hypotheses: the two strongest rival readings of this same call that you considered and did not choose, each with the constraint type, the Canvas block, why it was rejected, and the client line that argues against it. Cite that line the same way as any other citation; an ungrounded rival is discarded. If you cannot name a rival with a real client line against it, return an empty array rather than inventing one.",
   "contradictions: research_statement must be copied verbatim from the supplied research facts; never contradict a claim that was not supplied.",
   "canvas_updates: only where a client line changes or confirms what a Canvas block says.",
@@ -371,11 +391,11 @@ export async function synthesizeTranscriptWithOpenAI(
   fetcher: typeof fetch = fetch,
   credentials?: Credentials,
 ): Promise<TranscriptSynthesis> {
-  const key = configuredValue("OPENAI_API_KEY", credentials);
-  const model = openAITranscriptModel(credentials);
+  const key = await configuredValue("OPENAI_API_KEY", credentials);
   if (!key) {
     return { ...base, analysisMode: "deterministic", modelStatus: "not-configured" };
   }
+  const model = await openAITranscriptModel(credentials);
 
   const valueFlow = input.valueFlow ?? input.research?.valueFlow ?? [];
   const questions = input.questions ?? input.research?.discoveryQuestions ?? [];
@@ -706,6 +726,14 @@ function merge(
         || "Reassess after the intervention; do not infer the next constraint before measurement.",
       killCondition: grounded.constraint.killCondition
         || `Client evidence or measurements show ${grounded.constraint.constraintType} is not limiting throughput.`,
+      // Additive: present only when all four parts were read out honestly. The prior
+      // candidate's spec is kept when this pass could not derive one, never overwritten by
+      // a blank — and never synthesised from the sentence above.
+      ...(grounded.constraint.killConditionSpec
+        ? { killConditionSpec: grounded.constraint.killConditionSpec }
+        : baseCandidate?.killConditionSpec
+          ? { killConditionSpec: baseCandidate.killConditionSpec }
+          : {}),
       // The rivals the model examined and rejected, ahead of anything the deterministic pass
       // had already parked. This list was structurally empty before (audit F3).
       appendixItems: dedupe(

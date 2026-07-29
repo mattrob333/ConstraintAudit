@@ -22,14 +22,22 @@ import {
   generateRolesMap,
   generateRoadmap,
   generateSprintPlan,
+  markdownToPlainText,
+  prescriptionImplicatesSystem,
   renderGoogleDocHtml,
 } from "./deliverables";
 import { HttpError } from "./http";
 import { resolveMetricDirection } from "./metric-direction";
-import { createDocument, appendOrUpdateRow, sendEmail, type CellValue } from "./integrations";
+import { createDocument, appendOrUpdateRow, markdownToHtml, sendEmail, type CellValue } from "./integrations";
 import { researchPublicWebsite } from "./research";
 import { resolveCredentials, type Credentials } from "./secrets";
-import { CRM_COLUMNS, CRM_MATCH_KEY, DEFAULT_CRM_SHEET_TAB, getSettings } from "./settings";
+import {
+  CRM_COLUMNS,
+  CRM_MATCH_KEY,
+  DEFAULT_CRM_SHEET_TAB,
+  getSettings,
+  type LetterheadSettings,
+} from "./settings";
 import { enrichResearchWithOpenAI } from "./openai-research";
 import {
   requireApprovedReadinessArtifact,
@@ -67,8 +75,11 @@ import {
 import { parseTranscriptText, synthesizeTranscript } from "./transcript";
 import { synthesizeTranscriptWithOpenAI } from "./openai-transcript";
 import { decodeTranscriptFile, type TranscriptFileInput } from "./transcript-files";
+import { applyFindingEdits, type FindingEditInput } from "./finding-edit";
 import {
+  KILL_CONDITION_RESULTS,
   computeMetricDelta,
+  isOneOf,
   makeId,
   WORKFLOW_STATES,
   type BaselineMetric,
@@ -77,6 +88,7 @@ import {
   type ConsentAttestation,
   type Engagement,
   type EvidenceClaim,
+  type KillConditionResult,
   type OutcomeMeasurement,
   type SprintRecord,
   type WorkflowState,
@@ -234,7 +246,14 @@ export async function readinessBriefAction(
     });
     return { engagement, document: artifact, intent };
   }
-  const content = generateReadinessBrief(engagement, input);
+  // The first thing a client reads from this firm should carry a person's name and the firm's,
+  // not just the company we are writing to. Both come from the advisor's letterhead settings.
+  const letterhead = (await getSettings(principal.ownerId)).letterhead;
+  const content = generateReadinessBrief(engagement, {
+    ...input,
+    advisorName: letterhead.advisorName,
+    firmName: letterhead.firmName,
+  });
   const artifact = await createArtifact(engagement, {
     kind: "readiness_brief",
     title: `${engagement.client} - Pre-Call Readiness Brief`,
@@ -468,11 +487,7 @@ export async function importFireflies(
 export async function updateFinding(
   id: string,
   principal: Principal,
-  input: {
-    humanOwner?: { name: string; role: string };
-    baseline?: { name: string; value: string; unit: string; period: string; source: string };
-    action?: "save" | "approve_diagnosis";
-  },
+  input: FindingEditInput & { action?: "save" | "approve_diagnosis" },
 ) {
   const engagement = await requireEngagement(id, principal.ownerId);
   const finding = engagement.data.finding;
@@ -483,29 +498,20 @@ export async function updateFinding(
   ) {
     throw new Error("Diagnosis approval requires Transcript 2 reconciliation.");
   }
-  const baseline = input.baseline ?? finding.baselineMetric;
-  const baselineConfirmed = Boolean(
-    baseline.name?.trim() && baseline.value?.trim() && baseline.unit?.trim() &&
-    baseline.period?.trim() && baseline.source?.trim(),
-  );
-  // The primary contact captured at intake is the obvious default owner. Falling back to
-  // it means the advisor does not retype what they already told us, but an explicit
-  // humanOwner on the request always wins.
-  const intakeOwner = engagement.primaryContact.trim()
-    ? { name: engagement.primaryContact.trim(), role: engagement.primaryContactRole.trim() }
-    : null;
-  const resolvedOwner = input.humanOwner
-    ?? (finding.humanOwner.name.trim() ? finding.humanOwner : intakeOwner ?? finding.humanOwner);
-  const nextFinding = {
-    ...finding,
-    baselineMetric: baseline,
-    humanOwner: resolvedOwner,
-    findingStatus: baselineConfirmed ? "client-verified" as const : "provisional" as const,
-    baselineInstrumentation: {
-      ...finding.baselineInstrumentation,
-      required: !baselineConfirmed,
+  // Every rule about what an advisor may change, and what that does to the finding's status,
+  // lives in lib/finding-edit.ts — pure, so it is testable without a store or a Worker.
+  const { finding: nextFinding, baseline, baselineConfirmed } = applyFindingEdits(
+    engagement.data,
+    finding,
+    input,
+    {
+      editedAt: new Date().toISOString(),
+      editedBy: principal.email,
+      intakeOwner: engagement.primaryContact.trim()
+        ? { name: engagement.primaryContact.trim(), role: engagement.primaryContactRole.trim() }
+        : null,
     },
-  };
+  );
   if (input.action === "approve_diagnosis") {
     requireDiagnosisApprovalEvidence(nextFinding);
   }
@@ -543,14 +549,23 @@ export async function generateDeliverables(id: string, principal: Principal) {
   }
   const finding = engagement.data.finding;
   if (!finding) throw new Error("Constraint finding is required");
-  const definitions = [
+  // The developer specification is written for somebody who is going to build something. When the
+  // prescription is paper and people — a written price book, a changed handoff — there is nothing
+  // for a developer to implement, and a spec full of autonomy boundaries and audit-history
+  // requirements is noise the advisor has to explain away. It is omitted rather than emptied.
+  const buildable = prescriptionImplicatesSystem(engagement, finding);
+  const definitions: Array<[string, string, string]> = [
     ["diagnosis_package", "Diagnosis Package", generateDiagnosisPackage(engagement, finding)],
     ["audit_report", "Audit Report", generateAuditReport(engagement, finding)],
-    ["proposal", "Fixed-Sprint Proposal", generateProposal(engagement, finding)],
+    ["proposal", "Fixed-Sprint Proposal", generateProposal(engagement, finding, {
+      issuedAt: new Date().toISOString().slice(0, 10),
+    })],
     ["implementation_roadmap", "Implementation Roadmap", generateRoadmap(engagement, finding)],
-    ["developer_spec", "Third-Party Developer Specification", generateDeveloperSpec(engagement, finding)],
+    ...(buildable
+      ? [["developer_spec", "Third-Party Developer Specification", generateDeveloperSpec(engagement, finding)] as [string, string, string]]
+      : []),
     ["roles_map", "Roles & Responsibility Map", generateRolesMap(engagement, finding)],
-  ] as const;
+  ];
   const documents = [];
   for (const [kind, label, content] of definitions) {
     documents.push(await createArtifact(engagement, {
@@ -636,17 +651,25 @@ export async function createDocumentPublishIntent(
     throw new Error("Only an approved or provisional artifact may be proposed for publication.");
   }
   // Carry the metadata the document shell needs so the published Doc is branded consistently,
-  // and file it in the advisor's configured Drive folder when the engagement has none.
-  const driveFolder = (await getSettings(principal.ownerId)).driveFolderId;
+  // and file it in the advisor's configured Drive folder when the engagement has none. The
+  // letterhead travels on the intent so the Doc that is created after approval carries the same
+  // firm identity as the printed copy, even if Settings changed in between.
+  const settings = await getSettings(principal.ownerId);
+  const driveFolder = settings.driveFolderId;
+  const clientPrefix = `${engagement.client} — `;
+  const title = String(artifact.title);
   const intent = await createIntent(engagement, "document_publish", {
     documentId: String(artifact.id),
-    title: String(artifact.title),
+    title,
+    // The Doc's own heading drops the client prefix; the shell states who it was prepared for.
+    documentTitle: title.startsWith(clientPrefix) ? title.slice(clientPrefix.length) : title,
     status: String(artifact.status),
     markdown: String(artifact.content),
     client: engagement.client,
     advisor: engagement.advisor,
-    date: new Date().toISOString().slice(0, 10),
+    date: String(artifact.created_at ?? "").slice(0, 10) || new Date().toISOString().slice(0, 10),
     kind: String(artifact.kind),
+    letterhead: settings.letterhead,
     folderId: engagement.engagementFolder || driveFolder || undefined,
     requiresExplicitApproval: true,
   });
@@ -1022,10 +1045,16 @@ async function executeIntent(
 ) {
   const str = (key: string): string => typeof payload[key] === "string" ? payload[key] as string : "";
   if (type === "readiness_brief_send") {
+    // The stored artifact is Markdown. The HTML part is rendered from it, but the text part is
+    // what a plain-text client actually shows: sending the Markdown source there meant the client
+    // read `## What the session is` and `**bold**` as literal characters. Both parts are supplied
+    // explicitly so the adapter's fallback never has to guess.
+    const brief = str("body");
     return sendEmail({
       to: str("to"),
       subject: str("subject"),
-      markdownBody: str("body"),
+      markdownBody: markdownToPlainText(brief),
+      htmlBody: markdownToHtml(brief),
       idempotencyKey: intentId,
       credentials,
     });
@@ -1058,16 +1087,21 @@ async function executeIntent(
   if (type === "document_publish") {
     const title = str("title");
     const markdown = str("markdown");
-    // Wrap in the standard deliverable shell (title block, advisor byline, confidentiality
-    // footer) using structural HTML that survives Drive's HTML->Doc conversion, so every
-    // published Doc comes out consistently formatted. The publish intent carries the meta.
+    // Wrap in the standard deliverable shell (letterhead band, title block, advisor byline,
+    // confidentiality footer) using structural HTML that survives Drive's HTML->Doc conversion,
+    // so every published Doc comes out consistently formatted. The publish intent carries the
+    // meta, including the letterhead as it stood when the advisor queued the document.
+    const letterhead = payload.letterhead && typeof payload.letterhead === "object"
+      ? payload.letterhead as LetterheadSettings
+      : null;
     const html = renderGoogleDocHtml(markdown, {
       client: str("client") || "the client",
-      title,
+      title: str("documentTitle") || title,
       advisor: str("advisor") || "Tier 4 Advisor",
       date: str("date"),
       confidential: true,
       kind: str("kind") || undefined,
+      letterhead,
     });
     return createDocument({
       title,
@@ -1175,6 +1209,14 @@ export async function activateSprint(
   return { engagement: updated, sprint, document };
 }
 
+/** All five fields present. A part-filled reading is not a reading. */
+function completeMetric(metric: BaselineMetric | undefined): boolean {
+  return Boolean(
+    metric?.name?.trim() && metric.value?.trim() && metric.unit?.trim() &&
+    metric.period?.trim() && metric.source?.trim(),
+  );
+}
+
 /**
  * Record the before/after result. A delta is computed only from two client-confirmed
  * readings in the same unit; anything else records an explicit blocked reason instead
@@ -1190,6 +1232,10 @@ export async function measureOutcome(
     constraintMoved?: boolean;
     nextConstraintObserved?: string;
     evidence?: Array<{ quote: string; source: string }>;
+    /** Whether the client's own kill condition held or fired. Defaults to `not-tested`. */
+    killConditionResult?: KillConditionResult;
+    /** The business number the constraint was supposed to move, before and after. */
+    businessMetric?: { starting: BaselineMetric; ending: BaselineMetric };
   },
 ) {
   const engagement = await requireEngagement(id, principal.ownerId);
@@ -1216,6 +1262,19 @@ export async function measureOutcome(
     improvedWhen: directionInference.improvedWhen ?? undefined,
   });
 
+  /**
+   * The business reading is kept only when both ends of it are complete. A half-recorded
+   * before/after would make the kill-condition block look answered while the number the
+   * constraint was supposed to move is still unknown.
+   */
+  const businessMetric = completeMetric(input.businessMetric?.starting) &&
+    completeMetric(input.businessMetric?.ending)
+    ? input.businessMetric
+    : undefined;
+  if (input.businessMetric && !businessMetric) {
+    throw new Error("The business metric needs name, value, unit, period, and source on both the starting and the ending reading, or leave it out entirely.");
+  }
+
   const outcome: OutcomeMeasurement = {
     measuredAt: new Date().toISOString(),
     measuredBy: principal.email,
@@ -1228,12 +1287,21 @@ export async function measureOutcome(
     constraintMoved: input.constraintMoved ?? false,
     nextConstraintObserved: input.nextConstraintObserved?.trim() ?? "",
     evidence: (input.evidence ?? []).filter((item) => item.quote?.trim() && item.source?.trim()),
+    // Audit F2. An unrecognised or absent value reads as `not-tested` — the weaker answer —
+    // and the catalog write stays blocked until somebody actually checks the condition.
+    killConditionResult: isOneOf(KILL_CONDITION_RESULTS, input.killConditionResult)
+      ? input.killConditionResult
+      : "not-tested",
+    ...(businessMetric ? { businessMetric } : {}),
   };
+  const untested = outcome.killConditionResult === "not-tested";
   const updated = await advanceWithinEvidence(engagement, "OUTCOME_MEASURED", principal.ownerId, {
     status: "Needs review",
-    nextAction: outcome.constraintMoved
-      ? "Write the reusable pattern to the catalog, then diagnose the next constraint"
-      : "Write the reusable pattern to the catalog",
+    nextAction: untested
+      ? "Test the kill condition on the Measure screen; the catalog write-back stays blocked until it is recorded"
+      : outcome.constraintMoved
+        ? "Write the reusable pattern to the catalog, then diagnose the next constraint"
+        : "Write the reusable pattern to the catalog",
     data: { outcome },
   });
   const document = await createArtifact(updated, {
@@ -1247,9 +1315,9 @@ export async function measureOutcome(
   await addActivity(updated, {
     activityType: "Measurement",
     summary: "Recorded the measured outcome",
-    outcome: delta
+    outcome: `${delta
       ? `Delta ${delta.absolute} (${delta.direction}${delta.interpretation === "not-interpreted" ? "; not interpreted" : `; ${delta.interpretation}`})`
-      : `No delta claimed: ${deltaBlockedReason}`,
+      : `No delta claimed: ${deltaBlockedReason}`}; kill condition ${outcome.killConditionResult}`,
   });
   return { engagement: updated, outcome, document };
 }
@@ -1322,6 +1390,12 @@ export async function writeCatalogEntry(
   const outcome = engagement.data.outcome;
   if (!finding) throw new Error("A constraint finding is required.");
   if (!outcome) throw new Error("Catalog write-back requires a measured outcome.");
+  // Audit F2: the catalog used to publish "improved" on an engagement where nobody checked
+  // the number the constraint was supposed to move. `fired` writes — a disproven constraint
+  // is the most useful entry there is — but an untested condition does not.
+  if ((outcome.killConditionResult ?? "not-tested") === "not-tested") {
+    throw new Error("Catalog write-back is blocked while the kill condition is untested. Record on the Measure screen whether the client's own kill condition held or fired.");
+  }
   const entry: CatalogEntry = {
     entryId: makeId("cat"),
     constraintType: finding.constraintType,
@@ -1334,6 +1408,7 @@ export async function writeCatalogEntry(
     industryContext: input.industryContext?.trim() ?? "",
     reusableFor: input.reusableFor?.trim() ?? "",
     writtenAt: new Date().toISOString(),
+    killConditionResult: outcome.killConditionResult,
   };
   const updated = await advanceWithinEvidence(engagement, "CATALOG_WRITTEN", principal.ownerId, {
     status: "Closed",
@@ -1350,8 +1425,10 @@ export async function writeCatalogEntry(
   });
   await addActivity(updated, {
     activityType: "Catalog",
-    summary: "Wrote the reusable pattern to the catalog",
-    outcome: entry.measuredResult,
+    summary: entry.killConditionResult === "fired"
+      ? "Wrote the pattern to the catalog with the constraint recorded as disproven"
+      : "Wrote the reusable pattern to the catalog",
+    outcome: `${entry.measuredResult}; kill condition ${entry.killConditionResult}`,
   });
   return { engagement: updated, catalogEntry: entry, document };
 }

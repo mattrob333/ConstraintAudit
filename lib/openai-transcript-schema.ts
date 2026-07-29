@@ -1,5 +1,6 @@
 import {
   CONSTRAINT_TYPES,
+  KILL_COMPARATORS,
   canonicalCanvasBlock,
   type CanvasBlock,
   type CanvasUpdate,
@@ -7,6 +8,9 @@ import {
   type DiscoveryQuestion,
   type EvidenceClaim,
   type ExtractedMetric,
+  type KillComparator,
+  type KillConditionSpec,
+  type MetricGrounding,
   type RoleMapEntry,
   type TranscriptContradiction,
   type TranscriptDecision,
@@ -16,46 +20,10 @@ import {
   type ValueFlowStep,
 } from "./workflow";
 
-/* ------------------------------------------------------- shared additions */
-
-/**
- * Two fields the evidence layer needs on records owned by `./workflow`, added by declaration
- * merging so the storage types stay in one place. Both are optional so anything persisted
- * before this change still parses; both read as the *weaker* value when absent, never the
- * stronger one — an undefined `grounding` is not "full".
- */
-declare module "./workflow" {
-  interface ExtractedMetric {
-    /**
-     * `"full"` only when the unit, the period, and (for a percentage) the denominator are each
-     * literally present in the client line the value was matched to. Anything else is
-     * `"partial"`: the number was said, what it measures was not. Only `"full"` can confirm a
-     * baseline.
-     */
-    grounding?: MetricGrounding;
-    /** The exact spans of the cited line that carry the unit, the period, and the denominator. */
-    unitSpan?: string;
-    periodSpan?: string;
-    denominatorSpan?: string;
-  }
-
-  interface TranscriptSynthesis {
-    /**
-     * Recorded when the model pass and the deterministic pass read the same transcript as
-     * different constraints. Its presence forces the finding to stay provisional; it is kept
-     * structured (not only as a gap sentence) so the disagreement can be surfaced, not buried.
-     */
-    pathDisagreement?: {
-      model: { constraintType: ConstraintType; canvasBlock: string };
-      deterministic: { constraintType: ConstraintType; canvasBlock: string };
-      fields: Array<"constraintType" | "canvasBlock">;
-    };
-  }
-}
-
 /* ------------------------------------------------------------------ types */
 
-export type MetricGrounding = "full" | "partial";
+/** Re-exported so grounding callers keep one import for the whole evidence vocabulary. */
+export type { MetricGrounding };
 
 /** What a constraint citation is doing. A constraint with no `mechanism` citation is not one. */
 export const EVIDENCE_ROLES = ["symptom", "mechanism", "magnitude", "single_point_dependency"] as const;
@@ -101,6 +69,8 @@ export type ModelConstraint = {
   prescription: string;
   whySmallestIntervention: string;
   killCondition: string;
+  /** The testable form of the same condition, or null when it could not be read out honestly. */
+  killConditionSpec: KillConditionSpec | null;
   predictedNextConstraint: string;
   evidence: ConstraintCitation[];
   /** Index into `GroundedSynthesis.metrics`, or -1 when no metric survived baseline validation. */
@@ -328,6 +298,33 @@ export function groundMetricSpans(
     denominatorSpan,
     grounding: unitOk && periodOk && denominatorOk ? "full" : "partial",
   };
+}
+
+/* -------------------------------------------------- kill condition spec */
+
+const COMPARATORS = new Set<string>(KILL_COMPARATORS);
+
+/**
+ * The one place a structured kill condition is allowed to come into existence.
+ *
+ * All four parts or nothing. A spec with an empty window is a stop condition nobody can
+ * ever declare fired, and a spec with an invented threshold puts a commitment in the
+ * client's mouth they never made — so a partial answer becomes no spec at all, and the
+ * client's verbatim sentence carries the condition on its own. Audit F2/1.5: the structure
+ * exists to make the outcome testable, never to make an untested outcome look tested.
+ */
+export function killConditionSpecFrom(parts: {
+  metric?: string;
+  comparator?: string;
+  threshold?: string;
+  window?: string;
+}): KillConditionSpec | null {
+  const metric = (parts.metric ?? "").trim().slice(0, 160);
+  const comparator = (parts.comparator ?? "").trim().toLowerCase().replace(/[\s_]+/g, "-");
+  const threshold = (parts.threshold ?? "").trim().slice(0, 160);
+  const window = (parts.window ?? "").trim().slice(0, 80);
+  if (!metric || !threshold || !window || !COMPARATORS.has(comparator)) return null;
+  return { metric, comparator: comparator as KillComparator, threshold, window };
 }
 
 const PLACEHOLDER_NAME = /^(?:client-stated\b|unnamed\b|metric$|number$)/i;
@@ -1057,6 +1054,23 @@ function groundConstraint(
     }
   }
 
+  // The structured stop condition is an all-or-nothing read of what the model returned; a
+  // half-filled spec is dropped and the client's verbatim sentence stands on its own.
+  const specEntry = record(entry.kill_condition_spec) ?? {};
+  const killConditionSpec = killConditionSpecFrom({
+    metric: text(specEntry.metric, 160),
+    comparator: text(specEntry.comparator, 40),
+    threshold: text(specEntry.threshold, 160),
+    window: text(specEntry.window, 80),
+  });
+  if (!killConditionSpec && Object.values(specEntry).some((part) => text(part, 200))) {
+    reject(
+      "constraint.kill_condition_spec",
+      "incomplete-or-unknown-comparator",
+      `${text(specEntry.metric, 160)} | ${text(specEntry.comparator, 40)} | ${text(specEntry.threshold, 160)} | ${text(specEntry.window, 80)}`,
+    );
+  }
+
   return {
     constraintType: type,
     canvasBlock,
@@ -1065,6 +1079,7 @@ function groundConstraint(
     prescription: text(entry.prescription, 600),
     whySmallestIntervention: text(entry.why_smallest_intervention, 600),
     killCondition: text(entry.kill_condition, 400),
+    killConditionSpec,
     predictedNextConstraint: text(entry.predicted_next_constraint, 400),
     evidence,
     baselineMetricIndex,

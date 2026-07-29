@@ -443,7 +443,13 @@ function validatePatch(existing: Engagement, patch: EngagementPatch): Engagement
   if (!["none", "provisional", "client-verified", "approved"].includes(findingStatus)) {
     throw new Error("Invalid findingStatus");
   }
-  assertWorkflowTransition(existing.workflowState, workflowState, baselineStatus, findingStatus);
+  // The checkpoint gates read the merged record, not the flat status columns: the baseline the
+  // finding is actually bound to and the kill-condition result the outcome actually carries.
+  const data = patch.data ? mergeData(existing.data, patch.data) : existing.data;
+  assertWorkflowTransition(existing.workflowState, workflowState, baselineStatus, findingStatus, {
+    baselineMetric: data.finding?.baselineMetric ?? null,
+    killConditionResult: data.outcome?.killConditionResult,
+  });
   const stage = patch.stage ?? (patch.workflowState ? stageForState(workflowState) : existing.stage);
   if (!isOneOf(CRM_STAGES, stage)) throw new Error("Invalid stage");
   const status = patch.status ?? existing.status;
@@ -469,7 +475,7 @@ function validatePatch(existing: Engagement, patch: EngagementPatch): Engagement
     // Merge, but never let an `undefined` value in the patch delete a stored key. A caller
     // that means to clear a field sets it to null or an empty value, not undefined — which is
     // usually an accidental `obj?.maybeMissing` that would otherwise erase confirmed evidence.
-    data: patch.data ? mergeData(existing.data, patch.data) : existing.data,
+    data,
     version: existing.version + 1,
     createdAt: existing.createdAt,
     updatedAt: new Date().toISOString(),

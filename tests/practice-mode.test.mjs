@@ -103,3 +103,45 @@ test("the measured outcome reads as an improvement without anyone declaring it",
   assert.equal(outcome.improvedWhen, "lower");
   assert.notEqual(outcome.directionInference?.source, "advisor");
 });
+
+test("the worked example tests its own kill condition against a business number", () => {
+  const finding = demoFinding();
+  const outcome = engagement.data.outcome;
+  // The structured condition stands beside the client's verbatim sentence, never instead of it.
+  assert.match(finding.killCondition, /win rate does not move/i);
+  assert.deepEqual(finding.killConditionSpec, {
+    metric: "Win rate on quoted work",
+    comparator: "does-not-move",
+    threshold: "no increase from 20 percent",
+    window: "4 weeks",
+  });
+  // Every part of the spec has to be traceable to something the client actually said.
+  const spoken = transcriptLines().map((line) => normalize(line.text)).join(" ");
+  assert.ok(spoken.includes("20 percent"), "the threshold's number is client-stated");
+  assert.ok(spoken.includes("four weeks"), "the window is client-stated");
+
+  // Audit F2: the constraint is only "confirmed" if the number it was meant to move was checked.
+  assert.equal(outcome.killConditionResult, "held");
+  assert.ok(outcome.businessMetric, "the business number must be on the outcome, not only the turnaround");
+  assert.equal(outcome.businessMetric.starting.value, "20");
+  assert.equal(outcome.businessMetric.ending.value, "26");
+  assert.notEqual(
+    outcome.businessMetric.ending.name,
+    outcome.endingMetric.name,
+    "the business metric is not the operational metric",
+  );
+  // The after reading was taken at the review meeting, so it is quoted in the outcome evidence
+  // and must NOT have been retro-fitted into a transcript that happened weeks earlier.
+  assert.ok(
+    outcome.evidence.some((item) => /twenty-six percent/i.test(item.quote)),
+    "the post-sprint reading is quoted where it was actually recorded",
+  );
+  assert.match(outcome.businessMetric.ending.source, /measurement call/i);
+  assert.equal(
+    transcriptLines().some((line) => /twenty-six|26 percent/i.test(line.text)),
+    false,
+    "a post-sprint number must never appear in a call transcript recorded before it",
+  );
+  // ...and the entry that gets written back records which way the test went.
+  assert.equal(engagement.data.catalogEntry.killConditionResult, "held");
+});

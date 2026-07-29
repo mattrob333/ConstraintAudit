@@ -1011,6 +1011,33 @@ export function demoBaseline(): BaselineMetric {
   };
 }
 
+/**
+ * The business number the constraint was supposed to move, before and after — the win rate,
+ * not the turnaround. The before reading is Rosa's own line on call 1; the after reading was
+ * taken at the review meeting, off the same spreadsheet, and is quoted in the outcome evidence
+ * rather than inserted into a transcript, because it was recorded after both calls happened.
+ */
+function demoBusinessMetric(): { starting: BaselineMetric; ending: BaselineMetric } {
+  return {
+    starting: {
+      name: "Win rate on quoted work",
+      value: "20",
+      unit: "percent",
+      period: "of quoted work",
+      source:
+        "Rosa Alvarez at 06:53 on the discovery call: “I track it in the spreadsheet. We are winning about 20 percent of what we quote.”",
+    },
+    ending: {
+      name: "Win rate on quoted work",
+      value: "26",
+      unit: "percent",
+      period: "of quoted work",
+      source:
+        "Rosa Alvarez's win/loss spreadsheet — the same sheet, unchanged — read back at the measurement call on 2026-06-25 for the four weeks from 2026-05-28 (practice data).",
+    },
+  };
+}
+
 function demoEndingMetric(): BaselineMetric {
   return {
     name: "Quote turnaround time",
@@ -1119,6 +1146,15 @@ export function demoFinding(): ConstraintFinding {
       "Shop drawings. Priya Shah draws casework and Terry Nakamura draws fixtures after his day on the floor, and architect approval time is outside the shop's control, so won work will queue there next.",
     killCondition:
       "In Dana's own words at 06:40 on the findings call — if quotes go out in three days and the win rate does not move, speed was never the constraint. Stop the sprint and re-diagnose at price rather than latency.",
+    // The same condition in the shape the outcome screen tests, beside the sentence rather
+    // than instead of it. Every part is client-stated: the 20 percent at 06:53 on call 1, the
+    // condition at 06:40 and the four weeks at 06:21 on call 2. Nothing is inferred to fill it.
+    killConditionSpec: {
+      metric: "Win rate on quoted work",
+      comparator: "does-not-move",
+      threshold: "no increase from 20 percent",
+      window: "4 weeks",
+    },
     // Deliberately deferred. These print as "not the constraint — revisit after it moves"
     // and as the written out-of-scope list in the proposal, so they have to be real things
     // we are choosing not to touch, not a list of sources.
@@ -1203,10 +1239,19 @@ export function demoOutcome(): OutcomeMeasurement {
     constraintMoved: true,
     nextConstraintObserved:
       "Shop drawings — two packages sat waiting on architect approval while the shop had capacity, and Terry is drawing fixtures after five again",
+    // Dana's stop condition was "quotes in three days and we still do not win any more of
+    // them". Turnaround moved AND the win rate moved, so the condition did not fire. The
+    // reading that settles it is below, in Rosa's words at the review meeting.
+    killConditionResult: "held",
+    businessMetric: demoBusinessMetric(),
     evidence: [
       {
         quote: "Three days. Rosa sent eleven off the book without me and I looked at four of them.",
         source: "Dana Whitfield, Owner — measurement call, 2026-06-25 (practice data)",
+      },
+      {
+        quote: "We are at twenty-six percent on the sheet for the four weeks. It was twenty when we started.",
+        source: "Rosa Alvarez, Office Manager — measurement call, 2026-06-25; win/loss spreadsheet read back at the review meeting (practice data)",
       },
       {
         quote: "Same sheet, same two columns. I did not change anything about how I log it.",
@@ -1236,6 +1281,9 @@ export function demoCatalogEntry(): CatalogEntry {
     measuredResult: outcome.delta
       ? `${outcome.delta.absolute} (${outcome.delta.direction}${outcome.delta.interpretation === "not-interpreted" ? "" : `, ${outcome.delta.interpretation}`}) on ${outcome.endingMetric.name}`
       : `Not claimed — ${outcome.deltaBlockedReason ?? "no comparable measurement"}`,
+    // Recorded on the entry so the next diagnosis can tell a pattern that survived its own
+    // stop condition from one that was written back without anybody testing it.
+    killConditionResult: outcome.killConditionResult,
     industryContext:
       "Architectural millwork and store fixtures, 22 staff, single shop, quoting to commercial interior general contractors on short bid dates. Practice data.",
     reusableFor:
@@ -1617,6 +1665,14 @@ export function demoModelPayload(): Record<string, unknown> {
       prescription: "A one-page price book for the recurring assemblies, written and owned by the owner.",
       why_smallest_intervention: "It hires nobody, buys nothing, and changes no system.",
       kill_condition: "Quotes go out in three days and the win rate does not move.",
+      // Every part of this was said out loud: the number at 06:53 on call 1, the condition and
+      // the window at 06:40 and 06:21 on call 2. Nothing here is filled in for shape.
+      kill_condition_spec: {
+        metric: "Win rate on quoted work",
+        comparator: "does-not-move",
+        threshold: "no increase from 20 percent",
+        window: "4 weeks",
+      },
       predicted_next_constraint: "Shop drawings and architect approval time.",
       evidence: [
         {

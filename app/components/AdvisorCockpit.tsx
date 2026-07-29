@@ -34,6 +34,7 @@ type BackendEngagement = {
   call1At: string | null; call2At: string | null; notes: string; readinessBriefStatus: string;
   data?: {
     research?: ResearchPayload; transcriptSynthesis?: TranscriptSynthesis[]; canvas?: CanvasRecord;
+    finding?: ConstraintFinding;
     sprint?: SprintRecord; outcome?: OutcomeMeasurement; catalogEntry?: CatalogEntry;
     recordingConsent?: Partial<Record<"call1" | "call2", ConsentRecord>>;
     /** Optional advisor-stated context from intake. Never evidence, never a client-stated fact. */
@@ -80,6 +81,23 @@ type DirectionInference = {
   confidence: number;
   ambiguous?: boolean;
 };
+/** Mirrors KILL_COMPARATORS / KILL_CONDITION_RESULTS in lib/workflow.ts. */
+const killComparators = ["increases", "decreases", "reaches", "does-not-move"] as const;
+type KillComparator = (typeof killComparators)[number];
+type KillConditionResult = "held" | "fired" | "not-tested";
+type KillConditionSpec = { metric: string; comparator: KillComparator; threshold: string; window: string };
+/** One advisor override, kept beside the model's original. Server-owned; never written here. */
+type AdvisorEdit = { field: string; original: string; edited: string; editedAt: string; editedBy: string };
+type FindingEvidence = { quote: string; speaker: string; timestamp: string; transcriptUrl?: string; provenance: string };
+/** The stored constraint finding, as `GET /api/engagements/:id` returns it under data.finding. */
+type ConstraintFinding = {
+  constraintId: string; client: string; canvasBlock: string; constraintType: string;
+  findingStatus: string; evidence: FindingEvidence[]; baselineMetric: Metric;
+  prescription: { description: string; whySmallestIntervention: string };
+  humanOwner: { name: string; role: string };
+  predictedNextConstraint: string; killCondition: string; killConditionSpec?: KillConditionSpec;
+  appendixItems: string[]; advisorEdits?: AdvisorEdit[];
+};
 type OutcomeMeasurement = {
   measuredAt: string; measuredBy: string; startingMetric: Metric; endingMetric: Metric;
   delta: {
@@ -91,10 +109,15 @@ type OutcomeMeasurement = {
   deltaBlockedReason?: string; constraintMoved: boolean; nextConstraintObserved: string;
   improvedWhen?: "higher" | "lower";
   directionInference?: DirectionInference;
+  /** Whether the client's own kill condition held or fired. `not-tested` blocks the catalog write. */
+  killConditionResult?: KillConditionResult;
+  /** The business number the constraint was supposed to move, distinct from the operational one. */
+  businessMetric?: { starting: Metric; ending: Metric };
 };
 type CatalogEntry = {
   entryId: string; constraintType: string; canvasBlock: string; pattern: string; prescription: string;
   measuredResult: string; industryContext: string; reusableFor: string; writtenAt: string;
+  killConditionResult?: KillConditionResult;
 };
 type IntentItem = {
   id: string; engagement_id: string; type: string; status: string;
@@ -107,7 +130,20 @@ type IntegrationItem = {
   environmentVariables?: string[]; model?: string; resource?: { name: string; url: string };
 };
 /** Mirrors the advisor-scoped connection settings behind GET/PUT /api/settings. Non-secret only — never a key. */
-type AdvisorSettings = { crmSpreadsheetId: string; crmSheetTab: string; driveFolderId: string; fromName: string };
+type AdvisorSettings = {
+  crmSpreadsheetId: string; crmSheetTab: string; driveFolderId: string; fromName: string;
+  letterhead: Letterhead;
+};
+/** Mirrors LetterheadSettings in lib/settings.ts: what every client document is headed and footed with. */
+type Letterhead = {
+  firmName: string; advisorName: string; addressLine: string; footerLine: string; logoDataUrl: string;
+};
+/** Kept in step with DEFAULT_FOOTER_LINE and MAX_LOGO_BYTES in lib/settings.ts, which enforce them. */
+const DEFAULT_FOOTER_LINE = "Confidential — not to be shared beyond the intended recipient.";
+const MAX_LOGO_BYTES = 200 * 1024;
+const EMPTY_LETTERHEAD: Letterhead = {
+  firmName: "", advisorName: "", addressLine: "", footerLine: DEFAULT_FOOTER_LINE, logoDataUrl: "",
+};
 /** The providers POST /api/settings/test accepts. Mirrors the server's testable set exactly. */
 type SettingsTestProvider = "openai" | "resend" | "google_sheets" | "google_docs" | "fireflies";
 /** The `result` POST /api/settings/test returns. `detail` is human-readable and never contains a secret. */
@@ -206,6 +242,8 @@ type TranscriptSynthesis = {
   baselineStatus: "Missing" | "Partial" | "Confirmed";
   gaps: string[];
   quotes: Array<{ speaker: string; timestamp: string; text: string; reason?: string; provenance: string }>;
+  /** Client-stated numbers, each carrying the line it was matched to. Part of the evidence pool. */
+  metrics?: Array<{ label: string; value: string; quote: string; speaker: string; timestamp: string; unit: string; period: string }>;
   constraintCandidate: null | {
     canvasBlock: string; constraintType: string; findingStatus: string;
     evidence: Array<{ quote: string; speaker: string; timestamp: string; provenance: string }>;
@@ -480,6 +518,75 @@ const directionSourceLabel: Record<DirectionSource, string> = {
 
 const directionSourceTone: Record<DirectionSource, Tone> = {
   advisor: "known", "unit-table": "inferred", "metric-semantics": "inferred", model: "assumed", none: "missing",
+};
+
+/* ------------------------------------------- the findings editor (C1, C17) */
+
+/** The canonical Canvas block names, exactly as lib/workflow.ts stores them. */
+const canvasBlockNames = [
+  "Customer Segments", "Value Propositions", "Channels", "Customer Relationships",
+  "Revenue Streams", "Key Resources", "Key Activities", "Key Partners", "Cost Structure",
+] as const;
+const constraintTypes = ["capacity", "latency", "quality", "knowledge", "policy"] as const;
+
+/** What `POST /api/engagements/:id/finding` accepts. Mirrors `updateFinding` in lib/actions.ts. */
+type FindingPatch = {
+  constraintType?: string;
+  canvasBlock?: string;
+  prescription?: string;
+  whySmallestIntervention?: string;
+  killCondition?: string;
+  killConditionSpec?: KillConditionSpec | null;
+  predictedNextConstraint?: string;
+  appendixItems?: { add?: string[]; remove?: string[] };
+  evidence?: { include?: string[]; exclude?: string[] };
+  baseline?: Metric & { attestation?: "client-stated" | "advisor-attested" };
+};
+
+/** The server's own key for one citation: timestamp plus words, case- and space-folded. */
+function evidenceKey(item: { quote: string; timestamp: string }): string {
+  return `${item.timestamp.trim()}|${item.quote.replace(/\s+/g, " ").trim().toLowerCase()}`;
+}
+
+/**
+ * Every client line this engagement holds — the finding's own citations plus everything the
+ * grounding layer kept from each processed transcript. The editor can only ever select from
+ * this list: there is no field anywhere that turns typed text into a client quote.
+ */
+function groundedEvidencePool(finding: ConstraintFinding | null, syntheses: TranscriptSynthesis[]): FindingEvidence[] {
+  const pool: FindingEvidence[] = [];
+  const seen = new Set<string>();
+  const push = (item: FindingEvidence) => {
+    if (!item.quote?.trim() || !item.speaker?.trim() || !item.timestamp?.trim()) return;
+    const key = evidenceKey(item);
+    if (seen.has(key)) return;
+    seen.add(key);
+    pool.push(item);
+  };
+  for (const item of finding?.evidence ?? []) push(item);
+  for (const synthesis of syntheses) {
+    for (const quote of synthesis.quotes ?? []) {
+      push({ quote: quote.text, speaker: quote.speaker, timestamp: quote.timestamp, provenance: "client-stated" });
+    }
+    for (const metric of synthesis.metrics ?? []) {
+      push({ quote: metric.quote, speaker: metric.speaker, timestamp: metric.timestamp, provenance: "client-stated" });
+    }
+  }
+  return pool;
+}
+
+/** The client's stop condition as one readable sentence, spec first, verbatim string otherwise. */
+function killConditionSentence(finding: ConstraintFinding | null): string {
+  const spec = finding?.killConditionSpec;
+  if (!spec) return finding?.killCondition?.trim() || "";
+  const verb = spec.comparator === "does-not-move" ? "does not move" : spec.comparator;
+  return `${spec.metric} ${verb} — ${spec.threshold} — measured over ${spec.window}.`;
+}
+
+const killResultCopy: Record<KillConditionResult, [string, string]> = {
+  "not-tested": ["Not tested", "Nobody has checked the number the constraint was supposed to move. The catalog write-back stays blocked until this is answered."],
+  held: ["It held", "The condition the client set for calling this the wrong constraint did not happen. The diagnosis survived its own test."],
+  fired: ["It fired", "What the client said would disprove the diagnosis actually happened. That is an honest result: the pattern is still written to the catalog, recorded as disproven."],
 };
 
 const directionChoiceCopy: Record<"lower" | "higher", [string, string]> = {
@@ -1135,6 +1242,11 @@ export default function AdvisorCockpit() {
   const [opsBusy, setOpsBusy] = useState("");
   const [opsError, setOpsError] = useState("");
   const [synthesisResult, setSynthesisResult] = useState<TranscriptSynthesis | null>(null);
+  /** Every stored synthesis, kept so the findings editor can offer the whole grounded evidence pool. */
+  const [allSyntheses, setAllSyntheses] = useState<TranscriptSynthesis[]>([]);
+  const [finding, setFinding] = useState<ConstraintFinding | null>(null);
+  const [findingBusy, setFindingBusy] = useState(false);
+  const [findingError, setFindingError] = useState("");
   const [transcriptMethod, setTranscriptMethod] = useState<"fireflies" | "paste" | "upload">("fireflies");
   const [transcript, setTranscript] = useState("");
   const [fileName, setFileName] = useState("");
@@ -1387,7 +1499,8 @@ export default function AdvisorCockpit() {
     setAnswers({}); setNotes({}); setValues({});
     setResearchResult(null); setCanvas(null);
     setSprint(null); setOutcome(null); setCatalogEntry(null);
-    setSynthesisResult(null);
+    setSynthesisResult(null); setAllSyntheses([]); setFinding(null);
+    setFindingBusy(false); setFindingError("");
     setArtifacts([]); setIntents([]);
     setTranscript(""); setTranscriptFile(null); setFileName(""); setFileSummary(""); setFileError(""); setFileReading(false);
     setTranscriptMethod("fireflies");
@@ -1535,6 +1648,8 @@ export default function AdvisorCockpit() {
       setOutcome(data?.outcome ?? null);
       setCatalogEntry(data?.catalogEntry ?? null);
       setSynthesisResult((data?.transcriptSynthesis ?? []).at(-1) ?? null);
+      setAllSyntheses(data?.transcriptSynthesis ?? []);
+      setFinding(data?.finding ?? null);
       setArtifacts(response.documents ?? []);
       setIntents(response.intents ?? []);
       setCall1At(response.engagement.call1At ?? null);
@@ -1704,6 +1819,27 @@ export default function AdvisorCockpit() {
       setScheduleError(`The meeting time was not saved: ${reason instanceof Error ? reason.message : "unknown request failure"}`);
     } finally {
       setScheduleBusy(false);
+    }
+  }
+
+  /**
+   * Saves an advisor edit of the finding. It never approves anything: the server recomputes
+   * the finding's status from the evidence exactly as it did before the panel existed, and
+   * records every changed field beside the model's original.
+   */
+  async function saveFinding(patch: FindingPatch) {
+    if (!activeId) return setNotice("Action not completed: select or create an engagement first.");
+    if (findingBusy) return;
+    setFindingBusy(true); setFindingError("");
+    try {
+      const response = await save<{ finding: ConstraintFinding }>(`/api/engagements/${activeId}/finding`, patch);
+      setFinding(response.finding);
+      await loadEngagement(activeId);
+      setNotice("The finding was updated. Your edits are recorded as advisor judgment beside the model's original.");
+    } catch (reason) {
+      setFindingError(`The finding could not be updated: ${reason instanceof Error ? reason.message : "unknown request failure"}`);
+    } finally {
+      setFindingBusy(false);
     }
   }
 
@@ -2012,6 +2148,9 @@ export default function AdvisorCockpit() {
     try {
       const refreshed = await api<{ engagement: BackendEngagement }>(`/api/engagements/${activeId}`);
       setCanvas(refreshed.engagement.data?.canvas ?? null);
+      // The stored finding and the full evidence pool are what the findings editor works on.
+      setAllSyntheses(refreshed.engagement.data?.transcriptSynthesis ?? []);
+      setFinding(refreshed.engagement.data?.finding ?? null);
     } catch {
       // The synthesis is already on screen; a canvas refresh failure must not hide it.
     }
@@ -2360,12 +2499,12 @@ export default function AdvisorCockpit() {
       {screen === "call" && callQuestion ? <Call answer={answers[callQuestion.id] ?? ""} company={displayCompany} consent={consent} gapError={gapError} gaps={gapFlags} gapSave={gapSave} generic={script.generic} index={Math.min(callIndex, script.questions.length - 1)} notes={notes[callQuestion.id] ?? ""} onAnswer={(value) => setAnswers((all) => ({ ...all, [callQuestion.id]: value }))} onConsent={setConsent} onExit={() => go("prepare")} onFlagGap={flagGap} onNext={() => callIndex < script.questions.length - 1 ? setCallIndex(callIndex + 1) : go("transcript")} onNotes={(value) => setNotes((all) => ({ ...all, [callQuestion.id]: value }))} onPresenting={setPresenting} onPrevious={() => setCallIndex(Math.max(0, callIndex - 1))} onSaveGaps={saveGaps} onUnflagGap={unflagGap} onValue={(value) => setValues((all) => ({ ...all, [callQuestion.id]: value }))} practice={practiceActive} presenting={presenting} question={callQuestion} scheduledAt={call1At} total={script.questions.length} value={values[callQuestion.id] ?? ""} /> : null}
       {screen === "transcript" ? <Transcript busy={analyzing} callNumber={transcriptCallNumber} company={displayCompany} fileError={fileError} fileName={fileName} fileReading={fileReading} fileSummary={fileSummary} method={transcriptMethod} onAnalyze={analyze} onBack={() => transcriptCallNumber === 2 ? go("findings") : go("call")} onFile={selectTranscriptFile} onMethod={setTranscriptMethod} onSpeakerRole={(speaker, roleValue) => setSpeakerRoles((prev) => ({ ...prev, [speaker]: roleValue }))} onText={setTranscript} ready={Boolean(transcriptFile)} scheduledAt={transcriptCallNumber === 1 ? call1At : call2At} speakerNote={speakerNote} speakerRoles={speakerRoles} speakers={detectedSpeakers} text={transcript} /> : null}
       {screen === "synthesis" ? <Synthesis busy={approving === "canvas"} onApprove={() => approve("canvas")} onBack={() => go("transcript")} synthesis={synthesisResult} /> : null}
-      {screen === "findings" ? <Findings agendaBusy={agendaBusy} agendaError={agendaError} busy={approving === "diagnosis"} consent={call2Consent} contact={contact} contactBusy={contactBusy} contactError={contactError} contactRole={role} onApprove={() => approve("diagnosis")} onBack={() => go("synthesis")} onConsent={setCall2Consent} onPresent={openFindingsPresentation} onSaveContact={saveContact} owner={contact && role ? `${contact}, ${role}` : ""} scheduledAt={call2At} synthesis={synthesisResult} /> : null}
+      {screen === "findings" ? <Findings agendaBusy={agendaBusy} agendaError={agendaError} busy={approving === "diagnosis"} consent={call2Consent} contact={contact} contactBusy={contactBusy} contactError={contactError} contactRole={role} editBusy={findingBusy} editError={findingError} evidencePool={groundedEvidencePool(finding, allSyntheses)} finding={finding} onApprove={() => approve("diagnosis")} onBack={() => go("synthesis")} onConsent={setCall2Consent} onEditFinding={saveFinding} onPresent={openFindingsPresentation} onSaveContact={saveContact} owner={contact && role ? `${contact}, ${role}` : ""} scheduledAt={call2At} synthesis={synthesisResult} /> : null}
       {screen === "findings-call" ? <FindingsPresentation company={displayCompany} consent={call2Consent} index={Math.min(agendaStep, Math.max(0, agenda.length - 1))} onConsent={setCall2Consent} onExit={() => go("findings")} onNext={() => setAgendaStep((step) => Math.min(agenda.length - 1, step + 1))} onPrevious={() => setAgendaStep((step) => Math.max(0, step - 1))} practice={practiceActive} scheduledAt={call2At} sections={agenda} /> : null}
       {screen === "deliver" ? <Deliver approved={diagnosisApproved} artifacts={artifacts} busy={deliverBusy} error={deliverError} intents={intents} onActions={() => openOperations("actions")} onBack={() => go("findings")} onGenerate={generateAllDeliverables} onOperate={openOperations} onPublish={publishDocument} onSync={prepareCrmWriteBack} /> : null}
       {screen === "sprint" ? <SprintScreen busy={opsBusy} error={opsError} onActivate={activateSprint} onBack={() => { go("deliver"); if (activeId) void loadEngagement(activeId); }} onNavigate={openOperations} onTask={updateSprintTask} sprint={sprint} /> : null}
-      {screen === "measure" ? <Measure busy={opsBusy === "outcome"} correcting={opsBusy === "direction"} error={opsError} onBack={() => openOperations("sprint")} onCorrectDirection={correctOutcomeDirection} onNavigate={openOperations} onSubmit={recordOutcome} outcome={outcome} sprint={sprint} /> : null}
-      {screen === "catalog" ? <Catalog busy={opsBusy === "catalog"} entry={catalogEntry} error={opsError} onBack={() => openOperations("measure")} onNavigate={openOperations} onSubmit={writeCatalog} outcome={outcome} /> : null}
+      {screen === "measure" ? <Measure busy={opsBusy === "outcome"} correcting={opsBusy === "direction"} error={opsError} finding={finding} onBack={() => openOperations("sprint")} onCorrectDirection={correctOutcomeDirection} onNavigate={openOperations} onSubmit={recordOutcome} outcome={outcome} sprint={sprint} /> : null}
+      {screen === "catalog" ? <Catalog busy={opsBusy === "catalog"} entry={catalogEntry} error={opsError} finding={finding} onBack={() => openOperations("measure")} onNavigate={openOperations} onSubmit={writeCatalog} outcome={outcome} /> : null}
       {screen === "actions" ? <ReviewedActions engagementId={activeId} onBack={() => actionsOrigin === "clients" ? openClients() : openOperations("sprint")} onNavigate={openOperations} onRefreshClients={() => loadClients(true)} origin={actionsOrigin} /> : null}
       {screen === "integrations" ? <IntegrationCenter onBack={() => go("home")} /> : null}
       {screen === "settings" ? <SettingsScreen onBack={() => go("home")} onIntegrations={() => go("integrations")} /> : null}
@@ -3161,10 +3300,13 @@ function Synthesis({ busy, onApprove, onBack, synthesis }: { busy: boolean; onAp
   </section>;
 }
 
-function Findings({ agendaBusy, agendaError, busy, consent, contact, contactBusy, contactError, contactRole, onApprove, onBack, onConsent, onPresent, onSaveContact, owner, scheduledAt, synthesis }: {
+function Findings({ agendaBusy, agendaError, busy, consent, contact, contactBusy, contactError, contactRole, editBusy, editError, evidencePool, finding, onApprove, onBack, onConsent, onEditFinding, onPresent, onSaveContact, owner, scheduledAt, synthesis }: {
   agendaBusy: boolean; agendaError: string; busy: boolean; consent: "pending" | "recorded" | "not-recorded"; onApprove: () => void; onBack: () => void;
   onConsent: (value: "pending" | "recorded" | "not-recorded") => void; onPresent: () => void; owner: string;
   contact: string; contactRole: string; contactBusy: boolean; contactError: string; onSaveContact: (contact: string, role: string) => void;
+  /** The stored finding and the whole grounded evidence pool, for the "Edit the finding" panel. */
+  editBusy: boolean; editError: string; evidencePool: FindingEvidence[];
+  finding: ConstraintFinding | null; onEditFinding: (patch: FindingPatch) => void;
   scheduledAt: string | null; synthesis: TranscriptSynthesis | null;
 }) {
   const [step, setStep] = useState(0);
@@ -3179,6 +3321,20 @@ function Findings({ agendaBusy, agendaError, busy, consent, contact, contactBusy
   const ownerUnchanged = ownerName.trim() === contact.trim() && ownerRole.trim() === contactRole.trim();
   const candidate = synthesis?.constraintCandidate;
   const baseline = synthesis?.baselineStatus ?? "Missing";
+  /**
+   * The two server-side approval gates, shown before they are hit rather than after. Excluding
+   * evidence in the editor is allowed to take the finding below the bar — the advisor then sees
+   * exactly why approval is blocked instead of the save being refused.
+   */
+  const approvalEvidence = (finding?.evidence ?? candidate?.evidence ?? [])
+    .filter((item) => item.provenance === "client-stated" && item.quote?.trim() && item.speaker?.trim() && item.timestamp?.trim());
+  const distinctQuotes = new Set(approvalEvidence.map(evidenceKey)).size;
+  const baselineSource = (finding?.baselineMetric?.source ?? candidate?.baselineMetric?.source ?? "").trim();
+  const baselineBound = Boolean(baselineSource) && !/^missing\b/i.test(baselineSource);
+  const approvalBlocks = [
+    distinctQuotes < 2 ? `The finding carries ${distinctQuotes} client quote${distinctQuotes === 1 ? "" : "s"}. Approval needs at least two distinct client-stated lines — select more in "Edit the finding".` : "",
+    !baselineBound ? "The finding's baseline metric is Missing, so nothing measures this constraint yet. Type the reading into the baseline editor or leave the diagnosis provisional." : "",
+  ].filter(Boolean);
   const steps = [["Reconcile the Canvas", "Confirm corrections, role ownership, and the actual flow."], ["Resolve the baseline", `${baseline} baseline. Confirm its source or assign instrumentation to the named owner.`], ["Test the constraint", candidate ? `Confirm or kill the ${candidate.constraintType} candidate in ${candidate.canvasBlock}.` : "No constraint signal was detected; collect stronger evidence before approval."], ["Reveal the prescription", "Constraint → prescription → metric formula → named owner."]];
   if (consent === "pending") return <section className="guided narrow"><Back onClick={onBack}>Synthesis review</Back><div className="consent-gate"><span><Icon name="mic" size={29} /></span><p className="eyebrow">Findings Call · before the conversation{scheduledAt ? ` · ${formatMeeting(scheduledAt)}` : ""}</p><h1>Confirm recording consent again.</h1><blockquote>“With your permission, we’ll record and transcribe this session so we quote you accurately rather than paraphrasing you.”</blockquote><p>Consent is recorded separately for Call 2.</p><Button icon="check" onClick={() => onConsent("recorded")}>Consent confirmed</Button><button className="call-link" onClick={() => onConsent("not-recorded")} type="button">Continue without recording</button></div></section>;
   return <section className="guided findings"><Back onClick={onBack}>Synthesis review</Back><PageHead eyebrow={`Synthesize · Findings Call${scheduledAt ? ` · ${formatMeeting(scheduledAt)}` : ""}`} title="Reconcile first. Reveal second.">The diagnosis stays provisional while the required baseline is missing. The call can continue, but numeric claims cannot.</PageHead>
@@ -3199,13 +3355,14 @@ function Findings({ agendaBusy, agendaError, busy, consent, contact, contactBusy
       {contactError ? <p className="upload-state error" role="alert"><Icon name="info" size={15} />{contactError}</p> : null}
       {!owner ? <p className="upload-state" role="status"><Icon name="info" size={15} />No named owner is on the engagement yet, so diagnosis approval stays blocked. Add the name and role above.</p> : null}
     </div>
+    <FindingEditor busy={editBusy} error={editError} finding={finding} onSave={onEditFinding} pool={evidencePool} />
     <div className="findings-flow"><ol>{steps.map(([title], index) => <li className={index === step ? "active" : index < step ? "done" : ""} key={title}><button onClick={() => setStep(index)} type="button"><span>{index < step ? <Icon name="check" size={13} /> : index + 1}</span>{title}</button></li>)}</ol>
       <article><p className="eyebrow">Part {step < 2 ? "A · Reconciliation" : "B · Reveal"}</p><h2>{steps[step][0]}</h2><p>{steps[step][1]}</p>
         {step === 1 ? <div className="baseline"><Pill tone={baseline === "Confirmed" ? "known" : "missing"}>{baseline} baseline</Pill><strong>{baseline === "Confirmed" ? "Verify the coherent metric and source." : "No benchmark will be substituted."}</strong><span>{synthesis?.gaps.join("; ") || "Assign baseline instrumentation as the first Sprint task."}</span></div> : null}
         {step === 3 ? <div className="reveal">{[["Constraint", candidate ? `${candidate.constraintType} in ${candidate.canvasBlock}` : "No supported candidate"], ["Prescription", candidate?.prescription.description || "Collect stronger evidence before prescribing"], ["Projected delta", "(ending metric − starting metric) ÷ measurement period"], ["Human owner", owner || "Named owner required"]].map(([label, text], index) => <div key={label}>{index ? <Icon name="arrow" /> : null}<section><span>{label}</span><strong>{text}</strong></section></div>)}</div> : null}
         <div className="findings-actions"><Button disabled={step === 0} onClick={() => setStep(step - 1)} variant="secondary">Back</Button>{step < 3 ? <Button icon="arrow" onClick={() => setStep(step + 1)}>Continue</Button> : null}</div>
       </article></div>
-    {step === 3 ? <div className="diagnosis"><div><Pill tone="assumed">Provisional diagnosis</Pill><h2>{candidate ? `${candidate.constraintType} in ${candidate.canvasBlock}` : "No supported diagnosis yet."}</h2><p>{baseline === "Confirmed" ? "Approve only after checking the evidence and owner." : "It stays provisional until the baseline lands; Sprint 1 begins with instrumentation."}</p></div><dl><div><dt>Evidence</dt><dd>{candidate?.evidence.length ?? 0} client line(s)</dd></div><div><dt>Canvas block</dt><dd>{candidate?.canvasBlock ?? "Missing"}</dd></div><div><dt>Named owner</dt><dd>{owner || "Required"}</dd></div><div><dt>First Sprint task</dt><dd>{baseline === "Confirmed" ? "Run the intervention" : "Instrument baseline"}</dd></div></dl><Button disabled={!candidate || !owner || consent !== "recorded" || busy} icon="check" onClick={onApprove}>{busy ? "Approving…" : "Approve provisional diagnosis"}</Button></div> : null}
+    {step === 3 ? <div className="diagnosis"><div><Pill tone="assumed">Provisional diagnosis</Pill><h2>{candidate ? `${candidate.constraintType} in ${candidate.canvasBlock}` : "No supported diagnosis yet."}</h2><p>{baseline === "Confirmed" ? "Approve only after checking the evidence and owner." : "It stays provisional until the baseline lands; Sprint 1 begins with instrumentation."}</p></div><dl><div><dt>Evidence</dt><dd>{candidate?.evidence.length ?? 0} client line(s)</dd></div><div><dt>Canvas block</dt><dd>{candidate?.canvasBlock ?? "Missing"}</dd></div><div><dt>Named owner</dt><dd>{owner || "Required"}</dd></div><div><dt>First Sprint task</dt><dd>{baseline === "Confirmed" ? "Run the intervention" : "Instrument baseline"}</dd></div></dl>{approvalBlocks.length ? <div className="approval-blocks" role="status"><p className="eyebrow">Approval is blocked</p><ul>{approvalBlocks.map((line) => <li key={line}><Icon name="info" size={15} />{line}</li>)}</ul></div> : null}<Button disabled={!candidate || !owner || consent !== "recorded" || busy || approvalBlocks.length > 0} icon="check" onClick={onApprove}>{busy ? "Approving…" : "Approve provisional diagnosis"}</Button></div> : null}
   </section>;
 }
 
@@ -3214,6 +3371,198 @@ function Findings({ agendaBusy, agendaError, busy, consent, contact, contactBusy
  * consent gate as the guided call. Only the `evidence` quotes are presented as the client's own
  * words; the section body is our reading of the call and is never attributed to them.
  */
+/**
+ * The advisor's own judgment, written into the finding.
+ *
+ * Collapsed by default because the model's reading is the starting point, not a draft to be
+ * rewritten by habit. Three rules hold inside it and are enforced on the server as well:
+ * editing never approves anything, every changed field is recorded beside the model's
+ * original, and evidence is a SELECTION over lines the client actually said — there is no
+ * field here that turns advisor prose into a client quote.
+ */
+function FindingEditor({ busy, error, finding, onSave, pool }: {
+  busy: boolean; error: string; finding: ConstraintFinding | null;
+  onSave: (patch: FindingPatch) => void; pool: FindingEvidence[];
+}) {
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState<ConstraintFinding | null>(finding);
+  const [selected, setSelected] = useState<string[]>((finding?.evidence ?? []).map(evidenceKey));
+  const [baseline, setBaseline] = useState<Metric>(finding?.baselineMetric ?? { name: "", period: "", source: "", unit: "", value: "" });
+  const [attested, setAttested] = useState(false);
+  const [appendixAdd, setAppendixAdd] = useState("");
+  const [removedAppendix, setRemovedAppendix] = useState<string[]>([]);
+  // Re-seed from the record whenever the server returns a new one, so a save never leaves the
+  // panel showing an edit the server did not actually accept.
+  const stamp = finding ? JSON.stringify(finding) : "";
+  const [seeded, setSeeded] = useState(stamp);
+  if (stamp !== seeded) {
+    setSeeded(stamp);
+    setDraft(finding);
+    setSelected((finding?.evidence ?? []).map(evidenceKey));
+    setBaseline(finding?.baselineMetric ?? { name: "", period: "", source: "", unit: "", value: "" });
+    setAttested(false);
+    setAppendixAdd("");
+    setRemovedAppendix([]);
+  }
+  if (!finding || !draft) {
+    return <div className="finding-editor empty"><p className="eyebrow">Edit the finding</p><small>No finding is stored yet. Synthesize a transcript first — the editor works on the record, not on a preview.</small></div>;
+  }
+
+  const edited = new Set((finding.advisorEdits ?? []).map((edit) => edit.field));
+  const chip = (field: string) => edited.has(field)
+    ? <span className="advisor-chip" title={`Model original: ${finding.advisorEdits?.find((edit) => edit.field === field)?.original ?? ""}`}>edited by advisor</span>
+    : null;
+  const spec = draft.killConditionSpec ?? { comparator: "does-not-move" as KillComparator, metric: "", threshold: "", window: "" };
+  const setSpec = (next: Partial<KillConditionSpec>) =>
+    setDraft({ ...draft, killConditionSpec: { ...spec, ...next } });
+  const specTouched = JSON.stringify(draft.killConditionSpec ?? null) !== JSON.stringify(finding.killConditionSpec ?? null);
+  const specComplete = Boolean(spec.metric.trim() && spec.threshold.trim() && spec.window.trim());
+  const baselineTouched = JSON.stringify(baseline) !== JSON.stringify(finding.baselineMetric) || attested;
+  const selectionTouched = JSON.stringify([...selected].sort()) !== JSON.stringify(finding.evidence.map(evidenceKey).sort());
+  const appendixTouched = removedAppendix.length > 0 || appendixAdd.trim().length > 0;
+
+  const submit = () => {
+    const patch: FindingPatch = {};
+    if (draft.constraintType !== finding.constraintType) patch.constraintType = draft.constraintType;
+    if (draft.canvasBlock !== finding.canvasBlock) patch.canvasBlock = draft.canvasBlock;
+    if (draft.prescription.description !== finding.prescription.description) patch.prescription = draft.prescription.description;
+    if (draft.prescription.whySmallestIntervention !== finding.prescription.whySmallestIntervention) {
+      patch.whySmallestIntervention = draft.prescription.whySmallestIntervention;
+    }
+    if (draft.killCondition !== finding.killCondition) patch.killCondition = draft.killCondition;
+    if (draft.predictedNextConstraint !== finding.predictedNextConstraint) patch.predictedNextConstraint = draft.predictedNextConstraint;
+    if (specTouched) patch.killConditionSpec = specComplete ? spec : null;
+    if (appendixTouched) {
+      patch.appendixItems = {
+        add: appendixAdd.split("\n").map((line) => line.trim()).filter(Boolean),
+        remove: removedAppendix,
+      };
+    }
+    if (selectionTouched) {
+      const current = new Set(finding.evidence.map(evidenceKey));
+      patch.evidence = {
+        exclude: [...current].filter((key) => !selected.includes(key)),
+        include: selected.filter((key) => !current.has(key)),
+      };
+    }
+    if (baselineTouched) {
+      patch.baseline = { ...baseline, ...(attested ? { attestation: "advisor-attested" as const } : {}) };
+    }
+    if (Object.keys(patch).length === 0) return;
+    onSave(patch);
+  };
+
+  const dirty = specTouched || baselineTouched || selectionTouched || appendixTouched ||
+    draft.constraintType !== finding.constraintType || draft.canvasBlock !== finding.canvasBlock ||
+    draft.prescription.description !== finding.prescription.description ||
+    draft.prescription.whySmallestIntervention !== finding.prescription.whySmallestIntervention ||
+    draft.killCondition !== finding.killCondition ||
+    draft.predictedNextConstraint !== finding.predictedNextConstraint;
+
+  return <div className="finding-editor">
+    <button aria-expanded={open} className="finding-editor-toggle" onClick={() => setOpen(!open)} type="button">
+      <span><Icon name={open ? "check" : "arrow"} size={15} />Edit the finding{edited.size ? <span className="advisor-chip">{edited.size} field{edited.size === 1 ? "" : "s"} edited by advisor</span> : null}</span>
+      <small>{open ? "Close the editor" : "Constraint, prescription, kill condition, evidence selection, baseline, appendix"}</small>
+    </button>
+    {!open ? null : <div className="finding-editor-body">
+      <p className="finding-editor-note"><Icon name="lock" size={15} /><span>Your edits are your judgment and are recorded as such beside the model&rsquo;s original. Nothing you type here is ever presented as a client quote — evidence is a selection over lines the client actually said. Saving does not approve the diagnosis.</span></p>
+
+      <div className="field-row">
+        <label><span>Constraint type {chip("constraintType")}</span>
+          <select onChange={(event) => setDraft({ ...draft, constraintType: event.target.value })} value={draft.constraintType}>
+            {constraintTypes.map((type) => <option key={type} value={type}>{type}</option>)}
+          </select>
+        </label>
+        <label><span>Canvas block {chip("canvasBlock")}</span>
+          <select onChange={(event) => setDraft({ ...draft, canvasBlock: event.target.value })} value={draft.canvasBlock}>
+            {canvasBlockNames.map((block) => <option key={block} value={block}>{block}</option>)}
+          </select>
+        </label>
+      </div>
+
+      <label><span>Prescription {chip("prescription")}</span>
+        <textarea onChange={(event) => setDraft({ ...draft, prescription: { ...draft.prescription, description: event.target.value } })} rows={4} value={draft.prescription.description} />
+      </label>
+      <label><span>Why this is the smallest intervention {chip("whySmallestIntervention")}</span>
+        <textarea onChange={(event) => setDraft({ ...draft, prescription: { ...draft.prescription, whySmallestIntervention: event.target.value } })} rows={3} value={draft.prescription.whySmallestIntervention} />
+      </label>
+      <label><span>Kill condition, in the client&rsquo;s words {chip("killCondition")}</span>
+        <textarea onChange={(event) => setDraft({ ...draft, killCondition: event.target.value })} rows={3} value={draft.killCondition} />
+      </label>
+
+      <fieldset className="kill-spec">
+        <legend>Kill condition as a test {chip("killConditionSpec")}</legend>
+        <small>All four parts or none. This is what the outcome screen tests; leave it empty rather than inventing a threshold or a window the client never agreed to.</small>
+        <div className="field-row">
+          <label><span>Business metric</span><input onChange={(event) => setSpec({ metric: event.target.value })} placeholder="Win rate on quoted work" value={spec.metric} /></label>
+          <label><span>Comparator</span>
+            <select onChange={(event) => setSpec({ comparator: event.target.value as KillComparator })} value={spec.comparator}>
+              {killComparators.map((option) => <option key={option} value={option}>{option}</option>)}
+            </select>
+          </label>
+        </div>
+        <div className="field-row">
+          <label><span>Threshold</span><input onChange={(event) => setSpec({ threshold: event.target.value })} placeholder="no increase from 20 percent" value={spec.threshold} /></label>
+          <label><span>Window</span><input onChange={(event) => setSpec({ window: event.target.value })} placeholder="4 weeks" value={spec.window} /></label>
+        </div>
+        {specTouched && !specComplete ? <small className="kill-spec-state">Incomplete, so this saves as no structured condition — the sentence above still carries it.</small> : null}
+      </fieldset>
+
+      <label><span>Predicted next constraint {chip("predictedNextConstraint")}</span>
+        <textarea onChange={(event) => setDraft({ ...draft, predictedNextConstraint: event.target.value })} rows={2} value={draft.predictedNextConstraint} />
+      </label>
+
+      <fieldset className="baseline-editor">
+        <legend>Baseline metric {chip("baselineMetric")}</legend>
+        <small>The value must be one comparable reading, and the source must quote a client line on record (or name its speaker and timestamp). If the number is yours rather than theirs, mark it attested — the finding then stays provisional.</small>
+        <div className="field-row triple">
+          <label><span>Name</span><input onChange={(event) => setBaseline({ ...baseline, name: event.target.value })} placeholder="Quote turnaround time" value={baseline.name} /></label>
+          <label><span>Value</span><input onChange={(event) => setBaseline({ ...baseline, value: event.target.value })} placeholder="9" value={baseline.value} /></label>
+          <label><span>Unit</span><input onChange={(event) => setBaseline({ ...baseline, unit: event.target.value })} placeholder="days" value={baseline.unit} /></label>
+        </div>
+        <div className="field-row">
+          <label><span>Period</span><input onChange={(event) => setBaseline({ ...baseline, period: event.target.value })} placeholder="per quote" value={baseline.period} /></label>
+          <label><span>Source</span><input onChange={(event) => setBaseline({ ...baseline, source: event.target.value })} placeholder="Rosa Alvarez at 04:43: …" value={baseline.source} /></label>
+        </div>
+        <label className="confirm"><input checked={attested} onChange={(event) => setAttested(event.target.checked)} type="checkbox" />This reading is advisor-attested, not client-stated. The finding cannot go past provisional on it.</label>
+      </fieldset>
+
+      <fieldset className="evidence-select">
+        <legend>Evidence {chip("evidence")}</legend>
+        <small>Selection only. {selected.length} of {pool.length} grounded client line(s) selected{selected.length < 2 ? " — below the two-quote bar, so approval will stay blocked until a second line is selected." : "."}</small>
+        <ul>{pool.map((item) => {
+          const key = evidenceKey(item);
+          return <li key={key}>
+            <label>
+              <input checked={selected.includes(key)} onChange={(event) => setSelected(event.target.checked ? [...selected, key] : selected.filter((value) => value !== key))} type="checkbox" />
+              <span><b>{item.speaker} · {item.timestamp}</b>{item.quote}</span>
+            </label>
+          </li>;
+        })}</ul>
+        {!pool.length ? <small>No grounded client lines are on record for this engagement yet.</small> : null}
+      </fieldset>
+
+      <fieldset className="appendix-editor">
+        <legend>Appendix — what this is deliberately not touching {chip("appendixItems")}</legend>
+        <ul>{finding.appendixItems.map((item) => <li key={item}>
+          <label>
+            <input checked={!removedAppendix.includes(item)} onChange={(event) => setRemovedAppendix(event.target.checked ? removedAppendix.filter((value) => value !== item) : [...removedAppendix, item])} type="checkbox" />
+            <span>{item}</span>
+          </label>
+        </li>)}</ul>
+        {!finding.appendixItems.length ? <small>Nothing is parked yet.</small> : null}
+        <label><span>Add items <small>One per line</small></span><textarea onChange={(event) => setAppendixAdd(event.target.value)} placeholder="Shop-drawing capacity — named by the client and deliberately left alone this sprint" rows={3} value={appendixAdd} /></label>
+      </fieldset>
+
+      {error ? <p className="upload-state error" role="alert"><Icon name="info" size={15} />{error}</p> : null}
+      <div className="action-row">
+        <p><Icon name="info" size={16} />Saving records the change and leaves the diagnosis exactly as approved or unapproved as it was.</p>
+        <Button disabled={busy || !dirty} icon="check" onClick={submit}>{busy ? "Saving…" : "Save the finding"}</Button>
+      </div>
+    </div>}
+  </div>;
+}
+
 function FindingsPresentation({ company, consent, index, onConsent, onExit, onNext, onPrevious, practice, scheduledAt, sections }: {
   company: string; consent: "pending" | "recorded" | "not-recorded"; index: number;
   onConsent: (value: "pending" | "recorded" | "not-recorded") => void; onExit: () => void;
@@ -3252,11 +3601,17 @@ function Deliver({ approved, artifacts, busy, error, intents, onActions, onBack,
   const intentFor = (documentId: string) => publishIntents.find((intent) =>
     (intent.payload as { documentId?: string } | null)?.documentId === documentId) ?? null;
   const queued = publishIntents.filter((intent) => intent.status === "pending_review" || intent.status === "approved").length;
+  // The developer specification is only written when the prescription implicates a system — the
+  // server decides that, not this screen. Once the suite exists, a card for a document the server
+  // deliberately did not write would read as a failure, so it is dropped along with the artifact.
+  const suiteGenerated = artifacts.some((item) => item.kind === "proposal" || item.kind === "diagnosis_package");
+  const specOmitted = suiteGenerated && !artifacts.some((item) => item.kind === "developer_spec");
+  const cards = deliverables.filter(([, , kind]) => !(specOmitted && kind === "developer_spec"));
   return <section className="guided wide deliver"><Back onClick={onBack}>Findings</Back><PageHead eyebrow="Deliver · Approved release" side={<Pill tone={approved ? "success" : "assumed"}>{approved ? "Release approved" : "Provisional release"}</Pill>} title="Turn the finding into usable work.">Every deliverable carries the evidence label, named owner, scope, guardrails, and measurement plan forward.</PageHead>
     <div className="deliver-banner"><div><span>Primary deliverable</span><strong>One constraint → one prescription → one metric → one named human owner</strong></div><div><span>Evidence label</span><strong>Provisional · baseline instrumentation required</strong></div></div>
     {error ? <p className="ops-error" role="alert"><Icon name="info" size={15} />{error}</p> : null}
     <div className="send-explainer"><Icon name="lock" size={18} /><div><strong>Sending a document to the client is two steps, on purpose.</strong><p>“Send to client” queues a reviewed publication intent — nothing leaves this app. You then approve and send it from the Reviewed actions panel, so nothing can go out mid-call by accident.</p></div>{queued ? <Pill tone="assumed">{queued} waiting in Reviewed actions</Pill> : null}<Button onClick={onActions} variant="secondary">Reviewed actions <Icon name="lock" size={14} /></Button></div>
-    <div className="deliver-grid">{deliverables.map(([title, text, kind]) => {
+    <div className="deliver-grid">{cards.map(([title, text, kind]) => {
       const artifact = artifacts.find((item) => item.kind === kind) ?? null;
       const intent = artifact ? intentFor(artifact.id) : null;
       const publish = publishStatusCopy(intent);
@@ -3266,6 +3621,7 @@ function Deliver({ approved, artifacts, busy, error, intents, onActions, onBack,
         </div> : <button disabled={Boolean(busy)} onClick={onGenerate} type="button">{busy === "suite" ? "Generating…" : "Generate suite"}<Icon name="arrow" size={14} /></button>}
       </article>;
     })}</div>
+    {specOmitted ? <p className="deliver-omitted"><Icon name="info" size={15} />No developer specification was written. This prescription is paper and people — there is no system for a developer to build, so a spec full of autonomy boundaries and audit-history requirements would be noise you had to explain away.</p> : null}
     <div className="page-actions"><p><Icon name="lock" size={16} />The CRM action creates a reviewed write-back intent. It does not change Google Sheets automatically.</p><div><Button disabled={Boolean(busy)} icon="refresh" onClick={onGenerate} variant="secondary">{busy === "suite" ? "Generating…" : artifacts.length ? "Regenerate the suite" : "Generate the suite"}</Button><Button disabled={Boolean(busy)} icon="arrow" onClick={onSync} variant="secondary">{busy === "crm" ? "Preparing…" : "Prepare CRM write-back"}</Button></div></div>
     <div className="sprint-path"><div className="sprint-path-heading"><p className="eyebrow">Implementation roadmap</p><span>After diagnosis approval</span></div>{([["1", "Activate the sprint", "Fixed scope, named owner, measurement clock started.", "sprint"], ["2", "Remove & measure", "Capture the ending metric; the server decides whether a delta is claimable.", "measure"], ["3", "Catalog write-back", "Compound the reusable evidence pattern.", "catalog"]] as Array<[string, string, string, Screen]>).map(([number, title, text, target], index) => <button className="sprint-step" key={title} onClick={() => onOperate(target)} type="button">{index ? <Icon className="sprint-arrow" name="arrow" /> : null}<span className="sprint-number">{number}</span><section><strong>{title}</strong><small>{text}</small></section><Icon name="chevron" size={15} /></button>)}</div>
   </section>;
@@ -3293,10 +3649,16 @@ function SprintScreen({ busy, error, onActivate, onBack, onNavigate, onTask, spr
   </section>;
 }
 
-function Measure({ busy, correcting, error, onBack, onCorrectDirection, onNavigate, onSubmit, outcome, sprint }: {
+function Measure({ busy, correcting, error, finding, onBack, onCorrectDirection, onNavigate, onSubmit, outcome, sprint }: {
   busy: boolean; correcting: boolean; error: string; onBack: () => void;
+  /** Carried so the kill-condition block can show the client's own stop condition. */
+  finding: ConstraintFinding | null;
   onCorrectDirection: (improvedWhen: "higher" | "lower") => void; onNavigate: (screen: Screen) => void;
-  onSubmit: (body: { endingMetric: Metric; improvedWhen?: "higher" | "lower"; constraintMoved: boolean; nextConstraintObserved: string }) => void;
+  onSubmit: (body: {
+    endingMetric: Metric; improvedWhen?: "higher" | "lower"; constraintMoved: boolean;
+    nextConstraintObserved: string; killConditionResult: KillConditionResult;
+    businessMetric?: { starting: Metric; ending: Metric };
+  }) => void;
   outcome: OutcomeMeasurement | null; sprint: SprintRecord | null;
 }) {
   const starting = sprint?.startingMetric;
@@ -3304,6 +3666,11 @@ function Measure({ busy, correcting, error, onBack, onCorrectDirection, onNaviga
   const [moved, setMoved] = useState(false);
   const [next, setNext] = useState("");
   const [choice, setChoice] = useState<"higher" | "lower" | null>(null);
+  // The kill-condition test. It starts unanswered, which is the truth until somebody answers it.
+  const [killResult, setKillResult] = useState<KillConditionResult>("not-tested");
+  const businessName = finding?.killConditionSpec?.metric ?? "";
+  const [businessBefore, setBusinessBefore] = useState<Metric>({ name: businessName, period: "", source: "", unit: "", value: "" });
+  const [businessAfter, setBusinessAfter] = useState<Metric>({ name: businessName, period: "", source: "", unit: "", value: "" });
   // The preview is stored against the exact probe it answered, so a slow reply for an
   // older metric name can never be read as the inference for what is on screen now.
   const [preview, setPreview] = useState<{ probe: string; inference: DirectionInference | null; error: string } | null>(null);
@@ -3333,11 +3700,20 @@ function Measure({ busy, correcting, error, onBack, onCorrectDirection, onNaviga
   const shown = choice ?? (inference?.ambiguous ? null : inference?.improvedWhen ?? null);
   const recorded = outcome?.directionInference ?? null;
   const recordedDirection = recorded?.improvedWhen ?? outcome?.improvedWhen ?? null;
+  /**
+   * The kill-condition block. A business reading is sent only when both ends are complete —
+   * the server rejects a half-filled one rather than storing a before with no after.
+   */
+  const condition = killConditionSentence(finding);
+  const businessFields: Array<[keyof Metric, string, string]> = [["name", "Metric name", "Win rate on quoted work"], ["value", "Reading", "20"], ["unit", "Unit", "percent"], ["period", "Measured over", "of quoted work"], ["source", "Where this number comes from", "Rosa's win/loss sheet, read back on the call"]];
+  const complete = (item: Metric) => Boolean(item.name.trim() && item.value.trim() && item.unit.trim() && item.period.trim() && item.source.trim());
+  const businessStarted = businessFields.some(([key]) => businessBefore[key].trim() || businessAfter[key].trim());
+  const businessComplete = complete(businessBefore) && complete(businessAfter);
   return <section className="guided wide"><Back onClick={onBack}>Sprint</Back><PageHead eyebrow="Operate · Outcome" side={<Pill tone={outcome ? "success" : "assumed"}>{outcome ? "Measured" : "Not measured"}</Pill>} title="Measure what actually changed.">Record the ending reading exactly as the client states it. The before/after comparison is returned by the server; this screen never calculates or projects a number.</PageHead>
     <OpsRail current="measure" onNavigate={onNavigate} />
     {error ? <p className="ops-error" role="alert"><Icon name="info" size={15} />{error}</p> : null}
     <div className="ops-columns">
-      <form className="panel" onSubmit={(event) => { event.preventDefault(); onSubmit({ constraintMoved: moved, endingMetric: metric, nextConstraintObserved: next, ...(choice ? { improvedWhen: choice } : {}) }); }}>
+      <form className="panel" onSubmit={(event) => { event.preventDefault(); onSubmit({ constraintMoved: moved, endingMetric: metric, killConditionResult: killResult, nextConstraintObserved: next, ...(choice ? { improvedWhen: choice } : {}), ...(businessComplete ? { businessMetric: { ending: businessAfter, starting: businessBefore } } : {}) }); }}>
         <p className="eyebrow">Ending metric</p>
         {starting ? <p className="ops-hint"><Icon name="info" size={15} />Starting metric on record: {starting.name} — {starting.value} {starting.unit} · {starting.period}</p> : <p className="ops-hint"><Icon name="info" size={15} />No starting metric is on record yet. Activate the sprint first so a before reading exists.</p>}
         {fields.map(([key, label, placeholder]) => <label key={key}><span>{label} <em>Required</em></span><input onChange={(event) => setMetric({ ...metric, [key]: event.target.value })} placeholder={placeholder} required value={metric[key]} /></label>)}
@@ -3353,6 +3729,28 @@ function Measure({ busy, correcting, error, onBack, onCorrectDirection, onNaviga
           <div aria-label="Which way is better for this metric" className="direction-choices" role="group">{(["lower", "higher"] as const).map((option) => <button aria-pressed={shown === option} className={shown === option ? "selected" : ""} key={option} onClick={() => setChoice(option)} type="button"><strong>{directionChoiceCopy[option][0]}</strong><small>{directionChoiceCopy[option][1]}</small>{shown === option ? <Pill tone={choice ? "known" : "inferred"}>{choice ? "Your choice" : "Proposed"}</Pill> : null}</button>)}</div>
           {choice && inference && !inference.ambiguous && inference.improvedWhen ? <button className="direction-reset" onClick={() => setChoice(null)} type="button">Use the inferred direction instead ({directionChoiceCopy[inference.improvedWhen][0].toLowerCase()})</button> : null}
           <p className="direction-effect">{choice ? "Sent as your explicit declaration; the server will record you as the source of the direction." : shown ? "Nothing is sent for direction — the server applies this inference and records where it came from." : "No direction is sent. The result will show the arithmetic change only, marked not interpreted."}</p>
+        </div>
+        <div className="kill-block">
+          <p className="eyebrow">Kill condition</p>
+          {condition
+            ? <blockquote className="kill-condition">{condition}{finding?.killConditionSpec ? <small>Structured from the client&rsquo;s own stop condition. Verbatim: &ldquo;{finding.killCondition}&rdquo;</small> : null}</blockquote>
+            : <p className="ops-hint"><Icon name="info" size={15} />No kill condition is recorded on the finding. Add one in &ldquo;Edit the finding&rdquo; before you can honestly say whether it held.</p>}
+          <div className="kill-business">
+            <p><b>The business number it was watching.</b> This is not the metric above: it is what the constraint was supposed to move. Both readings or neither — a before with no after tests nothing.</p>
+            <div className="kill-readings">
+              {(["before", "after"] as const).map((side) => <fieldset key={side}>
+                <legend>{side === "before" ? "Before the sprint" : "After the sprint"}</legend>
+                {businessFields.map(([key, label, placeholder]) => <label key={key}><span>{label}</span><input onChange={(event) => (side === "before" ? setBusinessBefore({ ...businessBefore, [key]: event.target.value }) : setBusinessAfter({ ...businessAfter, [key]: event.target.value }))} placeholder={placeholder} value={side === "before" ? businessBefore[key] : businessAfter[key]} /></label>)}
+              </fieldset>)}
+            </div>
+            {businessStarted && !businessComplete ? <p className="upload-state" role="status"><Icon name="info" size={15} />Both readings need all five fields, or leave the business metric out entirely.</p> : null}
+          </div>
+          <div aria-label="Did the kill condition hold or fire" className="kill-choices" role="group">
+            {(["held", "fired", "not-tested"] as const).map((option) => <button aria-pressed={killResult === option} className={killResult === option ? "selected" : ""} key={option} onClick={() => setKillResult(option)} type="button">
+              <strong>{killResultCopy[option][0]}</strong><small>{killResultCopy[option][1]}</small>
+            </button>)}
+          </div>
+          {killResult === "not-tested" ? <p className="upload-state" role="status"><Icon name="info" size={15} />The outcome can be recorded, but the catalog write-back stays blocked until this is answered.</p> : null}
         </div>
         <label className="confirm"><input checked={moved} onChange={(event) => setMoved(event.target.checked)} type="checkbox" />The client confirmed the constraint moved.</label>
         <label><span>Next constraint observed <small>Optional</small></span><textarea onChange={(event) => setNext(event.target.value)} placeholder="Where the client says work now waits…" rows={3} value={next} /></label>
@@ -3377,7 +3775,7 @@ function Measure({ busy, correcting, error, onBack, onCorrectDirection, onNaviga
               {correcting ? <small role="status">Correcting the direction and regenerating the outcome report…</small> : null}
             </div>
           </div>
-          <dl className="ops-meta"><div><dt>Constraint moved</dt><dd>{outcome.constraintMoved ? "Yes, client-confirmed" : "Not confirmed"}</dd></div><div><dt>Next constraint</dt><dd>{outcome.nextConstraintObserved || "Not observed yet"}</dd></div><div><dt>Measured</dt><dd>{outcome.measuredAt ? new Date(outcome.measuredAt).toLocaleString() : "Unknown"}</dd></div></dl>
+          <dl className="ops-meta"><div><dt>Kill condition</dt><dd>{killResultCopy[outcome.killConditionResult ?? "not-tested"][0]}{outcome.businessMetric ? ` · ${outcome.businessMetric.starting.value} ${outcome.businessMetric.starting.unit} → ${outcome.businessMetric.ending.value} ${outcome.businessMetric.ending.unit} on ${outcome.businessMetric.ending.name}` : " · no business reading recorded"}</dd></div><div><dt>Constraint moved</dt><dd>{outcome.constraintMoved ? "Yes, client-confirmed" : "Not confirmed"}</dd></div><div><dt>Next constraint</dt><dd>{outcome.nextConstraintObserved || "Not observed yet"}</dd></div><div><dt>Measured</dt><dd>{outcome.measuredAt ? new Date(outcome.measuredAt).toLocaleString() : "Unknown"}</dd></div></dl>
           <Button icon="arrow" onClick={() => onNavigate("catalog")}>Write the pattern back</Button>
         </>}
       </div>
@@ -3385,26 +3783,38 @@ function Measure({ busy, correcting, error, onBack, onCorrectDirection, onNaviga
   </section>;
 }
 
-function Catalog({ busy, entry, error, onBack, onNavigate, onSubmit, outcome }: {
+function Catalog({ busy, entry, error, finding, onBack, onNavigate, onSubmit, outcome }: {
   busy: boolean; entry: CatalogEntry | null; error: string; onBack: () => void;
+  /** Carried so the block message can quote the condition that has not been tested. */
+  finding: ConstraintFinding | null;
   onNavigate: (screen: Screen) => void; onSubmit: (body: { industryContext: string; reusableFor: string }) => void;
   outcome: OutcomeMeasurement | null;
 }) {
   const [industryContext, setIndustryContext] = useState("");
   const [reusableFor, setReusableFor] = useState("");
+  /**
+   * Audit F2: the catalog used to publish "improved" on an engagement where nobody checked the
+   * number the constraint was supposed to move. `fired` writes — a disproven constraint is the
+   * most useful entry there is — but an untested condition does not.
+   */
+  const killResult = outcome?.killConditionResult ?? "not-tested";
+  const blocked = Boolean(outcome) && killResult === "not-tested";
+  const condition = killConditionSentence(finding);
   return <section className="guided wide"><Back onClick={onBack}>Outcome</Back><PageHead eyebrow="Operate · Catalog" side={<Pill tone={entry ? "success" : "assumed"}>{entry ? "Pattern written" : "Not written"}</Pill>} title="Compound the pattern.">The constraint, prescription, and measured result come from the approved record. You only add where this pattern is reusable.</PageHead>
     <OpsRail current="catalog" onNavigate={onNavigate} />
     {error ? <p className="ops-error" role="alert"><Icon name="info" size={15} />{error}</p> : null}
     {!outcome ? <p className="ops-hint"><Icon name="info" size={15} />No measured outcome is on record. A catalog entry written now carries no measured result.</p> : null}
+    {blocked ? <div className="catalog-blocked" role="status"><p className="eyebrow">Blocked — the kill condition was never tested</p><p>{condition ? <>The client set a stop condition: <em>{condition}</em> Nobody has recorded whether it held or fired, so this pattern has not survived its own test yet.</> : "No kill-condition result is recorded on the outcome, so this pattern has not survived its own test yet."}</p><p>Go back to Measure, record the business number the constraint was supposed to move, and say whether the condition held or fired. <b>Fired is a real answer</b> — the entry is still written, marked as a constraint that was disproven.</p><Button icon="back" onClick={() => onNavigate("measure")} variant="secondary">Back to the measurement</Button></div> : null}
+    {!blocked && outcome ? <p className="ops-hint"><Icon name={killResult === "fired" ? "info" : "check"} size={15} />Kill condition: {killResultCopy[killResult][0].toLowerCase()}. {killResult === "fired" ? "The entry will record that the constraint was disproven." : "The entry will record that the diagnosis survived its own test."}</p> : null}
     <div className="ops-columns">
       <form className="panel" onSubmit={(event) => { event.preventDefault(); onSubmit({ industryContext, reusableFor }); }}>
         <p className="eyebrow">Reuse context</p>
         <label><span>Industry context</span><input onChange={(event) => setIndustryContext(event.target.value)} placeholder="Regional industrial fabrication, 20–80 staff" value={industryContext} /></label>
         <label><span>Reusable for</span><textarea onChange={(event) => setReusableFor(event.target.value)} placeholder="Which businesses this pattern should be tested against next…" rows={4} value={reusableFor} /></label>
-        <div className="action-row"><p><Icon name="info" size={16} />Nothing is published externally by this action.</p><Button disabled={busy} icon="check" type="submit">{busy ? "Writing…" : "Write catalog entry"}</Button></div>
+        <div className="action-row"><p><Icon name="info" size={16} />Nothing is published externally by this action.</p><Button disabled={busy || blocked} icon="check" type="submit">{busy ? "Writing…" : "Write catalog entry"}</Button></div>
       </form>
       <div className="panel ops-result"><p className="eyebrow">Catalog entry</p>
-        {!entry ? <p className="registry-empty">No catalog entry exists for this engagement yet.</p> : <dl className="ops-meta">{[["Constraint type", entry.constraintType], ["Canvas block", entry.canvasBlock], ["Pattern", entry.pattern], ["Prescription", entry.prescription], ["Measured result", entry.measuredResult || "None recorded"], ["Industry context", entry.industryContext || "Not stated"], ["Reusable for", entry.reusableFor || "Not stated"], ["Written", entry.writtenAt ? new Date(entry.writtenAt).toLocaleString() : "Unknown"]].map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>}
+        {!entry ? <p className="registry-empty">No catalog entry exists for this engagement yet.</p> : <dl className="ops-meta">{[["Constraint type", entry.constraintType], ["Canvas block", entry.canvasBlock], ["Pattern", entry.pattern], ["Prescription", entry.prescription], ["Measured result", entry.measuredResult || "None recorded"], ["Kill condition", entry.killConditionResult ? killResultCopy[entry.killConditionResult][0] : "Not recorded"], ["Industry context", entry.industryContext || "Not stated"], ["Reusable for", entry.reusableFor || "Not stated"], ["Written", entry.writtenAt ? new Date(entry.writtenAt).toLocaleString() : "Unknown"]].map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>}
       </div>
     </div>
   </section>;
@@ -3612,6 +4022,9 @@ function TestOutcome({ test }: { test: SettingsTestState | undefined }) {
  *     A field held in the deployment environment is shown as server-managed and has no input,
  *     because saving over it would silently do nothing.
  *  2. My connections — the non-secret, per-advisor connection settings behind GET/PUT /api/settings.
+ *  3. Letterhead — the firm name, advisor name, address line, footer line and logo that every
+ *     printed and published client document is headed and footed with. Same endpoint as (2); the
+ *     logo is held inline as a data URL so a document needs no network request to render.
  * Reachable only from the top nav, which is hidden on the client-facing call and presentation views.
  */
 function SettingsScreen({ onBack, onIntegrations }: { onBack: () => void; onIntegrations: () => void }) {
@@ -3632,6 +4045,13 @@ function SettingsScreen({ onBack, onIntegrations }: { onBack: () => void; onInte
   const [fromName, setFromName] = useState("");
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [saveError, setSaveError] = useState("");
+  // Letterhead: what the top and bottom of every printed and published client document says.
+  const [letterhead, setLetterhead] = useState<Letterhead>(EMPTY_LETTERHEAD);
+  const [savedLetterhead, setSavedLetterhead] = useState<Letterhead | null>(null);
+  const [letterheadState, setLetterheadState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [letterheadError, setLetterheadError] = useState("");
+  const [logoError, setLogoError] = useState("");
+  const logoInput = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -3657,6 +4077,9 @@ function SettingsScreen({ onBack, onIntegrations }: { onBack: () => void; onInte
         setTab(s.crmSheetTab?.trim() ? s.crmSheetTab : "Engagements");
         setFolder(s.driveFolderId ?? "");
         setFromName(s.fromName ?? "");
+        const head = { ...EMPTY_LETTERHEAD, ...(s.letterhead ?? {}) };
+        setLetterhead(head);
+        setSavedLetterhead(head);
       })
       .catch((reason: Error) => { if (active) setSettingsError(`Your connection settings could not be loaded: ${reason.message}`); })
       .finally(() => { if (active) setSettingsLoading(false); });
@@ -3742,6 +4165,71 @@ function SettingsScreen({ onBack, onIntegrations }: { onBack: () => void; onInte
     }
   }
 
+  /**
+   * Read a chosen logo into a data URL. Type and size are checked here so the advisor gets the
+   * reason before anything is uploaded; the server checks both again on save, because a browser
+   * check is a courtesy and never a guarantee.
+   */
+  function chooseLogo(file: File | null | undefined) {
+    if (!file) return;
+    setLogoError("");
+    if (file.type !== "image/png" && file.type !== "image/jpeg") {
+      setLogoError(`${file.name} is not a PNG or JPEG. Save your logo as a .png or .jpg and choose it again.`);
+      return;
+    }
+    if (file.size > MAX_LOGO_BYTES) {
+      setLogoError(`${file.name} is ${Math.round(file.size / 1024)} KB. The limit is ${Math.round(MAX_LOGO_BYTES / 1024)} KB — save a smaller copy and choose it again.`);
+      return;
+    }
+    const reader = new FileReader();
+    reader.onerror = () => setLogoError("That file could not be read. Try choosing it again.");
+    reader.onload = () => {
+      const result = typeof reader.result === "string" ? reader.result : "";
+      if (!/^data:image\/(png|jpeg);base64,/.test(result)) {
+        setLogoError("That file could not be read as a PNG or JPEG image.");
+        return;
+      }
+      setLetterhead((prev) => ({ ...prev, logoDataUrl: result }));
+      if (letterheadState !== "idle") setLetterheadState("idle");
+    };
+    reader.readAsDataURL(file);
+  }
+
+  /** Saves the letterhead through the same PUT /api/settings. Guarded against a double click. */
+  async function saveLetterhead(event: FormEvent) {
+    event.preventDefault();
+    if (letterheadState === "saving" || settingsLoading) return;
+    setLetterheadState("saving"); setLetterheadError("");
+    try {
+      const result = await api<{ settings: AdvisorSettings }>("/api/settings", {
+        method: "PUT",
+        body: JSON.stringify({ letterhead }),
+      });
+      const head = { ...EMPTY_LETTERHEAD, ...(result.settings.letterhead ?? {}) };
+      setSettings(result.settings);
+      setLetterhead(head);
+      setSavedLetterhead(head);
+      setLetterheadState("saved");
+    } catch (reason) {
+      setLetterheadState("error");
+      setLetterheadError(`Your letterhead was not saved: ${reason instanceof Error ? reason.message : "unknown request failure"}`);
+    }
+  }
+
+  const letterheadDirty = savedLetterhead !== null &&
+    (Object.keys(EMPTY_LETTERHEAD) as Array<keyof Letterhead>)
+      .some((key) => letterhead[key].trim() !== savedLetterhead[key].trim());
+  const letterheadLabel = letterheadState === "saving" ? "Saving…"
+    : letterheadState === "error" ? "Not saved"
+    : letterheadState === "saved" && !letterheadDirty ? "Saved"
+    : letterheadDirty ? "Unsaved changes" : "Up to date";
+  const letterheadFields: Array<[keyof Letterhead, string, string, string]> = [
+    ["firmName", "Firm name", "Roberson & Co Advisory", "Printed top right of every page, above the address."],
+    ["advisorName", "Your name", "Mike Roberson", "Appears as “Prepared by” on every document you send."],
+    ["addressLine", "Address line", "18 Fulton Street, Suite 4, Columbus OH 43215 · (614) 555-0110", "One line. Street, city, phone — whatever you want under the firm name."],
+    ["footerLine", "Footer line", DEFAULT_FOOTER_LINE, "Printed at the foot of every page. Leave it as it is unless your own confidentiality wording differs."],
+  ];
+
   const savedTab = settings ? (settings.crmSheetTab?.trim() ? settings.crmSheetTab : "Engagements") : "Engagements";
   const dirty = settings !== null && (
     sheetId.trim() !== (settings.crmSpreadsheetId ?? "").trim() ||
@@ -3773,7 +4261,7 @@ function SettingsScreen({ onBack, onIntegrations }: { onBack: () => void; onInte
   ];
 
   return <section className="guided wide settings"><Back onClick={onBack}>Start</Back>
-    <PageHead eyebrow="Advisor setup" side={<Button icon="integration" onClick={onIntegrations} variant="secondary">Integration Center</Button>} title="Settings">Two things live here: the API keys the app uses, which you paste in and save below, and the connections stored against your advisor account. This screen is advisor-only and is not reachable from a client call.</PageHead>
+    <PageHead eyebrow="Advisor setup" side={<Button icon="integration" onClick={onIntegrations} variant="secondary">Integration Center</Button>} title="Settings">Three things live here: the API keys the app uses, which you paste in and save below; the connections stored against your advisor account; and your letterhead, which is what puts your firm at the top of every document you send. This screen is advisor-only and is not reachable from a client call.</PageHead>
 
     <div className="settings-keys-banner"><Icon name="lock" size={20} /><div>
       <strong>Paste a key, press Save. It is stored encrypted in your database.</strong>
@@ -3877,6 +4365,40 @@ function SettingsScreen({ onBack, onIntegrations }: { onBack: () => void; onInte
         <p className="settings-nosecret"><Icon name="lock" size={15} />Nothing on this section is a key — these are just pointers to your sheet, folder and sender name. API keys go in Section 1.</p>
         {saveError ? <p className="upload-state error" role="alert"><Icon name="info" size={15} />{saveError}</p> : null}
         <div className="action-row"><p aria-live="polite" className={`settings-save-state ${saveState}`}>{saveLabel}</p><Button disabled={saveState === "saving" || settingsLoading} icon="check" type="submit">{saveState === "saving" ? "Saving…" : "Save connections"}</Button></div>
+      </form> : null}
+    </div>
+
+    <div className="settings-section"><header className="settings-section-head"><p className="eyebrow">Section 3 · Letterhead</p><h2>Put your firm at the top of every document</h2><p>Fill this in once. Every document you print, save as PDF, or publish to Google Docs then comes out with your logo top left, your firm name and address top right, a line saying who it was prepared for and by whom, and your confidentiality wording at the foot of every page. Leave any field blank and that part is simply left off — nothing breaks.</p></header>
+      {settingsLoading ? <p className="registry-empty" role="status">Reading your letterhead…</p> : null}
+      {!settingsLoading && !settingsError ? <form className="panel settings-letterhead" onSubmit={saveLetterhead}>
+        <div className="field-row">{letterheadFields.slice(0, 2).map(([key, label, placeholder, hint]) =>
+          <label className="field-note" key={key}><span>{label} <small>Optional</small></span>
+            <input onChange={(e) => { const next = e.target.value; setLetterhead((prev) => ({ ...prev, [key]: next })); if (letterheadState !== "idle") setLetterheadState("idle"); }} placeholder={placeholder} value={letterhead[key]} />
+            <small>{hint}</small></label>)}
+        </div>
+        {letterheadFields.slice(2).map(([key, label, placeholder, hint]) =>
+          <label className="field-note" key={key}><span>{label} <small>Optional</small></span>
+            <input onChange={(e) => { const next = e.target.value; setLetterhead((prev) => ({ ...prev, [key]: next })); if (letterheadState !== "idle") setLetterheadState("idle"); }} placeholder={placeholder} value={letterhead[key]} />
+            <small>{hint}</small></label>)}
+
+        <div className="letterhead-logo">
+          <div className="letterhead-logo-copy"><strong>Logo</strong><p>A PNG or JPEG up to 200 KB. It prints about 150 pixels wide in the top-left corner, which is the size that survives the Google Docs conversion cleanly. A transparent PNG looks best.</p></div>
+          {letterhead.logoDataUrl
+            ? <div className="letterhead-logo-preview">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img alt="Your letterhead logo, as it will print" src={letterhead.logoDataUrl} />
+                <div><Pill tone="success">Logo set</Pill>
+                  <button className="call-link" onClick={() => { setLetterhead((prev) => ({ ...prev, logoDataUrl: "" })); setLogoError(""); if (logoInput.current) logoInput.current.value = ""; if (letterheadState !== "idle") setLetterheadState("idle"); }} type="button">Remove logo</button>
+                </div>
+              </div>
+            : <p className="letterhead-logo-empty"><Icon name="info" size={15} />No logo set. Documents print with the firm name alone.</p>}
+          <input accept="image/png,image/jpeg" onChange={(e) => { chooseLogo(e.target.files?.[0]); }} ref={logoInput} type="file" />
+          {logoError ? <p className="upload-state error" role="alert"><Icon name="info" size={15} />{logoError}</p> : null}
+        </div>
+
+        <p className="settings-nosecret"><Icon name="lock" size={15} />None of this is a key. It is your own name, your firm&apos;s name and your logo, stored against your advisor account and used only on documents you generate.</p>
+        {letterheadError ? <p className="upload-state error" role="alert"><Icon name="info" size={15} />{letterheadError}</p> : null}
+        <div className="action-row"><p aria-live="polite" className={`settings-save-state ${letterheadState}`}>{letterheadLabel}</p><Button disabled={letterheadState === "saving" || settingsLoading} icon="check" type="submit">{letterheadState === "saving" ? "Saving…" : "Save letterhead"}</Button></div>
       </form> : null}
     </div>
 
