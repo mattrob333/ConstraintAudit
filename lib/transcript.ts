@@ -1,4 +1,12 @@
 import {
+  findingStatusFor,
+  groundMetricSpans,
+  metricCanConfirmBaseline,
+  metricNameFor,
+  selectBaselineMetric,
+  type MetricSpans,
+} from "./openai-transcript-schema";
+import {
   canonicalCanvasBlock,
   makeId,
   type BaselineStatus,
@@ -62,13 +70,22 @@ const PERIOD_SUFFIX = `(?:\\s*(?:per|each|every|a|an)\\s+(${PERIOD_WORDS})s?\\b)
 const SPELLED_NUMBERS = "a couple of|a couple|a few|a handful of|a dozen|dozens of|several|one|two|three|four|five|six|seven|eight|nine|ten";
 
 /**
+ * What one pattern read out of a line. `unitSpan` and `periodSpan` are the exact characters
+ * of the line that carry the unit and the period, so the deterministic pass grounds its own
+ * metrics through the same check the model pass has to pass (audit F1). The deterministic
+ * pass never knows a percentage's denominator, so it never claims one — which is precisely
+ * why a bare "20 percent" cannot confirm a baseline here.
+ */
+type ReadMetric = { value: string; unit: string; period: string } & MetricSpans;
+
+/**
  * Metric shapes we accept. Order matters: the widest shape wins the span so a range
  * is never re-read as a bare count. A metric still only ever comes from a
  * `client-stated` line, and every metric keeps its exact quote, speaker, timestamp.
  */
 const METRIC_PATTERNS: Array<{
   pattern: RegExp;
-  read: (match: RegExpExecArray) => { value: string; unit: string; period: string } | null;
+  read: (match: RegExpExecArray) => ReadMetric | null;
 }> = [
   {
     // 3 to 5 days, 3-5 days per order
@@ -76,7 +93,14 @@ const METRIC_PATTERNS: Array<{
       `\\b${APPROX}(\\d+(?:\\.\\d+)?)\\s*(?:-|–|—|to)\\s*(\\d+(?:\\.\\d+)?)\\s*(${UNIT_WORDS})\\b${PERIOD_SUFFIX}`,
       "gi",
     ),
-    read: (match) => ({ value: `${match[1]}-${match[2]} ${match[3]}`, unit: match[3].toLowerCase(), period: (match[4] ?? "").toLowerCase() }),
+    read: (match) => ({
+      value: `${match[1]}-${match[2]} ${match[3]}`,
+      unit: match[3].toLowerCase(),
+      period: (match[4] ?? "").toLowerCase(),
+      unitSpan: match[3],
+      periodSpan: match[4] ?? "",
+      denominatorSpan: "",
+    }),
   },
   {
     // $12,500 a month, £40k per job
@@ -85,22 +109,47 @@ const METRIC_PATTERNS: Array<{
       value: `${match[1]}${match[2]}${match[3] ? match[3].toLowerCase() : ""}`,
       unit: currencyUnit(match[1]),
       period: (match[4] ?? "").toLowerCase(),
+      // The client said "$", not "dollars"; the symbol is the span that grounds the unit.
+      unitSpan: match[1],
+      periodSpan: match[4] ?? "",
+      denominatorSpan: "",
     }),
   },
   {
     // 30 percent, 12% per week
     pattern: new RegExp(`\\b${APPROX}(\\d+(?:\\.\\d+)?)\\s*(%|percent)\\b${PERIOD_SUFFIX}`, "gi"),
-    read: (match) => ({ value: `${match[1]}%`, unit: "percent", period: (match[3] ?? "").toLowerCase() }),
+    read: (match) => ({
+      value: `${match[1]}%`,
+      unit: "percent",
+      period: (match[3] ?? "").toLowerCase(),
+      unitSpan: match[2],
+      periodSpan: match[3] ?? "",
+      denominatorSpan: "",
+    }),
   },
   {
     // 20 bids each week, about 3 days
     pattern: new RegExp(`\\b${APPROX}(\\d+(?:\\.\\d+)?)\\s*(${UNIT_WORDS})\\b${PERIOD_SUFFIX}`, "gi"),
-    read: (match) => ({ value: `${match[1]} ${match[2]}`, unit: match[2].toLowerCase(), period: (match[3] ?? "").toLowerCase() }),
+    read: (match) => ({
+      value: `${match[1]} ${match[2]}`,
+      unit: match[2].toLowerCase(),
+      period: (match[3] ?? "").toLowerCase(),
+      unitSpan: match[2],
+      periodSpan: match[3] ?? "",
+      denominatorSpan: "",
+    }),
   },
   {
     // 40 per week — a real rate, but the unit is unnamed, so it can never confirm a baseline.
     pattern: new RegExp(`\\b(\\d+(?:\\.\\d+)?)\\s*(?:per|each|every)\\s+(${PERIOD_WORDS})s?\\b`, "gi"),
-    read: (match) => ({ value: match[1], unit: "", period: match[2].toLowerCase() }),
+    read: (match) => ({
+      value: match[1],
+      unit: "",
+      period: match[2].toLowerCase(),
+      unitSpan: "",
+      periodSpan: match[2],
+      denominatorSpan: "",
+    }),
   },
   {
     // a couple of weeks — approximate wording, kept as evidence but never a confirmed baseline.
@@ -109,6 +158,9 @@ const METRIC_PATTERNS: Array<{
       value: `${match[1].toLowerCase()} ${match[2].toLowerCase()}`,
       unit: match[2].toLowerCase(),
       period: (match[3] ?? "").toLowerCase(),
+      unitSpan: match[2],
+      periodSpan: match[3] ?? "",
+      denominatorSpan: "",
     }),
   },
 ];
@@ -216,27 +268,30 @@ export function extractMetrics(lines: TranscriptLine[]): ExtractedMetric[] {
   return lines.flatMap((line) => {
     // Advisor notes and unmapped speakers are never a source of numbers.
     if (line.provenance !== "client-stated") return [];
-    return metricsInText(line.text).map((metric) => ({
-      label: metricLabel(metric.unit, metric.period),
-      value: metric.value,
-      quote: line.text,
-      speaker: line.speaker,
-      timestamp: line.timestamp,
-      unit: metric.unit,
-      period: metric.period,
-      provenance: "client-stated" as const,
-    }));
+    return metricsInText(line.text).map((metric) => {
+      // Same grounding gate the model pass goes through. The spans came out of this line, so
+      // an honest read passes; anything that does not is marked partial rather than trusted.
+      const measured = groundMetricSpans(line.text, metric.unit, metric.period, metric);
+      return {
+        label: metricNameFor(measured.unit, measured.period),
+        value: metric.value,
+        quote: line.text,
+        speaker: line.speaker,
+        timestamp: line.timestamp,
+        unit: measured.unit,
+        period: measured.period,
+        unitSpan: measured.unitSpan,
+        periodSpan: measured.periodSpan,
+        denominatorSpan: measured.denominatorSpan,
+        grounding: measured.grounding,
+        provenance: "client-stated" as const,
+      };
+    });
   });
 }
 
-function metricLabel(unit: string, period: string): string {
-  if (unit) return `Client-stated ${unit.replace(/s$/, "")} metric`;
-  if (period) return `Client-stated rate metric`;
-  return "Client-stated metric";
-}
-
-function metricsInText(text: string): Array<{ value: string; unit: string; period: string }> {
-  const found: Array<{ value: string; unit: string; period: string; start: number }> = [];
+function metricsInText(text: string): ReadMetric[] {
+  const found: Array<{ start: number; metric: ReadMetric }> = [];
   const taken: Array<[number, number]> = [];
   for (const { pattern, read } of METRIC_PATTERNS) {
     pattern.lastIndex = 0;
@@ -252,32 +307,23 @@ function metricsInText(text: string): Array<{ value: string; unit: string; perio
       const parsed = read(match);
       if (!parsed || !parsed.value.trim()) continue;
       taken.push([start, end]);
-      found.push({ ...parsed, start });
+      found.push({ start, metric: parsed });
     }
   }
   return found
     .sort((a, b) => a.start - b.start)
     .slice(0, 4)
-    .map(({ value, unit, period }) => ({ value, unit, period }));
+    .map((entry) => entry.metric);
 }
 
+/**
+ * Confirmed means one metric is fully grounded — its number, its unit, its period and, for a
+ * percentage, its denominator are all in the client's own line — and carries a real name.
+ * A `partial` metric is still evidence; it is just never allowed to be the baseline.
+ */
 export function baselineStatusFor(metrics: ExtractedMetric[]): BaselineStatus {
   if (metrics.length === 0) return "Missing";
-  return metrics.some(
-    (metric) =>
-      metric.label.trim() &&
-      metric.value.trim() &&
-      // A baseline needs a counted number, not an approximate phrase like "a couple of weeks".
-      /\d/.test(metric.value) &&
-      // A range ("3 to 5 days") is not a single confirmed reading — it cannot anchor a delta.
-      !/\d\s*(?:-|–|—|to)\s*\d/i.test(metric.value) &&
-      metric.unit.trim() &&
-      metric.period.trim() &&
-      metric.quote.trim() &&
-      metric.speaker.trim() &&
-      metric.timestamp.trim() &&
-      metric.provenance === "client-stated",
-  ) ? "Confirmed" : "Partial";
+  return metrics.some(metricCanConfirmBaseline) ? "Confirmed" : "Partial";
 }
 
 /* ------------------------------------------------------------ text matching */
@@ -605,15 +651,27 @@ function unansweredRequiredQuestions(questions: DiscoveryQuestion[], lines: Tran
   });
 }
 
-function candidateFor(
-  lines: TranscriptLine[],
-  valueFlow: ValueFlowStep[],
-): (typeof CONSTRAINT_SIGNALS)[number] | null {
+type ScoredCandidate = {
+  signal: (typeof CONSTRAINT_SIGNALS)[number];
+  score: number;
+  /** The client line that argued hardest for this reading, kept so a rival can be shown. */
+  bestLine: TranscriptLine | null;
+};
+
+/**
+ * Every constraint reading the transcript supports, strongest first. The runners-up are not
+ * discarded: they are the "not the constraint" appendix, which had been structurally empty
+ * since the appendix was added (audit F3). Showing what was considered and rejected is the
+ * difference between a diagnosis and an assertion.
+ */
+function scoreCandidates(lines: TranscriptLine[], valueFlow: ValueFlowStep[]): ScoredCandidate[] {
   const client = clientLinesOf(lines);
-  if (client.length === 0) return null;
+  if (client.length === 0) return [];
   const flowVocabulary = valueFlow.map((step) => stepVocabulary(step));
-  const scored = CONSTRAINT_SIGNALS.map((signal) => {
+  return CONSTRAINT_SIGNALS.map((signal) => {
     let score = 0;
+    let bestLine: TranscriptLine | null = null;
+    let bestHits = 0;
     for (const line of client) {
       const text = line.text.toLowerCase();
       const hits = signal.words.reduce((sum, word) => sum + countOccurrences(text, word), 0);
@@ -622,10 +680,27 @@ function candidateFor(
       const words = wordSet(line.text);
       // proximity: the same line also describes a traced value-flow step
       if (flowVocabulary.some((vocabulary) => overlap(words, vocabulary).shared >= 2)) score += 1;
+      if (hits > bestHits) {
+        bestHits = hits;
+        bestLine = line;
+      }
     }
-    return { signal, score };
+    return { signal, score, bestLine };
   }).sort((a, b) => b.score - a.score);
-  return scored[0] && scored[0].score > 0 ? scored[0].signal : null;
+}
+
+/**
+ * The runners-up, written the way the appendix prints them: the rival, the strongest client
+ * line for it, and the honest reason it was not chosen — that it was outscored, not disproved.
+ */
+function rivalAppendixItems(scored: ScoredCandidate[], chosen: ScoredCandidate): string[] {
+  return scored
+    .filter((entry) => entry !== chosen && entry.score > 0 && entry.bestLine)
+    .slice(0, 2)
+    .map((entry) => {
+      const line = entry.bestLine as TranscriptLine;
+      return `Not the constraint — ${entry.signal.type} (${entry.signal.block}): considered and outscored by ${chosen.signal.type} on this transcript, ${entry.score} client-stated signal(s) against ${chosen.score}. It was ranked lower, not ruled out; re-test it if the ${chosen.signal.type} intervention does not move the number. Strongest client line for it, ${line.speaker} at ${line.timestamp}: "${line.text.slice(0, 220)}"`;
+    });
 }
 
 /* -------------------------------------------------------------- synthesis */
@@ -659,7 +734,9 @@ export function synthesizeTranscript(
   const tasks = tasksFrom(lines, valueFlow, people);
   const roles = rolesFrom(lines, valueFlow, tasks);
   const speakerSummary = speakerSummaryFrom(lines);
-  const candidate = candidateFor(lines, valueFlow);
+  const scored = scoreCandidates(lines, valueFlow);
+  const winner = scored[0] && scored[0].score > 0 ? scored[0] : null;
+  const candidate = winner?.signal ?? null;
 
   const priorCandidates = (options.priorSynthesis ?? [])
     .map((entry) => entry?.constraintCandidate)
@@ -681,7 +758,7 @@ export function synthesizeTranscript(
     candidateType: candidate?.type ?? null,
   });
 
-  if (!candidate) {
+  if (!candidate || !winner) {
     return {
       callNumber: options.callNumber,
       lineCount: lines.length,
@@ -721,22 +798,34 @@ export function synthesizeTranscript(
     provenance: "client-stated" as const,
   }));
   const owner = options.humanOwner ?? { name: "", role: "" };
-  // Verification still requires call 2 AND a confirmed baseline; a conflict with call 1 blocks it.
-  const isConfirmed = baselineStatus === "Confirmed" && options.callNumber === 2 && !priorConflict;
-  const metric = metrics.find((item) => item.period && /\d/.test(item.value)) ?? metrics[0];
-  const baselineMetric = {
-    name: metric?.label ?? "",
-    value: baselineStatus === "Confirmed" ? metric?.value ?? "" : "",
-    unit: baselineStatus === "Confirmed" ? metric?.unit ?? "" : "",
-    period: baselineStatus === "Confirmed" ? metric?.period ?? "" : "",
-    source: metric ? `${metric.speaker} at ${metric.timestamp}: ${metric.quote}` : "Missing",
-  };
+  // The baseline has to measure the constraint, not merely be the first number with a period
+  // attached (audit F4): latency is measured in time, capacity in counts over a period,
+  // quality in a rate. Nothing matching means Missing — there is deliberately no fallback.
+  const metric = selectBaselineMetric(metrics, candidate.type);
+  const baselineMetric = metric
+    ? {
+        name: metric.label,
+        value: metric.value,
+        unit: metric.unit,
+        period: metric.period,
+        source: `${metric.speaker} at ${metric.timestamp}: ${metric.quote}`,
+      }
+    : { name: "", value: "", unit: "", period: "", source: "Missing" };
+  // Verification requires call 2, a confirmed baseline, AND that the baseline measures this
+  // constraint; a conflict with call 1 blocks it. One rule, shared with the model path.
+  const findingStatus = findingStatusFor({
+    baselineStatus,
+    baselineMetric: metric,
+    callNumber: options.callNumber,
+    priorConflict,
+    pathDisagreement: null,
+  });
   const finding: ConstraintFinding = {
     constraintId: makeId("con"),
     client: options.client,
     canvasBlock: candidate.block,
     constraintType: candidate.type,
-    findingStatus: isConfirmed ? "client-verified" : "provisional",
+    findingStatus,
     symptoms: evidence.map((item) => ({
       statement: item.quote,
       number: metricsInText(item.quote)[0]?.value ?? "",
@@ -766,7 +855,8 @@ export function synthesizeTranscript(
     humanOwner: owner,
     predictedNextConstraint: "Reassess after the intervention; do not infer the next constraint before measurement.",
     killCondition: `Client evidence or measurements show ${candidate.type} is not limiting throughput.`,
-    appendixItems: [],
+    // The readings this transcript also supports and this finding did not take.
+    appendixItems: rivalAppendixItems(scored, winner),
   };
 
   return {

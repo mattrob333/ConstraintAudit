@@ -1,7 +1,12 @@
 import { env } from "cloudflare:workers";
 import { openAIResearchModel } from "./openai-research";
 import {
+  EVIDENCE_ROLES,
+  findingStatusFor,
   groundModelSynthesis,
+  pathDisagreementBetween,
+  rejectedHypothesisAppendixItem,
+  selectBaselineMetric,
   type FlowConfirmation,
   type GroundedSynthesis,
   type GroundedTranscriptQuote,
@@ -87,14 +92,22 @@ const CANVAS_BLOCK_ENUM = [
   "Cost Structure", "Revenue Streams",
 ] as const;
 
-/** Every citation is a line number plus the span of that line being relied on. */
-const citation = {
+const CONSTRAINT_TYPE_ENUM = ["capacity", "latency", "quality", "knowledge", "policy"] as const;
+
+/**
+ * Every citation is a line number plus the span of that line being relied on. A constraint
+ * citation additionally says what job the line is doing. Without this a
+ * constraint could be assembled entirely out of symptoms, which is how a wrong constraint
+ * survived the audit: nothing had to explain *how* throughput was limited.
+ */
+const constraintCitation = {
   type: "object",
   additionalProperties: false,
-  required: ["line", "quote"],
+  required: ["line", "quote", "role"],
   properties: {
     line: { type: "integer" },
     quote: { type: "string" },
+    role: { type: "string", enum: EVIDENCE_ROLES },
   },
 } as const;
 
@@ -102,8 +115,8 @@ const transcriptSchema = {
   type: "object",
   additionalProperties: false,
   required: [
-    "narrative", "constraint", "quotes", "metrics", "contradictions", "canvas_updates",
-    "flow_confirmations", "decisions", "tasks", "roles",
+    "narrative", "constraint", "rejected_hypotheses", "quotes", "metrics", "contradictions",
+    "canvas_updates", "flow_confirmations", "decisions", "tasks", "roles",
     "unanswered_required_question_ids", "gaps",
   ],
   properties: {
@@ -115,12 +128,10 @@ const transcriptSchema = {
         "constraint_type", "canvas_block", "reasoning", "symptom_vs_constraint",
         "prescription", "why_smallest_intervention", "kill_condition",
         "predicted_next_constraint", "evidence",
+        "baseline_metric_index", "baseline_reason",
       ],
       properties: {
-        constraint_type: {
-          type: "string",
-          enum: ["capacity", "latency", "quality", "knowledge", "policy"],
-        },
+        constraint_type: { type: "string", enum: CONSTRAINT_TYPE_ENUM },
         canvas_block: { type: "string", enum: CANVAS_BLOCK_ENUM },
         reasoning: { type: "string" },
         symptom_vs_constraint: { type: "string" },
@@ -128,7 +139,25 @@ const transcriptSchema = {
         why_smallest_intervention: { type: "string" },
         kill_condition: { type: "string" },
         predicted_next_constraint: { type: "string" },
-        evidence: { type: "array", items: citation },
+        evidence: { type: "array", items: constraintCitation },
+        /** 0-based index into `metrics`, or -1 when no metric measures this constraint. */
+        baseline_metric_index: { type: "integer" },
+        baseline_reason: { type: "string" },
+      },
+    },
+    rejected_hypotheses: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["constraint_type", "canvas_block", "reason", "line", "quote"],
+        properties: {
+          constraint_type: { type: "string", enum: CONSTRAINT_TYPE_ENUM },
+          canvas_block: { type: "string", enum: CANVAS_BLOCK_ENUM },
+          reason: { type: "string" },
+          line: { type: "integer" },
+          quote: { type: "string" },
+        },
       },
     },
     quotes: {
@@ -149,7 +178,10 @@ const transcriptSchema = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["line", "quote", "label", "value", "unit", "period"],
+        required: [
+          "line", "quote", "label", "value", "unit", "period",
+          "unit_span", "period_span", "denominator_span",
+        ],
         properties: {
           line: { type: "integer" },
           quote: { type: "string" },
@@ -157,6 +189,12 @@ const transcriptSchema = {
           value: { type: "string" },
           unit: { type: "string" },
           period: { type: "string" },
+          /** The words of the cited line that say the unit. Empty when the client never said it. */
+          unit_span: { type: "string" },
+          /** The words of the cited line that say what the number is counted over. */
+          period_span: { type: "string" },
+          /** The words of the cited line that say what a percentage is out of. */
+          denominator_span: { type: "string" },
         },
       },
     },
@@ -274,7 +312,11 @@ const INSTRUCTIONS = [
   "Reason across turns and through paraphrase: an implied dependency, a hedge, or an answer given three turns later still counts, but it must be cited to the line that carries it.",
   "Distinguish a symptom from the constraint. Slow delivery is a symptom; the single place where throughput is actually limited is the constraint. Explain which is which in symptom_vs_constraint.",
   "Treat hedged or conditional statements (\"it depends on whether Dave is around\", \"usually\", \"I think\") as hedges, not facts: keep them as evidence, name the hedge in the quote reason, and add the unconfirmed part to gaps.",
-  "metrics: only numbers the client actually said. The value must appear literally in the cited line. Leave unit or period empty rather than guessing them.",
+  "metrics: only numbers the client actually said. The value must appear literally in the cited line, and so must the unit and the period: copy unit_span and period_span character-for-character out of that same line. Every property is required, but an empty string is always a valid answer — if the client never said the unit or never said what the number is counted over, return \"\" for that field and for its span rather than supplying one. A metric with an empty or ungrounded unit or period is kept as evidence and marked partial; it can never confirm a baseline, which is the correct outcome, so never fill one in to make the metric look complete.",
+  "metrics: when the unit is a percentage, denominator_span must be the span of the cited line saying what the percentage is out of (\"of what we quote\", \"of jobs\"). A percentage with no client-stated denominator is not a measurement; leave it empty and let the metric stay partial.",
+  "constraint.evidence: every citation carries a role — symptom (what hurts), mechanism (how throughput is actually limited), magnitude (how big it is), or single_point_dependency (one person or step is the only path). A constraint needs at least two distinct client-stated lines and at least one mechanism citation; without a mechanism citation, return null for constraint and say why in gaps.",
+  "constraint.baseline_metric_index: the 0-based index into your own metrics array of the one metric that measures this constraint, or -1 if none does. It must match the constraint's dimension — latency is measured in time, capacity in a count over a period, quality as a rate. baseline_reason says why that metric measures this constraint, and is required for knowledge and policy constraints.",
+  "rejected_hypotheses: the two strongest rival readings of this same call that you considered and did not choose, each with the constraint type, the Canvas block, why it was rejected, and the client line that argues against it. Cite that line the same way as any other citation; an ungrounded rival is discarded. If you cannot name a rival with a real client line against it, return an empty array rather than inventing one.",
   "contradictions: research_statement must be copied verbatim from the supplied research facts; never contradict a claim that was not supplied.",
   "canvas_updates: only where a client line changes or confirms what a Canvas block says.",
   "flow_confirmations: use the supplied flow step ids only. Use unconfirmed with no citation when the client never covered the step.",
@@ -303,6 +345,26 @@ function priorSummary(prior: TranscriptSynthesis[]): Array<Record<string, unknow
   }));
 }
 
+/**
+ * A provider failure worth trying again: the request never got a considered answer. A 4xx, a
+ * malformed body, or a payload that does not parse means asking again would only produce the
+ * same reply more slowly, so those fail straight through to the deterministic reading.
+ */
+class RetryableProviderError extends Error {}
+
+const RETRY_BACKOFF_MS = 400;
+
+function retryable(error: unknown): boolean {
+  if (error instanceof RetryableProviderError) return true;
+  // AbortSignal.timeout raises TimeoutError; a dropped connection raises TypeError.
+  const name = (error as { name?: string } | null)?.name ?? "";
+  return name === "TimeoutError" || name === "AbortError" || error instanceof TypeError;
+}
+
+function pause(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export async function synthesizeTranscriptWithOpenAI(
   base: TranscriptSynthesis,
   input: TranscriptModelInput,
@@ -318,7 +380,7 @@ export async function synthesizeTranscriptWithOpenAI(
   const valueFlow = input.valueFlow ?? input.research?.valueFlow ?? [];
   const questions = input.questions ?? input.research?.discoveryQuestions ?? [];
 
-  try {
+  const request = async (): Promise<unknown> => {
     const response = await fetcher(OPENAI_RESPONSES_URL, {
       method: "POST",
       headers: {
@@ -391,14 +453,38 @@ export async function synthesizeTranscriptWithOpenAI(
       }),
       signal: AbortSignal.timeout(60_000),
     });
-    const body = await response.json() as OpenAIResponse;
+    const body = await response.json().catch(() => ({})) as OpenAIResponse;
     if (!response.ok) {
-      throw new Error(body.error?.message || `OpenAI returned HTTP ${response.status}.`);
+      const message = body.error?.message || `OpenAI returned HTTP ${response.status}.`;
+      // 5xx and 429 are the provider having a moment; 4xx is us, and repeating it is pointless.
+      if (response.status >= 500 || response.status === 429) throw new RetryableProviderError(message);
+      throw new Error(message);
     }
     const rawText = outputText(body);
-    if (!rawText) throw new Error("OpenAI returned no transcript synthesis text.");
+    // An empty completion is a truncated or dropped response, not a considered refusal.
+    if (!rawText) throw new RetryableProviderError("OpenAI returned no transcript synthesis text.");
+    // Deliberately NOT retryable: the model answered, and the answer did not fit the schema.
+    return JSON.parse(rawText) as unknown;
+  };
+
+  let payload: unknown;
+  try {
+    payload = await request();
+  } catch (first) {
+    if (!retryable(first)) {
+      return { ...base, analysisMode: "deterministic", modelStatus: "failed", providerModel: model };
+    }
+    await pause(RETRY_BACKOFF_MS);
+    try {
+      payload = await request();
+    } catch {
+      return { ...base, analysisMode: "deterministic", modelStatus: "failed", providerModel: model };
+    }
+  }
+
+  try {
     const grounded = groundModelSynthesis(
-      JSON.parse(rawText) as unknown,
+      payload,
       input.lines,
       valueFlow,
       { facts: input.research?.facts ?? [], questions },
@@ -552,16 +638,34 @@ function merge(
   const baseCandidate = base.constraintCandidate;
   const chosenType = grounded.constraint?.constraintType ?? baseCandidate?.constraintType ?? null;
   const priorConflict = chosenType !== null && [...priorTypes].some((type) => type !== chosenType);
-  // Verification still requires call 2 AND a confirmed baseline; the model cannot grant it.
-  const verified = baselineStatus === "Confirmed" && input.callNumber === 2 && !priorConflict;
+
+  /**
+   * The two passes read the same transcript. When they land on different constraints — or on
+   * the same constraint in different parts of the business — the advisor has a decision to
+   * make, and nothing downstream may treat the reading as settled. Audit F5: the comment here
+   * already promised this; the code computed `verified` without it.
+   */
+  const pathDisagreement = pathDisagreementBetween(baseCandidate, grounded.constraint);
+  const disagrees = pathDisagreement !== null;
+
+  // The baseline must both be confirmed and measure the constraint it is attached to.
+  const boundBaseline = chosenType
+    ? grounded.constraint?.baselineMetric ?? selectBaselineMetric(metrics, chosenType)
+    : null;
+  const findingStatus = findingStatusFor({
+    baselineStatus,
+    baselineMetric: boundBaseline,
+    callNumber: input.callNumber,
+    priorConflict,
+    pathDisagreement,
+  });
+  const verified = findingStatus === "client-verified";
 
   const gaps = [...base.gaps];
+  const rivalItems = grounded.rejectedHypotheses.map(rejectedHypothesisAppendixItem);
   let constraintCandidate = baseCandidate;
 
   if (grounded.constraint) {
-    const disagrees = Boolean(
-      baseCandidate && baseCandidate.constraintType !== grounded.constraint.constraintType,
-    );
     // On disagreement the deterministic evidence argues for a different constraint, so it is not
     // carried into the model's finding; the conflict is surfaced as a gap instead.
     const evidence = dedupe(
@@ -586,7 +690,7 @@ function merge(
       findingStatus: verified ? "client-verified" : "provisional",
       symptoms: evidence.map((item) => ({ statement: item.quote, number: firstNumber(item.quote) })),
       evidence,
-      baselineMetric: baselineMetricFor(metrics, baselineStatus),
+      baselineMetric: baselineMetricFor(boundBaseline),
       prescription: {
         description: grounded.constraint.prescription
           || baseCandidate?.prescription.description
@@ -595,27 +699,38 @@ function merge(
           || baseCandidate?.prescription.whySmallestIntervention
           || "It acts only on the currently evidenced constraint and keeps a named human accountable.",
       },
-      projectedDelta: projectedDeltaFor(baselineStatus),
-      baselineInstrumentation: baselineInstrumentationFor(baselineStatus),
+      projectedDelta: projectedDeltaFor(boundBaseline),
+      baselineInstrumentation: baselineInstrumentationFor(boundBaseline),
       humanOwner: baseCandidate?.humanOwner ?? { name: "", role: "" },
       predictedNextConstraint: grounded.constraint.predictedNextConstraint
         || "Reassess after the intervention; do not infer the next constraint before measurement.",
       killCondition: grounded.constraint.killCondition
         || `Client evidence or measurements show ${grounded.constraint.constraintType} is not limiting throughput.`,
-      appendixItems: baseCandidate?.appendixItems ?? [],
+      // The rivals the model examined and rejected, ahead of anything the deterministic pass
+      // had already parked. This list was structurally empty before (audit F3).
+      appendixItems: dedupe(
+        [...rivalItems, ...(baseCandidate?.appendixItems ?? [])],
+        (item) => normalizeKey(item),
+        8,
+      ),
     };
-    if (disagrees && baseCandidate) {
+    if (pathDisagreement) {
       gaps.push(
-        `The model reads this call as a ${grounded.constraint.constraintType} constraint while the deterministic pass read it as ${baseCandidate.constraintType}; the model's reading is shown and the finding stays provisional until the advisor resolves the disagreement.`,
+        `The model reads this call as a ${pathDisagreement.model.constraintType} constraint at ${pathDisagreement.model.canvasBlock} while the deterministic pass read it as ${pathDisagreement.deterministic.constraintType} at ${pathDisagreement.deterministic.canvasBlock}; the model's reading is shown and the finding stays provisional until the advisor resolves the disagreement.`,
       );
     }
   } else if (baseCandidate) {
     constraintCandidate = {
       ...baseCandidate,
       findingStatus: verified ? "client-verified" : "provisional",
-      baselineMetric: baselineMetricFor(metrics, baselineStatus),
-      projectedDelta: projectedDeltaFor(baselineStatus),
-      baselineInstrumentation: baselineInstrumentationFor(baselineStatus),
+      baselineMetric: baselineMetricFor(boundBaseline),
+      projectedDelta: projectedDeltaFor(boundBaseline),
+      baselineInstrumentation: baselineInstrumentationFor(boundBaseline),
+      appendixItems: dedupe(
+        [...rivalItems, ...baseCandidate.appendixItems],
+        (item) => normalizeKey(item),
+        8,
+      ),
     };
   }
 
@@ -660,43 +775,43 @@ function merge(
     modelStatus: "used",
     ...(narrative ? { narrative } : {}),
     ...(grounded.rejections.length > 0 ? { groundingRejections: grounded.rejections } : {}),
+    ...(pathDisagreement ? { pathDisagreement } : {}),
   };
 }
 
-function baselineMetricFor(
-  metrics: ExtractedMetric[],
-  baselineStatus: TranscriptSynthesis["baselineStatus"],
-): ConstraintFinding["baselineMetric"] {
-  const metric = metrics.find((item) => item.period && /\d/.test(item.value)) ?? metrics[0];
-  const confirmed = baselineStatus === "Confirmed";
+/**
+ * The baseline is the metric that was validated against the constraint, or nothing. There is
+ * no "closest available number" fallback — that is how monthly enquiry volume became the
+ * baseline for a latency constraint (audit F4).
+ */
+function baselineMetricFor(metric: ExtractedMetric | null): ConstraintFinding["baselineMetric"] {
+  if (!metric) return { name: "", value: "", unit: "", period: "", source: "Missing" };
   return {
-    name: metric?.label ?? "",
-    value: confirmed ? metric?.value ?? "" : "",
-    unit: confirmed ? metric?.unit ?? "" : "",
-    period: confirmed ? metric?.period ?? "" : "",
-    source: metric ? `${metric.speaker} at ${metric.timestamp}: ${metric.quote}` : "Missing",
+    name: metric.label,
+    value: metric.value,
+    unit: metric.unit,
+    period: metric.period,
+    source: `${metric.speaker} at ${metric.timestamp}: ${metric.quote}`,
   };
 }
 
-function projectedDeltaFor(
-  baselineStatus: TranscriptSynthesis["baselineStatus"],
-): ConstraintFinding["projectedDelta"] {
+function projectedDeltaFor(metric: ExtractedMetric | null): ConstraintFinding["projectedDelta"] {
   return {
     formula: "ending metric - starting metric",
     namedInputs: ["confirmed starting metric", "measured ending metric", "measurement period"],
     low: "",
     base: "",
     high: "",
-    confidence: baselineStatus === "Confirmed"
+    confidence: metric
       ? "Awaiting measured result"
       : "Blocked by missing baseline",
   };
 }
 
 function baselineInstrumentationFor(
-  baselineStatus: TranscriptSynthesis["baselineStatus"],
+  metric: ExtractedMetric | null,
 ): ConstraintFinding["baselineInstrumentation"] {
-  const confirmed = baselineStatus === "Confirmed";
+  const confirmed = metric !== null;
   return {
     required: !confirmed,
     firstSprintTask: confirmed

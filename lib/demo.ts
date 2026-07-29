@@ -36,6 +36,10 @@ import {
   generateSprintPlan,
 } from "./deliverables";
 import { inferMetricDirection } from "./metric-direction";
+import {
+  rejectedHypothesisAppendixItem,
+  type RejectedHypothesis,
+} from "./openai-transcript-schema";
 import { baselineStatusFor, extractMetrics, parseTranscriptText } from "./transcript";
 import {
   computeMetricDelta,
@@ -957,6 +961,46 @@ export function demoRoles(): RoleMapEntry[] {
 const BASELINE_SOURCE =
   "Rosa Alvarez at 04:43 on the discovery call, from her own enquiry log, and confirmed by Dana Whitfield at 01:02 on the findings call.";
 
+/**
+ * The two readings this diagnosis competed against, each with the findings-call line that
+ * argues against it. Price is the owner's own named alternative and is deliberately recorded
+ * as unresolved rather than beaten: it is the engagement's stop condition, not a dead rival.
+ * Every quote below is a contiguous span of a line that already exists in `CALL_2`.
+ */
+export function demoRejectedHypotheses(): RejectedHypothesis[] {
+  return [
+    {
+      constraintType: "capacity",
+      canvasBlock: "Key Resources",
+      reason:
+        "Ruled out by the owner on the record. Hiring a second estimator in 2023 did not move the number, and the pricing work itself takes an hour — it is the eight days of queue in front of that hour that is long, which is a dependency, not a shortage of hands.",
+      quote: "No, and I would have told you it was capacity. It is not. The thing that makes the number is in my head and nowhere else.",
+      speaker: "Dana Whitfield",
+      timestamp: "02:06",
+      line: lineNumberIn(2, "I would have told you it was capacity"),
+    },
+    {
+      constraintType: "policy",
+      canvasBlock: "Revenue Streams",
+      reason:
+        "Not disproved — deliberately left open. Price is the owner's own alternative explanation and no lost bid has been traced to a reason, so it is ranked second rather than dismissed. It becomes the reading the moment quotes go out in three days and the win rate has not moved.",
+      quote: "If quotes go out in three days and we still do not win any more of them. Then it was never speed, it was my price, and that is a different conversation.",
+      speaker: "Dana Whitfield",
+      timestamp: "06:40",
+      line: lineNumberIn(2, "it was never speed, it was my price"),
+    },
+  ];
+}
+
+/** 1-based index of the practice transcript line containing `fragment`. */
+function lineNumberIn(callNumber: 1 | 2, fragment: string): number {
+  const at = demoLines(callNumber).findIndex((line) => line.text.includes(fragment));
+  if (at === -1) {
+    throw new Error(`Practice transcript ${callNumber} no longer contains: ${fragment}`);
+  }
+  return at + 1;
+}
+
 export function demoBaseline(): BaselineMetric {
   return {
     name: "Quote turnaround time",
@@ -1079,6 +1123,8 @@ export function demoFinding(): ConstraintFinding {
     // and as the written out-of-scope list in the proposal, so they have to be real things
     // we are choosing not to touch, not a list of sources.
     appendixItems: [
+      // The rivals, first, in the same shape the live pipeline now writes them.
+      ...demoRejectedHypotheses().map(rejectedHypothesisAppendixItem),
       "Shop-drawing capacity and architect approval time — named by the client as the likely next constraint, and deliberately left alone this sprint.",
       "CNC nesting resting on one self-taught person. A real single-point risk, but nothing in the evidence says it is limiting throughput today.",
       "The win rate of about 20 percent. It is why the constraint matters, not the thing being changed; it is watched, not worked on.",
@@ -1545,6 +1591,95 @@ function call2Synthesis(): TranscriptSynthesis {
 
 export function demoTranscriptSynthesis(): TranscriptSynthesis[] {
   return [call1Synthesis(), call2Synthesis()];
+}
+
+/**
+ * The findings call as a model would have to return it under the strict transcript schema —
+ * every span, role, baseline nomination and rival populated, and every one of them a literal
+ * substring of a line that is already in `CALL_2`.
+ *
+ * It exists so the grounding layer can be exercised against the real practice transcript
+ * rather than a toy one: a payload that is honest about this call must survive grounding
+ * intact, and each demonstrated exploit must be reachable by changing one field of it.
+ */
+export function demoModelPayload(): Record<string, unknown> {
+  const line = (fragment: string) => lineNumberIn(2, fragment);
+  return {
+    narrative:
+      "The owner confirms the nine-day figure against her own reading of the log, rules out capacity herself, and names the pricing knowledge in her head as the thing the number waits on.",
+    constraint: {
+      constraint_type: "knowledge",
+      canvas_block: "Key Resources",
+      reasoning:
+        "Every quote waits on one person to price it. The pricing work is an hour; the queue in front of it is eight days.",
+      symptom_vs_constraint:
+        "The nine-day turnaround is the symptom. The constraint is that the pricing knowledge exists in one head and nowhere else, so nothing can move without that head.",
+      prescription: "A one-page price book for the recurring assemblies, written and owned by the owner.",
+      why_smallest_intervention: "It hires nobody, buys nothing, and changes no system.",
+      kill_condition: "Quotes go out in three days and the win rate does not move.",
+      predicted_next_constraint: "Shop drawings and architect approval time.",
+      evidence: [
+        {
+          line: line("It is the eight days it sits before I get to the hour"),
+          quote: "It is the eight days it sits before I get to the hour.",
+          role: "symptom",
+        },
+        {
+          line: line("The thing that makes the number is in my head"),
+          quote: "The thing that makes the number is in my head and nowhere else.",
+          role: "mechanism",
+        },
+        {
+          line: line("It is 9 days per quote"),
+          quote: "It is 9 days per quote, yes.",
+          role: "magnitude",
+        },
+        {
+          line: line("It is my book"),
+          quote: "It is my book.",
+          role: "single_point_dependency",
+        },
+      ],
+      baseline_metric_index: 0,
+      baseline_reason:
+        "Quote turnaround is the interval the pricing dependency creates: the enquiry sits in the queue in front of the owner's hour of work, and Rosa's log measures exactly that interval, from the day it is logged to the day it goes out.",
+    },
+    rejected_hypotheses: demoRejectedHypotheses().map((item) => ({
+      constraint_type: item.constraintType,
+      canvas_block: item.canvasBlock,
+      reason: item.reason,
+      line: item.line,
+      quote: item.quote,
+    })),
+    quotes: [
+      {
+        line: line("It is 9 days per quote"),
+        quote: "It is 9 days per quote, yes.",
+        reason: "Owner confirms the baseline against her own reading of the log.",
+      },
+    ],
+    metrics: [
+      {
+        line: line("It is 9 days per quote"),
+        quote: "It is 9 days per quote, yes.",
+        label: "Quote turnaround time",
+        value: "9",
+        unit: "days",
+        period: "per quote",
+        unit_span: "days",
+        period_span: "per quote",
+        denominator_span: "",
+      },
+    ],
+    contradictions: [],
+    canvas_updates: [],
+    flow_confirmations: [],
+    decisions: [],
+    tasks: [],
+    roles: [],
+    unanswered_required_question_ids: [],
+    gaps: [],
+  };
 }
 
 /* ------------------------------------------------------------------ *
