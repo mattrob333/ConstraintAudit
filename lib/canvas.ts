@@ -164,10 +164,31 @@ function supersede(claim: EvidenceClaim): EvidenceClaim {
   };
 }
 
+/** Longest client quote carried inline on a Canvas claim before it is cut. */
+const MAX_QUOTE_CHARS = 240;
+
+/**
+ * Shorten a client quote for display without cutting a word in half.
+ *
+ * A hard `.slice(0, 240)` produced "…but the GC sti" in the audit report, in a document whose
+ * central claim is that we quote the client exactly. The cut now lands on the last word boundary
+ * that fits, trailing punctuation is dropped, and an ellipsis marks that there is more — so the
+ * reader can always tell a shortened quote from a complete one.
+ */
+export function truncateQuote(value: unknown, limit = MAX_QUOTE_CHARS): string {
+  const quote = trimmed(value);
+  if (quote.length <= limit) return quote;
+  // One character of headroom for the ellipsis that replaces the removed tail.
+  const window = quote.slice(0, limit - 1);
+  const boundary = window.search(/\s\S*$/);
+  const kept = (boundary > 0 ? window.slice(0, boundary) : window).replace(/[\s,;:.!?—–-]+$/, "");
+  return kept ? `${kept}…` : `${window.trimEnd()}…`;
+}
+
 function clientClaim(update: CanvasUpdate, block: CanvasBlock, statement: string): EvidenceClaim {
   const speaker = trimmed(update.speaker) || "unattributed speaker";
   const timestamp = trimmed(update.timestamp);
-  const quote = trimmed(update.quote).slice(0, 240);
+  const quote = truncateQuote(update.quote);
   const attribution = `Client call — ${speaker}${timestamp ? ` (${timestamp})` : ""}`;
   return {
     statement,
