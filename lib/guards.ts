@@ -1,7 +1,9 @@
+import type { ClientRecord } from "./clients";
 import type {
   ConsentAttestation,
   ConstraintFinding,
   Engagement,
+  Firmographics,
   WorkflowState,
 } from "./workflow";
 
@@ -70,6 +72,22 @@ export function requireDiagnosisApprovalEvidence(finding: ConstraintFinding): vo
   }
 }
 
+/**
+ * An invitation needs somewhere to go. This is the server-side gate: a roster client with no
+ * email address can never reach the queue, so a pending intent with no recipient cannot exist
+ * for an advisor to approve later. Enforced here rather than in the browser only.
+ */
+export function requireInvitableClient(client: ClientRecord | null): ClientRecord {
+  if (!client) throw new Error("Client not found");
+  if (!client.company.trim()) {
+    throw new Error("This client has no company name, so no invitation can be addressed.");
+  }
+  if (!client.email.trim()) {
+    throw new Error("This client has no email address. Add one before an audit invitation can be queued.");
+  }
+  return client;
+}
+
 export type EngagementPatchCommand =
   | {
       command: "update_metadata";
@@ -78,6 +96,7 @@ export type EngagementPatchCommand =
         client: string;
         website: string;
         primaryContact: string;
+        primaryContactRole: string;
         email: string;
         advisor: string;
         notes: string;
@@ -86,6 +105,8 @@ export type EngagementPatchCommand =
         call2At: string | null;
         lastContact: string | null;
         engagementFolder: string;
+        /** Optional advisor-stated context. Stored under engagement.data, never as evidence. */
+        firmographics: Firmographics;
       }>;
     }
   | {
@@ -107,7 +128,7 @@ export function requirePatchCommand(value: unknown): EngagementPatchCommand {
     }
     const allowed = new Set([
       "client", "website", "primaryContact", "primaryContactRole", "email", "advisor", "notes",
-      "dueDate", "call1At", "call2At", "lastContact", "engagementFolder",
+      "dueDate", "call1At", "call2At", "lastContact", "engagementFolder", "firmographics",
     ]);
     const keys = Object.keys(input.fields as object);
     if (keys.some((key) => !allowed.has(key))) {

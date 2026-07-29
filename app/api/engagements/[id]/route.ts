@@ -2,6 +2,7 @@ import { requirePrincipalAsync } from "@/lib/auth";
 import { engagementId, readJson, route } from "@/lib/http";
 import { requirePatchCommand } from "@/lib/guards";
 import { getEngagement, listActivities, listArtifacts, listIntents, updateEngagement } from "@/lib/store";
+import { normalizeFirmographics } from "@/lib/workflow";
 
 export const dynamic = "force-dynamic";
 
@@ -28,9 +29,16 @@ export async function PATCH(request: Request, context: Context) {
     const id = await engagementId(context);
     const command = requirePatchCommand(await readJson<unknown>(request));
     if (command.command === "update_metadata") {
+      // Firmographics are optional engagement DATA, not a column, so they are lifted out of the
+      // flat metadata fields and merged into `data` — where the shallow merge in the store keeps
+      // every other stored key intact.
+      const { firmographics, ...fields } = command.fields;
       return {
         engagement: await updateEngagement(id, {
-          ...command.fields,
+          ...fields,
+          ...(firmographics === undefined
+            ? {}
+            : { data: { firmographics: normalizeFirmographics(firmographics) } }),
           expectedVersion: command.expectedVersion,
         }, principal.ownerId),
       };

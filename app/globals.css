@@ -3695,3 +3695,127 @@ blockquote { margin: 0; }
   .owner-editor-fields { grid-template-columns: 1fr; }
   .owner-editor-fields .button { grid-column: 1; }
 }
+
+/* ===========================================================================
+ * CLIENT ROSTER — the front of the pipeline
+ * ---------------------------------------------------------------------------
+ * Reuses the registry table, entry pills, panel, upload, and legend styles that
+ * the rest of the app already speaks. Only the layout that has no equivalent
+ * elsewhere is defined here.
+ * =========================================================================== */
+.client-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr) auto;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.client-search {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 0 12px;
+  color: var(--muted);
+}
+.client-search input { border: 0; background: none; padding: 12px 0; }
+.client-search input:focus { outline: none; }
+.upload.client-upload { margin: 0; padding: 12px 14px; }
+.upload.client-upload small { line-height: 1.4; }
+
+.import-summary {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 16px;
+  border: 1px solid #a9d7ba;
+  border-radius: 9px;
+  background: var(--confirmed);
+  padding: 16px 18px;
+}
+.import-summary header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.import-summary header button { border: 0; background: none; color: inherit; cursor: pointer; }
+.import-summary p { margin: 0; font-size: .84rem; }
+.import-summary ul { margin: 0; padding-left: 18px; font-size: .82rem; }
+.import-summary small { color: #2e6d50; font-size: .78rem; }
+
+.client-add { margin-bottom: 18px; }
+.client-add-row {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+  margin-bottom: 14px;
+}
+.client-add-row label { display: grid; gap: 7px; }
+.client-actions { display: grid; justify-items: stretch; gap: 7px; min-width: 160px; }
+.client-actions .button { justify-content: center; }
+.client-actions small { color: var(--muted); font-size: .72rem; }
+.client-remove {
+  border: 0;
+  background: none;
+  padding: 2px 0;
+  color: var(--muted);
+  font-size: .75rem;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.client-remove:hover:not(:disabled) { color: #7b2c20; }
+
+/* Intake firmographics: one optional row, marked optional in its own legend. */
+.firmographics {
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--paper);
+  padding: 16px 18px 18px;
+}
+.firmographics legend {
+  padding: 0 7px;
+  color: var(--forest);
+  font-family: "JetBrains Mono", monospace;
+  font-size: .72rem;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+}
+.firmographics legend em { color: var(--muted); font-style: normal; }
+.firmographics > small { display: block; margin-top: 10px; color: var(--muted); font-size: .78rem; }
+.field-row.triple { grid-template-columns: 1.3fr 1fr 1fr; margin: 0; }
+
+/* The audit-invitation review dialog shows the exact body that would be queued. */
+.invite-modal { width: min(680px, 100%); }
+.invite-preview {
+  max-height: 260px;
+  margin: 0 0 16px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper);
+  padding: 14px 16px;
+  font-family: inherit;
+  font-size: .84rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@media (max-width: 980px) {
+  .client-toolbar { grid-template-columns: 1fr; }
+  .client-add-row { grid-template-columns: 1fr 1fr; }
+  .field-row.triple { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 620px) {
+  .client-add-row { grid-template-columns: 1fr; }
+}

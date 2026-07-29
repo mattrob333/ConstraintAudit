@@ -76,6 +76,8 @@ export const intents = sqliteTable("intents", {
   id: text("id").primaryKey(),
   engagementId: text("engagement_id").notNull(),
   ownerId: text("owner_id").notNull().default(""),
+  /** Set instead of engagementId on a roster-scoped intent (audit_invite). */
+  clientId: text("client_id").notNull().default(""),
   type: text("type").notNull(),
   status: text("status").notNull(),
   payloadJson: text("payload_json").notNull(),
@@ -83,4 +85,25 @@ export const intents = sqliteTable("intents", {
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at"),
   executedAt: text("executed_at"),
+});
+
+/** The advisor's client roster: the pipeline's front door, separate from engagements. */
+export const clients = sqliteTable("clients", {
+  id: text("id").primaryKey(),
+  ownerId: text("owner_id").notNull().default(""),
+  company: text("company").notNull(),
+  website: text("website").notNull().default(""),
+  contactName: text("contact_name").notNull().default(""),
+  contactRole: text("contact_role").notNull().default(""),
+  email: text("email").notNull().default(""),
+  industry: text("industry").notNull().default(""),
+  headcountBand: text("headcount_band").notNull().default(""),
+  phone: text("phone").notNull().default(""),
+  source: text("source").notNull().default("manual"),
+  status: text("status").notNull().default("none"),
+  engagementId: text("engagement_id").notNull().default(""),
+  /** Written only after an audit invitation has actually been sent. */
+  invitedAt: text("invited_at"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
 });

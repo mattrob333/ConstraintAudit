@@ -6,7 +6,7 @@ import { Icon, type IconName } from "./Icons";
 const stages = ["Client", "Research", "Prepare", "Call", "Synthesize", "Deliver", "Operate"] as const;
 type Stage = (typeof stages)[number];
 type Screen =
-  | "home" | "intake" | "migration" | "engagements" | "research" | "prepare"
+  | "home" | "intake" | "migration" | "clients" | "engagements" | "research" | "prepare"
   | "call" | "transcript" | "synthesis" | "findings" | "findings-call" | "deliver" | "sprint"
   | "measure" | "catalog" | "actions" | "integrations" | "settings";
 type Tone = "neutral" | "known" | "inferred" | "assumed" | "missing" | "success";
@@ -36,6 +36,8 @@ type BackendEngagement = {
     research?: ResearchPayload; transcriptSynthesis?: TranscriptSynthesis[]; canvas?: CanvasRecord;
     sprint?: SprintRecord; outcome?: OutcomeMeasurement; catalogEntry?: CatalogEntry;
     recordingConsent?: Partial<Record<"call1" | "call2", ConsentRecord>>;
+    /** Optional advisor-stated context from intake. Never evidence, never a client-stated fact. */
+    firmographics?: Firmographics;
   };
 };
 /** An artifact row as `GET /api/engagements/:id` and the deliverables endpoint return it. */
@@ -96,6 +98,8 @@ type CatalogEntry = {
 };
 type IntentItem = {
   id: string; engagement_id: string; type: string; status: string;
+  /** Set instead of engagement_id on a roster-scoped intent (an audit invitation). */
+  client_id?: string;
   payload: unknown; created_at: string; executed_at?: string | null; result?: IntentResult | null;
 };
 type IntegrationItem = {
@@ -119,6 +123,72 @@ type CredentialState = { field: string; set: boolean; source: CredentialSource; 
 /** The whole /api/settings/keys payload, returned identically by GET, PUT and DELETE. */
 type CredentialsPayload = { credentials: CredentialState[]; encryptionMode: "app-key" | "generated-key" };
 type TranscriptFile = { name: string; mimeType: string; content: string; encoding: "utf8" | "base64" };
+
+/* ===========================================================================
+ * CLIENT ROSTER — the front of the pipeline
+ * ---------------------------------------------------------------------------
+ * A roster row is a company the advisor might work with. It carries no evidence
+ * and never becomes a client-stated fact. `status` is a record of what actually
+ * happened: "invited" appears only after a send executed, never on queueing.
+ * =========================================================================== */
+
+/** Mirrors HEADCOUNT_BANDS in lib/workflow.ts. "" means "not stated" and is never inferred. */
+const headcountBands = ["", "1-9", "10-49", "50-249", "250+"] as const;
+type HeadcountBand = (typeof headcountBands)[number];
+/** Mirrors BUSINESS_MODELS in lib/workflow.ts. */
+const businessModels = ["", "services", "manufacturing", "distribution", "retail", "software", "other"] as const;
+type BusinessModel = (typeof businessModels)[number];
+type Firmographics = { industry: string; headcountBand: HeadcountBand; businessModel: BusinessModel };
+
+const headcountLabels: Record<HeadcountBand, string> = {
+  "": "Headcount not stated", "1-9": "1–9 people", "10-49": "10–49 people",
+  "50-249": "50–249 people", "250+": "250+ people",
+};
+
+const businessModelLabels: Record<BusinessModel, string> = {
+  "": "Model not stated", services: "Services", manufacturing: "Manufacturing",
+  distribution: "Distribution", retail: "Retail", software: "Software", other: "Other",
+};
+
+/** Datalist suggestions only. The industry field stays free text — nothing here constrains it. */
+const commonIndustries = [
+  "Accounting & professional services", "Architecture & engineering", "Automotive",
+  "Construction & trades", "Distribution & wholesale", "Education & training",
+  "Financial services", "Food & beverage", "Healthcare & clinics", "Hospitality",
+  "Legal services", "Logistics & transport", "Manufacturing", "Marketing & creative",
+  "Property & real estate", "Retail & ecommerce", "Software & IT services",
+] as const;
+
+type ClientStatus = "none" | "invited" | "engaged";
+type ClientRow = {
+  id: string; company: string; website: string; contactName: string; contactRole: string;
+  email: string; industry: string; headcountBand: HeadcountBand; phone: string;
+  source: "csv" | "manual"; status: ClientStatus; engagementId: string;
+  invitedAt: string | null; createdAt: string; updatedAt: string;
+};
+/** What the manual "add one client" row collects. Everything is optional except the company. */
+type ClientDraft = Pick<ClientRow, "company" | "website" | "contactName" | "contactRole" | "email" | "industry" | "headcountBand" | "phone">;
+type ImportSummary = {
+  imported: number; updated: number; rowsRead: number;
+  skipped: Array<{ line: number; reason: string }>;
+  mapped: Array<{ header: string; field: string }>;
+  unmapped: string[];
+};
+/** The exact payload the server would queue, fetched so the dialog reviews the real message. */
+type InvitePreview = { to: string; contactName: string; company: string; subject: string; body: string };
+
+const clientStatusCopy: Record<ClientStatus, { tone: Tone; label: string }> = {
+  none: { tone: "neutral", label: "Not contacted" },
+  invited: { tone: "known", label: "Invited" },
+  engaged: { tone: "success", label: "Audit started" },
+};
+
+function emptyClientDraft(): ClientDraft {
+  return { company: "", website: "", contactName: "", contactRole: "", email: "", industry: "", headcountBand: "", phone: "" };
+}
+
+/** 1 MB, matching MAX_CSV_BYTES on the server. The server is still the one that enforces it. */
+const MAX_CSV_BYTES = 1024 * 1024;
 
 type ResearchPayload = {
   title: string; description: string; sourceUrl: string; fetchStatus: string;
@@ -525,7 +595,7 @@ const deliverables = [
 ] as const;
 
 function stageFor(screen: Screen): Stage | null {
-  if (["intake", "migration", "engagements"].includes(screen)) return "Client";
+  if (["intake", "migration", "clients", "engagements"].includes(screen)) return "Client";
   if (screen === "research") return "Research";
   if (screen === "prepare") return "Prepare";
   if (["call", "transcript"].includes(screen)) return "Call";
@@ -577,6 +647,7 @@ const workflowCopy: Record<WorkflowState, [string, string]> = {
 };
 
 const screenLabels: Partial<Record<Screen, string>> = {
+  clients: "Clients",
   research: "Research review", prepare: "Client preparation", call: "Guided call",
   transcript: "Transcript evidence", synthesis: "Synthesis review", findings: "Findings Call",
   "findings-call": "Findings Call presentation", deliver: "Deliverables", sprint: "Sprint",
@@ -841,6 +912,14 @@ function publishStatusCopy(intent: IntentItem | null): { tone: Tone; label: stri
   return { tone: "known", label: "Approved, not sent", detail: "Approved but not yet executed. Send it from the Reviewed actions panel." };
 }
 
+/** Who an intent is addressed to, read from its own payload. "" when the payload names nobody. */
+function intentRecipient(intent: IntentItem): string {
+  const payload = intent.payload as { to?: unknown; company?: unknown } | null;
+  const to = typeof payload?.to === "string" ? payload.to : "";
+  const company = typeof payload?.company === "string" ? payload.company : "";
+  return [company, to].filter(Boolean).join(" · ") || "No recipient in the payload";
+}
+
 /** The last execution attempt on an intent, in words an advisor can read out loud. */
 function intentResultCopy(intent: IntentItem): { tone: Tone; title: string; detail: string } | null {
   const result = intent.result;
@@ -1027,6 +1106,8 @@ export default function AdvisorCockpit() {
   const [role, setRole] = useState("");
   const [email, setEmail] = useState("");
   const [context, setContext] = useState("");
+  /** Optional advisor-stated context captured at intake. Never evidence. */
+  const [firmographics, setFirmographics] = useState<Firmographics>({ industry: "", headcountBand: "", businessModel: "" });
   const [activeId, setActiveId] = useState<string | null>(null);
   const [engagements, setEngagements] = useState<Engagement[]>([]);
   const [registryLoading, setRegistryLoading] = useState(true);
@@ -1082,6 +1163,22 @@ export default function AdvisorCockpit() {
   const [agendaBusy, setAgendaBusy] = useState(false);
   const [agendaError, setAgendaError] = useState("");
   const [mobileNav, setMobileNav] = useState(false);
+  /** Client roster state. Loaded on demand; the roster is independent of any open engagement. */
+  const [clients, setClients] = useState<ClientRow[]>([]);
+  const [clientsLoaded, setClientsLoaded] = useState(false);
+  const [clientsLoading, setClientsLoading] = useState(false);
+  const [clientsError, setClientsError] = useState("");
+  const [clientBusy, setClientBusy] = useState("");
+  const [importSummary, setImportSummary] = useState<ImportSummary | null>(null);
+  /** The client whose invitation is being reviewed, and the exact message that would be queued. */
+  const [inviteTarget, setInviteTarget] = useState<ClientRow | null>(null);
+  const [invitePreview, setInvitePreview] = useState<InvitePreview | null>(null);
+  const [inviteError, setInviteError] = useState("");
+  const [inviteConfirmed, setInviteConfirmed] = useState(false);
+  /** Set while an intake was prefilled from a roster row, so the row can be linked on creation. */
+  const [pendingClientId, setPendingClientId] = useState("");
+  /** Where the Reviewed actions screen came from, so Back returns there rather than to Sprint. */
+  const [actionsOrigin, setActionsOrigin] = useState<Screen>("sprint");
   /** Practice mode. `practiceActive` is derived from the active id and nothing else. */
   const [practiceExists, setPracticeExists] = useState(false);
   const [practiceProbe, setPracticeProbe] = useState<"loading" | "ready" | "error">("loading");
@@ -1111,6 +1208,7 @@ export default function AdvisorCockpit() {
   const [speakerRoles, setSpeakerRoles] = useState<Record<string, "client" | "advisor" | "unknown">>({});
   const [speakerReq, setSpeakerReq] = useState("");
   const modalRef = useRef<HTMLDivElement>(null);
+  const inviteModalRef = useRef<HTMLDivElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
   const currentStage = stageFor(screen);
   const practiceActive = isPracticeEngagement(activeId);
@@ -1198,6 +1296,29 @@ export default function AdvisorCockpit() {
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
   }, [confirmSend]);
+
+  /** The invitation dialog traps focus and closes on Escape, exactly like the send dialog. */
+  useEffect(() => {
+    if (!inviteTarget) return;
+    inviteModalRef.current?.querySelector<HTMLElement>("button, input")?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setInviteTarget(null);
+      if (event.key !== "Tab" || !inviteModalRef.current) return;
+      const focusable = Array.from(inviteModalRef.current.querySelectorAll<HTMLElement>("button:not(:disabled), input:not(:disabled), [href]"));
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [inviteTarget]);
 
   /** Whether a practice engagement already exists decides only how the entry card reads. */
   useEffect(() => {
@@ -1347,9 +1468,25 @@ export default function AdvisorCockpit() {
         primaryContactRole: role,
         email: email.trim(),
         notes: context,
+        firmographics,
       });
       const id = response.engagement.id;
       setActiveId(id);
+      // The roster row becomes "engaged" only now, because the audit really has started.
+      if (pendingClientId) {
+        const clientId = pendingClientId;
+        setPendingClientId("");
+        try {
+          const linked = await api<{ client: ClientRow }>(`/api/clients/${clientId}`, {
+            method: "PATCH",
+            body: JSON.stringify({ command: "link_engagement", engagementId: id }),
+          });
+          setClients((all) => all.map((item) => item.id === clientId ? linked.client : item));
+        } catch {
+          // The engagement exists either way; a roster-status write must never undo that.
+          setClientsError("The engagement was created, but the client roster row could not be marked as engaged. Reopen Clients to refresh it.");
+        }
+      }
       setCall1At(response.engagement.call1At ?? null);
       setCall2At(response.engagement.call2At ?? null);
       setEngagements((items) => [toEngagement(response.engagement), ...items.filter((item) => item.id !== id)]);
@@ -1421,6 +1558,8 @@ export default function AdvisorCockpit() {
     // committed yet — a failed GET must not leave the previous engagement's data under the new id.
     resetEngagementState();
     setIntakeFile(null); setIntakeFileName(""); setIntakeFileState(null); setPendingSourceText("");
+    // A prefill left over from the roster must not attach this engagement to that client.
+    setPendingClientId("");
     const record = await loadEngagement(item.id);
     if (!record) {
       // The GET failed. Stay off the new engagement and drop to a clean state; loadEngagement has
@@ -1432,6 +1571,7 @@ export default function AdvisorCockpit() {
     setActiveId(item.id);
     setCompany(item.companyName); setWebsite(item.website);
     setContact(item.primaryContact); setRole(item.primaryContactRole); setEmail(item.email);
+    setFirmographics(record.data?.firmographics ?? { industry: "", headcountBand: "", businessModel: "" });
     const state = isWorkflowState(record.workflowState ?? "") ? record.workflowState as WorkflowState : item.workflowState;
     const reached = (target: WorkflowState) => state !== null && workflowStates.indexOf(state) >= workflowStates.indexOf(target);
     const consent = record.data?.recordingConsent;
@@ -2004,6 +2144,146 @@ export default function AdvisorCockpit() {
     }
   }
 
+  /* =========================================================================
+   * CLIENT ROSTER
+   * -------------------------------------------------------------------------
+   * Everything here is a local write except one thing, and that one thing is
+   * not here: an invitation is only ever QUEUED from this screen. The send
+   * happens in Reviewed actions, after a separate approval and a separate
+   * execute. No handler below contacts an external provider.
+   * ========================================================================= */
+
+  async function loadClients(force = false) {
+    if (clientsLoading || (clientsLoaded && !force)) return;
+    setClientsLoading(true); setClientsError("");
+    try {
+      const response = await api<{ clients: ClientRow[] }>("/api/clients");
+      setClients(response.clients ?? []);
+      setClientsLoaded(true);
+    } catch (reason) {
+      setClientsError(`The client roster could not be loaded: ${reason instanceof Error ? reason.message : "unknown request failure"}`);
+    } finally {
+      setClientsLoading(false);
+    }
+  }
+
+  function openClients() {
+    go("clients");
+    void loadClients(true);
+  }
+
+  /** The browser reads the bytes; the server parses, maps, deduplicates, and reports. */
+  async function importClientsFile(file: File) {
+    if (clientBusy) return;
+    setClientsError(""); setImportSummary(null);
+    if (extensionOf(file.name) !== "csv") {
+      setClientsError(`${file.name} is not a CSV file. Export the list as CSV and choose it again.`);
+      return;
+    }
+    if (file.size > MAX_CSV_BYTES) {
+      setClientsError(`${file.name} is ${formatBytes(file.size)}. The import limit is ${formatBytes(MAX_CSV_BYTES)}.`);
+      return;
+    }
+    setClientBusy("import");
+    try {
+      const content = await file.text();
+      const response = await api<{ clients: ClientRow[]; summary: ImportSummary }>("/api/clients/import", {
+        method: "POST",
+        body: JSON.stringify({ fileName: file.name, content }),
+      });
+      setClients(response.clients ?? []);
+      setClientsLoaded(true);
+      setImportSummary(response.summary);
+    } catch (reason) {
+      setClientsError(`${file.name} was not imported: ${reason instanceof Error ? reason.message : "unknown request failure"}`);
+    } finally {
+      setClientBusy("");
+    }
+  }
+
+  async function addClientRow(draft: ClientDraft): Promise<boolean> {
+    if (clientBusy) return false;
+    setClientBusy("add"); setClientsError(""); setImportSummary(null);
+    try {
+      const response = await api<{ client: ClientRow }>("/api/clients", { method: "POST", body: JSON.stringify(draft) });
+      setClients((all) => [response.client, ...all]);
+      return true;
+    } catch (reason) {
+      setClientsError(`${draft.company || "That client"} was not added: ${reason instanceof Error ? reason.message : "unknown request failure"}`);
+      return false;
+    } finally {
+      setClientBusy("");
+    }
+  }
+
+  async function removeClientRow(client: ClientRow) {
+    if (clientBusy) return;
+    setClientBusy(`remove:${client.id}`); setClientsError("");
+    try {
+      await api(`/api/clients/${client.id}`, { method: "DELETE" });
+      setClients((all) => all.filter((item) => item.id !== client.id));
+    } catch (reason) {
+      setClientsError(`${client.company} could not be removed: ${reason instanceof Error ? reason.message : "unknown request failure"}`);
+    } finally {
+      setClientBusy("");
+    }
+  }
+
+  /**
+   * Prefills intake from a roster row and remembers which row it came from. The engagement is
+   * still created by the intake form — the advisor sees and can correct every prefilled value
+   * before anything is written, and the roster row is marked "engaged" only once it exists.
+   */
+  function startAuditFromClient(client: ClientRow) {
+    resetEngagementState();
+    setActiveId(null);
+    setIntakeFile(null); setIntakeFileName(""); setIntakeFileState(null); setPendingSourceText("");
+    setCompany(client.company);
+    setWebsite(client.website ? normalizeWebsiteInput(client.website) : "");
+    setContact(client.contactName);
+    setRole(client.contactRole);
+    setEmail(client.email);
+    setContext("");
+    setFirmographics({ industry: client.industry, headcountBand: client.headcountBand, businessModel: "" });
+    setPendingClientId(client.id);
+    go("intake");
+    setNotice(`Intake prefilled from ${client.company}. Check every field before you start the research — ${client.website ? "the website came from the roster" : "no website is on the roster row, so add one"}.`);
+  }
+
+  /**
+   * Opens the review dialog for an audit invitation. This fetches the message that WOULD be
+   * queued; it creates nothing. A client with no email is refused by the server here as well.
+   */
+  async function openInvite(client: ClientRow) {
+    setInviteTarget(client); setInvitePreview(null); setInviteError(""); setInviteConfirmed(false);
+    try {
+      const response = await api<{ preview: InvitePreview }>(`/api/clients/${client.id}/invite`);
+      setInvitePreview(response.preview);
+    } catch (reason) {
+      setInviteError(reason instanceof Error ? reason.message : "The invitation could not be prepared.");
+    }
+  }
+
+  /** Queues a pending-review intent. No email is sent by this, and no status changes. */
+  async function queueInvite() {
+    if (!inviteTarget || clientBusy) return;
+    setClientBusy(`invite:${inviteTarget.id}`); setInviteError("");
+    try {
+      await api(`/api/clients/${inviteTarget.id}/invite`, { method: "POST", body: JSON.stringify({}) });
+      setInviteTarget(null); setInvitePreview(null); setInviteConfirmed(false);
+      setNotice("The invitation is queued for review. No email was sent — approve and send it from Reviewed actions.");
+    } catch (reason) {
+      setInviteError(`The invitation was not queued: ${reason instanceof Error ? reason.message : "unknown request failure"}`);
+    } finally {
+      setClientBusy("");
+    }
+  }
+
+  function openReviewedActions(origin: Screen) {
+    setActionsOrigin(origin);
+    go("actions");
+  }
+
   async function prepareCrmWriteBack() {
     if (!activeId) return setNotice("Action not completed: select or create an engagement first.");
     if (deliverBusy) return;
@@ -2038,6 +2318,7 @@ export default function AdvisorCockpit() {
       <button aria-controls="primary-navigation" aria-expanded={mobileNav} aria-label={mobileNav ? "Close navigation" : "Open navigation"} className="mobile-nav" onClick={() => setMobileNav(!mobileNav)} type="button"><Icon name={mobileNav ? "close" : "menu"} /></button>
       <nav aria-label="Product navigation" className={mobileNav ? "open" : ""} id="primary-navigation">
         <Documents activeId={activeId} />
+        <button className="header-link" onClick={openClients} type="button"><Icon name="people" size={16} />Clients</button>
         <button className="header-link" onClick={() => go("engagements")} type="button"><Icon name="briefcase" size={16} />Engagements</button>
         <button className="header-link" onClick={() => go("integrations")} type="button"><Icon name="integration" size={16} />Integrations</button>
         <button className="header-link" onClick={() => go("settings")} type="button"><Icon name="lock" size={16} />Settings</button>
@@ -2055,8 +2336,9 @@ export default function AdvisorCockpit() {
         <dl><div><dt>Stage</dt><dd><Pill>{resumed.stage}</Pill></dd></div><div><dt>Checkpoint</dt><dd>{resumed.state ?? "unrecognized"}</dd></div><div><dt>Status</dt><dd>{resumed.status || "Not reported"}</dd></div><div><dt>Opened on</dt><dd>{screenLabels[resumed.screen] ?? resumed.screen}</dd></div></dl>
         <button aria-label="Dismiss" onClick={() => setResumed(null)} type="button"><Icon name="close" size={15} /></button>
       </div> : null}
-      {screen === "home" ? <Home engagements={engagements} loading={registryLoading} onFresh={() => go("intake")} onMigration={() => go("migration")} onPractice={openPractice} onResume={resume} onUpdate={() => go("engagements")} practiceBusy={practiceBusy} practiceExists={practiceExists} practiceProbe={practiceProbe} /> : null}
-      {screen === "intake" ? <Intake apiState={apiState} company={company} contact={contact} context={context} email={email} fileName={intakeFileName} fileState={intakeFileState} locked={practiceActive && tourMode !== "off"} onBack={() => go("home")} onCompany={setCompany} onContact={setContact} onContext={setContext} onEmail={setEmail} onFile={selectIntakeFile} onRole={setRole} onSubmit={createEngagement} onWebsite={setWebsite} role={role} website={website} /> : null}
+      {screen === "home" ? <Home engagements={engagements} loading={registryLoading} onClients={openClients} onFresh={() => { setPendingClientId(""); go("intake"); }} onMigration={() => go("migration")} onPractice={openPractice} onResume={resume} onUpdate={() => go("engagements")} practiceBusy={practiceBusy} practiceExists={practiceExists} practiceProbe={practiceProbe} /> : null}
+      {screen === "intake" ? <Intake apiState={apiState} company={company} contact={contact} context={context} email={email} fileName={intakeFileName} fileState={intakeFileState} firmographics={firmographics} fromClient={Boolean(pendingClientId)} locked={practiceActive && tourMode !== "off"} onBack={() => go("home")} onCompany={setCompany} onContact={setContact} onContext={setContext} onEmail={setEmail} onFile={selectIntakeFile} onFirmographics={setFirmographics} onRole={setRole} onSubmit={createEngagement} onWebsite={setWebsite} role={role} website={website} /> : null}
+      {screen === "clients" ? <Clients busy={clientBusy} clients={clients} error={clientsError} importSummary={importSummary} loading={clientsLoading} onActions={() => openReviewedActions("clients")} onAdd={addClientRow} onBack={() => go("home")} onDismissSummary={() => setImportSummary(null)} onImport={importClientsFile} onInvite={openInvite} onRefresh={() => loadClients(true)} onRemove={removeClientRow} onStartAudit={startAuditFromClient} /> : null}
       {screen === "migration" ? <Migration onBack={() => go("home")} onStage={(payload) => {
         if (payload.file) {
           setIntakeFile(payload.file);
@@ -2084,7 +2366,7 @@ export default function AdvisorCockpit() {
       {screen === "sprint" ? <SprintScreen busy={opsBusy} error={opsError} onActivate={activateSprint} onBack={() => { go("deliver"); if (activeId) void loadEngagement(activeId); }} onNavigate={openOperations} onTask={updateSprintTask} sprint={sprint} /> : null}
       {screen === "measure" ? <Measure busy={opsBusy === "outcome"} correcting={opsBusy === "direction"} error={opsError} onBack={() => openOperations("sprint")} onCorrectDirection={correctOutcomeDirection} onNavigate={openOperations} onSubmit={recordOutcome} outcome={outcome} sprint={sprint} /> : null}
       {screen === "catalog" ? <Catalog busy={opsBusy === "catalog"} entry={catalogEntry} error={opsError} onBack={() => openOperations("measure")} onNavigate={openOperations} onSubmit={writeCatalog} outcome={outcome} /> : null}
-      {screen === "actions" ? <ReviewedActions engagementId={activeId} onBack={() => openOperations("sprint")} onNavigate={openOperations} /> : null}
+      {screen === "actions" ? <ReviewedActions engagementId={activeId} onBack={() => actionsOrigin === "clients" ? openClients() : openOperations("sprint")} onNavigate={openOperations} onRefreshClients={() => loadClients(true)} origin={actionsOrigin} /> : null}
       {screen === "integrations" ? <IntegrationCenter onBack={() => go("home")} /> : null}
       {screen === "settings" ? <SettingsScreen onBack={() => go("home")} onIntegrations={() => go("integrations")} /> : null}
       {screen === "call" && !callQuestion ? <section className="guided narrow"><PageHead eyebrow="Call · guided script" title="No call question is available.">Run research for this engagement so the guided call can be driven by client-specific discovery questions.</PageHead><Button icon="back" onClick={() => go("research")}>Back to research</Button></section> : null}
@@ -2101,6 +2383,23 @@ export default function AdvisorCockpit() {
       <div className="modal-actions"><Button onClick={() => setConfirmSend(false)} variant="secondary">Cancel</Button><Button disabled={!confirmed || sending} icon="mail" onClick={sendBrief}>{sending ? "Approving…" : "Approve send intent"}</Button></div>
       <small>No external provider is contacted by this action.</small>
     </div></div> : null}
+    {/*
+      Queueing an invitation is a review step, not a send. The dialog shows the real recipient
+      and the real message body — fetched from the server, not reconstructed here — and the
+      button it ends in queues a pending intent. Sending is a separate approval on a separate
+      screen: no single click in this app can put an email in front of a client.
+    */}
+    {inviteTarget ? <div className="modal-layer"><div aria-describedby="invite-description" aria-labelledby="invite-title" aria-modal="true" className="modal invite-modal" ref={inviteModalRef} role="dialog">
+      <button aria-label="Close" className="modal-close" onClick={() => setInviteTarget(null)} type="button"><Icon name="close" size={17} /></button>
+      <span className="modal-icon"><Icon name="mail" size={21} /></span><p className="eyebrow">External intent</p><h2 id="invite-title">Queue this audit invitation</h2>
+      <p id="invite-description">This records a reviewed intent. It does not send an email. You approve and send it from the Reviewed actions screen, as a separate step.</p>
+      <dl><div><dt>Recipient</dt><dd>{inviteTarget.contactName || "No contact name on this client"}</dd></div><div><dt>Email address</dt><dd>{inviteTarget.email || "No address on this client — the invitation cannot be queued"}</dd></div><div><dt>Company</dt><dd>{inviteTarget.company}</dd></div><div><dt>Subject</dt><dd>{invitePreview?.subject ?? "Preparing…"}</dd></div></dl>
+      {inviteError ? <p className="ops-error" role="alert"><Icon name="info" size={15} />{inviteError}</p> : null}
+      {invitePreview ? <><p className="eyebrow">The message, exactly as it would be sent</p><pre className="invite-preview">{invitePreview.body}</pre></> : !inviteError ? <p className="registry-empty" role="status">Preparing the message…</p> : null}
+      <label className="confirm"><input checked={inviteConfirmed} disabled={!invitePreview} onChange={(event) => setInviteConfirmed(event.target.checked)} type="checkbox" />I read the message above and confirm the recipient is correct.</label>
+      <div className="modal-actions"><Button onClick={() => setInviteTarget(null)} variant="secondary">Cancel</Button><Button disabled={!invitePreview || !inviteConfirmed || Boolean(clientBusy)} icon="lock" onClick={queueInvite}>{clientBusy.startsWith("invite:") ? "Queueing…" : "Queue for review"}</Button></div>
+      <small>No external provider is contacted by this action.</small>
+    </div></div> : null}
   </div>;
 }
 
@@ -2115,8 +2414,8 @@ function RecentRow({ item, onResume }: { item: Engagement; onResume: (item: Enga
   </button>;
 }
 
-function Home({ engagements, loading, onFresh, onMigration, onPractice, onResume, onUpdate, practiceBusy, practiceExists, practiceProbe }: {
-  engagements: Engagement[]; loading: boolean; onFresh: () => void; onMigration: () => void;
+function Home({ engagements, loading, onClients, onFresh, onMigration, onPractice, onResume, onUpdate, practiceBusy, practiceExists, practiceProbe }: {
+  engagements: Engagement[]; loading: boolean; onClients: () => void; onFresh: () => void; onMigration: () => void;
   onPractice: () => void; onResume: (item: Engagement) => void; onUpdate: () => void;
   practiceBusy: "" | "open" | "reset" | "remove"; practiceExists: boolean; practiceProbe: "loading" | "ready" | "error";
 }) {
@@ -2130,6 +2429,7 @@ function Home({ engagements, loading, onFresh, onMigration, onPractice, onResume
     <div className="entry-grid">
       <button className="entry primary" onClick={onFresh} type="button"><span className="entry-icon"><Icon name="plus" size={25} /></span><span><small>Real client</small><strong>Fresh engagement</strong><p>Name the client. We research the business from public sources and prepare the questions for your call.</p></span><b>Start a new audit <Icon name="arrow" size={17} /></b></button>
       <div className="secondary-entries">
+        <button className="entry secondary" onClick={onClients} type="button"><span className="entry-icon"><Icon name="people" size={21} /></span><span><strong>Clients</strong><p>Your roster of companies. Import a CSV, add one by hand, then start an audit or queue an invitation.</p></span><Icon name="chevron" size={17} /></button>
         <button className="entry secondary" onClick={onMigration} type="button"><span className="entry-icon"><Icon name="upload" size={21} /></span><span><strong>Bring in existing work</strong><p>Import a past audit, transcript, or notes into the same guided structure.</p></span><Icon name="chevron" size={17} /></button>
         <button className="entry secondary" onClick={onUpdate} type="button"><span className="entry-icon"><Icon name="refresh" size={21} /></span><span><strong>Continue an engagement</strong><p>Pick up any client from their current stage.</p></span><Icon name="chevron" size={17} /></button>
         <button className="entry secondary practice-entry" disabled={opening} onClick={onPractice} type="button"><span className="entry-icon"><Icon name="people" size={21} /></span>
@@ -2151,11 +2451,16 @@ function Home({ engagements, loading, onFresh, onMigration, onPractice, onResume
 function Intake(props: {
   apiState: string; company: string; website: string; contact: string; role: string; email: string; context: string;
   fileName: string; fileState: { tone: "reading" | "ready" | "error" | "added"; message: string } | null;
+  /** Optional advisor-stated context. It is never used as evidence, and it is never required. */
+  firmographics: Firmographics;
+  /** True when the form was prefilled from a client-roster row. */
+  fromClient?: boolean;
   /** True while a practice walkthrough is open: the form is shown for reading, not for creating a record. */
   locked?: boolean;
   onBack: () => void; onCompany: (v: string) => void; onWebsite: (v: string) => void;
   onContact: (v: string) => void; onRole: (v: string) => void; onEmail: (v: string) => void;
-  onContext: (v: string) => void; onFile: (file: File | null) => void; onSubmit: (e: FormEvent) => void;
+  onContext: (v: string) => void; onFile: (file: File | null) => void;
+  onFirmographics: (value: Firmographics) => void; onSubmit: (e: FormEvent) => void;
 }) {
   const emailTouched = props.email.trim().length > 0;
   // Intake asks for the minimum needed to start research: company + website. The contact block and
@@ -2172,6 +2477,25 @@ function Intake(props: {
       <div className="field-row"><label><span>Primary contact name</span><input onChange={(e) => props.onContact(e.target.value)} placeholder="Maya Chen" value={props.contact} /></label><label className="field-note"><span>Primary contact role</span><input onChange={(e) => props.onRole(e.target.value)} placeholder="Chief Operating Officer" value={props.role} /><small>This person becomes the named owner when the diagnosis is approved.</small></label></div>
       <label className="field-note"><span>Primary contact email</span><input autoCapitalize="none" className={emailTouched && !emailValid ? "invalid" : ""} inputMode="email" onChange={(e) => props.onEmail(e.target.value)} placeholder="maya@acmeindustrial.com" spellCheck={false} type="email" value={props.email} />
         <small>{emailTouched && !emailValid ? "That does not look like an email address yet." : "Optional here — needed later, when the pre-call brief is sent."}</small></label>
+      {/*
+        Firmographics. Entirely optional, and deliberately coarse — a band an advisor can answer
+        from memory is honest in a way a headcount guess is not. Nothing typed here is evidence:
+        it never becomes a client-stated fact, a Canvas claim, or part of the diagnosis. Leaving
+        the whole row blank stores nothing at all.
+      */}
+      <fieldset className="firmographics">
+        <legend>About the business <em>All optional</em></legend>
+        <div className="field-row triple">
+          <label><span>Industry</span><input list="tier4-industries" onChange={(e) => props.onFirmographics({ ...props.firmographics, industry: e.target.value })} placeholder="Manufacturing" value={props.firmographics.industry} />
+            <datalist id="tier4-industries">{commonIndustries.map((industry) => <option key={industry} value={industry} />)}</datalist></label>
+          <label><span>Headcount</span><select onChange={(e) => props.onFirmographics({ ...props.firmographics, headcountBand: e.target.value as HeadcountBand })} value={props.firmographics.headcountBand}>
+            {headcountBands.map((band) => <option key={band || "unstated"} value={band}>{band ? headcountLabels[band] : "Not stated"}</option>)}</select></label>
+          <label><span>Business model</span><select onChange={(e) => props.onFirmographics({ ...props.firmographics, businessModel: e.target.value as BusinessModel })} value={props.firmographics.businessModel}>
+            {businessModels.map((model) => <option key={model || "unstated"} value={model}>{model ? businessModelLabels[model] : "Not stated"}</option>)}</select></label>
+        </div>
+        <small>Context for you, not evidence. Nothing here is treated as something the client said, and none of it reaches the diagnosis.</small>
+      </fieldset>
+      {props.fromClient ? <p className="upload-state ready" role="status"><Icon name="people" size={15} />Prefilled from your client roster. Check every field — you are about to create a real engagement record from it.</p> : null}
       <label><span>What prompted this conversation? <small>Optional</small></span><textarea onChange={(e) => props.onContext(e.target.value)} placeholder="What is changing, stuck, or important right now?" rows={5} value={props.context} /></label>
       <label className="upload"><input accept={sourceAccept} onChange={(e) => props.onFile(e.target.files?.[0] ?? null)} type="file" /><span><Icon name="upload" size={20} /></span><span><strong>{props.fileName || "Add an email, notes, proposal, or prior document"}</strong><small>Optional · TXT, Markdown, CSV, DOCX, VTT, SRT, or JSON. PDF cannot be read — export it first.</small></span></label>
       {props.fileState ? <p className={`upload-state ${props.fileState.tone === "error" ? "error" : props.fileState.tone === "reading" ? "" : "ready"}`} role={props.fileState.tone === "error" ? "alert" : "status"}><Icon name={props.fileState.tone === "error" ? "info" : props.fileState.tone === "reading" ? "refresh" : "check"} size={15} />{props.fileState.message}</p> : null}
@@ -2214,6 +2538,94 @@ function Migration({ onBack, onStage }: {
       <div className="or"><span>or paste source material</span></div><label><span>Existing notes or transcript</span><textarea onChange={(e) => setText(e.target.value)} placeholder="Paste the material exactly as received…" rows={9} value={text} /></label>
       <div className="action-row"><p><Icon name="info" size={17} />Nothing is captured on this screen. The file and pasted text are added to the engagement’s source register after you add the client anchor.</p><Button disabled={blocked || (!file && !text.trim())} icon="arrow" onClick={() => onStage({ file, fileName, text })}>Continue with client anchor</Button></div>
     </div>
+  </section>;
+}
+
+/**
+ * The client roster — the pipeline's front door.
+ *
+ * Two actions per row, and they are deliberately different in kind. "Start audit" is local: it
+ * prefills the intake form, which the advisor still has to submit. "Invite to audit" opens a
+ * review dialog that QUEUES an intent; the send itself happens on the Reviewed actions screen
+ * after a separate approval. Nothing on this screen can put an email in front of a client.
+ */
+function Clients({ busy, clients, error, importSummary, loading, onActions, onAdd, onBack, onDismissSummary, onImport, onInvite, onRefresh, onRemove, onStartAudit }: {
+  busy: string; clients: ClientRow[]; error: string; importSummary: ImportSummary | null; loading: boolean;
+  onActions: () => void; onAdd: (draft: ClientDraft) => Promise<boolean>; onBack: () => void;
+  onDismissSummary: () => void; onImport: (file: File) => void; onInvite: (client: ClientRow) => void;
+  onRefresh: () => void; onRemove: (client: ClientRow) => void; onStartAudit: (client: ClientRow) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [draft, setDraft] = useState<ClientDraft>(emptyClientDraft());
+  const [adding, setAdding] = useState(false);
+  const needle = query.trim().toLowerCase();
+  const shown = needle
+    ? clients.filter((client) => [client.company, client.contactName, client.email, client.industry, client.website]
+      .some((field) => field.toLowerCase().includes(needle)))
+    : clients;
+  const counts = {
+    invited: clients.filter((client) => client.status === "invited").length,
+    engaged: clients.filter((client) => client.status === "engaged").length,
+  };
+  async function submitDraft(event: FormEvent) {
+    event.preventDefault();
+    if (!draft.company.trim()) return;
+    if (await onAdd(draft)) setDraft(emptyClientDraft());
+  }
+  return <section className="guided wide"><Back onClick={onBack}>Entry options</Back>
+    <PageHead eyebrow="Client roster" side={<Button icon="lock" onClick={onActions} variant="secondary">Reviewed actions</Button>} title="Clients">Companies you might work with, kept separate from live engagements. Import a CSV from your CRM, add one by hand, then start an audit or queue an invitation for review.</PageHead>
+    <div className="client-toolbar">
+      <label className="client-search"><span className="visually-hidden">Search clients</span><Icon name="search" size={16} /><input onChange={(event) => setQuery(event.target.value)} placeholder="Search company, contact, email, or industry" type="search" value={query} /></label>
+      <label className="upload client-upload"><input accept=".csv,text/csv" disabled={busy === "import"} onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) onImport(file); }} type="file" />
+        <span><Icon name="upload" size={19} /></span><span><strong>{busy === "import" ? "Importing…" : "Import a CSV"}</strong><small>Zoho Leads or Accounts export, or any CSV with a company column. Up to 1 MB, parsed on the server.</small></span></label>
+      <Button disabled={loading} icon="refresh" onClick={onRefresh} variant="secondary">{loading ? "Loading…" : "Refresh"}</Button>
+    </div>
+    {clients.length ? <div className="legend"><Pill>{clients.length} client{clients.length === 1 ? "" : "s"}</Pill><Pill tone="known">{counts.invited} invited</Pill><Pill tone="success">{counts.engaged} audit{counts.engaged === 1 ? "" : "s"} started</Pill></div> : null}
+    {error ? <p className="ops-error" role="alert"><Icon name="info" size={15} />{error}</p> : null}
+    {importSummary ? <div className="import-summary" role="status">
+      <header><strong>Import complete</strong><button aria-label="Dismiss" onClick={onDismissSummary} type="button"><Icon name="close" size={14} /></button></header>
+      <div className="legend"><Pill tone="success">{importSummary.imported} imported</Pill><Pill tone="known">{importSummary.updated} updated</Pill><Pill tone={importSummary.skipped.length ? "missing" : "neutral"}>{importSummary.skipped.length} skipped</Pill><Pill>{importSummary.rowsRead} rows read</Pill></div>
+      {importSummary.mapped.length ? <p><b>Columns used:</b> {importSummary.mapped.map((item) => `${item.header} → ${item.field}`).join(" · ")}</p> : null}
+      {importSummary.unmapped.length ? <p><b>Columns ignored:</b> {importSummary.unmapped.join(", ")}. Nothing was guessed from them.</p> : null}
+      {importSummary.skipped.length ? <ul>{importSummary.skipped.slice(0, 12).map((skip) => <li key={skip.line}>Line {skip.line}: {skip.reason}</li>)}{importSummary.skipped.length > 12 ? <li>…and {importSummary.skipped.length - 12} more.</li> : null}</ul> : null}
+      <small>A row matching an existing client on company and email updated that client instead of creating a second copy.</small>
+    </div> : null}
+    <form className="panel client-add" onSubmit={submitDraft}>
+      <p className="eyebrow">Add one client</p>
+      <div className="client-add-row">
+        <label><span>Company <em>Required</em></span><input onChange={(event) => setDraft({ ...draft, company: event.target.value })} placeholder="Acme Industrial" value={draft.company} /></label>
+        <label><span>Contact</span><input onChange={(event) => setDraft({ ...draft, contactName: event.target.value })} placeholder="Maya Chen" value={draft.contactName} /></label>
+        <label><span>Email</span><input autoCapitalize="none" inputMode="email" onChange={(event) => setDraft({ ...draft, email: event.target.value })} placeholder="maya@acme.com" spellCheck={false} value={draft.email} /></label>
+        <label><span>Website</span><input autoCapitalize="none" inputMode="url" onChange={(event) => setDraft({ ...draft, website: event.target.value })} placeholder="acme.com" spellCheck={false} value={draft.website} /></label>
+      </div>
+      {adding ? <div className="client-add-row">
+        <label><span>Role</span><input onChange={(event) => setDraft({ ...draft, contactRole: event.target.value })} placeholder="Chief Operating Officer" value={draft.contactRole} /></label>
+        <label><span>Industry</span><input list="tier4-industries" onChange={(event) => setDraft({ ...draft, industry: event.target.value })} placeholder="Manufacturing" value={draft.industry} />
+          <datalist id="tier4-industries">{commonIndustries.map((industry) => <option key={industry} value={industry} />)}</datalist></label>
+        <label><span>Headcount</span><select onChange={(event) => setDraft({ ...draft, headcountBand: event.target.value as HeadcountBand })} value={draft.headcountBand}>{headcountBands.map((band) => <option key={band || "unstated"} value={band}>{band ? headcountLabels[band] : "Not stated"}</option>)}</select></label>
+        <label><span>Phone</span><input inputMode="tel" onChange={(event) => setDraft({ ...draft, phone: event.target.value })} placeholder="+44 20 7946 0000" value={draft.phone} /></label>
+      </div> : null}
+      <div className="action-row"><p><Icon name="shield" size={16} />Stored on your roster only. Adding a client contacts nothing and sends nothing.</p>
+        <div><Button onClick={() => setAdding(!adding)} variant="quiet">{adding ? "Fewer fields" : "More fields"}</Button><Button disabled={!draft.company.trim() || busy === "add"} icon="plus" type="submit">{busy === "add" ? "Adding…" : "Add client"}</Button></div></div>
+    </form>
+    {loading && !clients.length ? <p className="registry-empty" role="status">Loading the client roster…</p> : null}
+    {!loading && !clients.length && !error ? <p className="registry-empty">No clients on the roster yet. Import a CSV or add one above — neither sends anything.</p> : null}
+    {clients.length && !shown.length ? <p className="registry-empty">No client matches “{query}”.</p> : null}
+    {shown.length ? <div className="table-wrap"><table className="registry"><thead><tr><th>Company</th><th>Contact</th><th>Profile</th><th>Status</th><th /></tr></thead>
+      <tbody>{shown.map((client) => <tr key={client.id}>
+        <td><strong>{client.company}</strong><small>{client.website || "No website"}</small><small>Added from {client.source === "csv" ? "a CSV import" : "the manual add row"}</small></td>
+        <td>{client.contactName ? <><strong>{client.contactName}</strong><small>{client.contactRole || "Role not stated"}</small></> : <strong>No contact</strong>}<small>{client.email || "No email address"}</small>{client.phone ? <small>{client.phone}</small> : null}</td>
+        <td>{client.industry || "Industry not stated"}<small>{headcountLabels[client.headcountBand]}</small></td>
+        <td><Pill tone={clientStatusCopy[client.status].tone}>{clientStatusCopy[client.status].label}</Pill><small>{client.status === "invited" && client.invitedAt ? `Invitation sent ${new Date(client.invitedAt).toLocaleDateString()}` : client.status === "engaged" ? "An engagement record exists" : "Nothing has been sent to this client"}</small></td>
+        <td><div className="client-actions">
+          <Button onClick={() => onStartAudit(client)} variant="secondary">Start audit <Icon name="arrow" size={14} /></Button>
+          <Button disabled={!client.email.trim() || busy === `invite:${client.id}`} icon="mail" onClick={() => onInvite(client)} variant="secondary">Invite to audit</Button>
+          <button className="client-remove" disabled={busy === `remove:${client.id}`} onClick={() => onRemove(client)} type="button">{busy === `remove:${client.id}` ? "Removing…" : "Remove"}</button>
+          {client.email.trim() ? null : <small>An invitation needs an email address.</small>}
+        </div></td>
+      </tr>)}</tbody>
+    </table></div> : null}
+    <div className="security"><Icon name="lock" size={18} /><div><strong>“Invite to audit” does not send an email.</strong><p>It opens the message for review and queues it as a pending intent. You approve it, then execute it, on the Reviewed actions screen — two more deliberate steps. A client is marked <b>Invited</b> only once a send has actually gone out.</p></div><Button icon="lock" onClick={onActions} variant="secondary">Reviewed actions</Button></div>
   </section>;
 }
 
@@ -2998,17 +3410,29 @@ function Catalog({ busy, entry, error, onBack, onNavigate, onSubmit, outcome }: 
   </section>;
 }
 
-function ReviewedActions({ engagementId, onBack, onNavigate }: { engagementId: string | null; onBack: () => void; onNavigate: (screen: Screen) => void }) {
+/**
+ * The one review queue for every externally-visible action.
+ *
+ * Intents arrive in two scopes: most hang off an engagement, and an audit invitation hangs off a
+ * client-roster row, because the roster exists before any engagement does. Both are listed here,
+ * labelled by scope, and both obey the identical two-step gate — approve, then execute.
+ */
+function ReviewedActions({ engagementId, onBack, onNavigate, onRefreshClients, origin }: {
+  engagementId: string | null; onBack: () => void; onNavigate: (screen: Screen) => void;
+  onRefreshClients: () => void; origin: Screen;
+}) {
   const [intents, setIntents] = useState<IntentItem[]>([]);
-  const [loading, setLoading] = useState(Boolean(engagementId));
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState("");
   const [confirming, setConfirming] = useState("");
   const [reloadToken, setReloadToken] = useState(0);
   useEffect(() => {
-    if (!engagementId) return;
     let active = true;
-    api<{ intents: IntentItem[] }>(`/api/intents?engagementId=${encodeURIComponent(engagementId)}`)
+    // With no engagement open the roster-scoped intents still have to be reviewable: an
+    // invitation is queued before any engagement exists, so requiring one to approve it
+    // would strand it in the queue forever.
+    api<{ intents: IntentItem[] }>(`/api/intents${engagementId ? `?engagementId=${encodeURIComponent(engagementId)}` : ""}`)
       .then((result) => { if (active) setIntents(result.intents ?? []); })
       .catch((reason: Error) => { if (active) { setIntents([]); setError(`Reviewed actions could not be loaded: ${reason.message}`); } })
       .finally(() => { if (active) setLoading(false); });
@@ -3021,21 +3445,22 @@ function ReviewedActions({ engagementId, onBack, onNavigate }: { engagementId: s
       setConfirming("");
       setLoading(true);
       setReloadToken((token) => token + 1);
+      // An executed invitation is what moves a roster row to "invited", so refresh it.
+      if (action === "execute" && intent.type === "audit_invite") onRefreshClients();
     } catch (reason) {
       setError(`The action could not be completed: ${reason instanceof Error ? reason.message : "unknown request failure"}`);
     } finally {
       setBusy("");
     }
   }
-  return <section className="guided wide"><Back onClick={onBack}>Sprint</Back><PageHead eyebrow="Operate · External actions" title="Review before anything leaves this app.">Every externally-visible action is created as a reviewed intent. Approval and execution are separate, deliberate steps.</PageHead>
-    <OpsRail current="actions" onNavigate={onNavigate} />
+  return <section className="guided wide"><Back onClick={onBack}>{origin === "clients" ? "Clients" : "Sprint"}</Back><PageHead eyebrow="Operate · External actions" title="Review before anything leaves this app.">Every externally-visible action is created as a reviewed intent. Approval and execution are separate, deliberate steps.</PageHead>
+    {origin === "clients" ? null : <OpsRail current="actions" onNavigate={onNavigate} />}
     <div className="security"><Icon name="lock" size={18} /><div><strong>Execute performs a real external write.</strong><p>Approve records your review only. Execute contacts the external provider and cannot be undone from this screen. An intent must be approved first.</p></div></div>
-    {!engagementId ? <p className="registry-empty">Select or create an engagement before reviewing its external actions.</p> : null}
-    {engagementId && loading ? <p className="registry-empty" role="status">Loading reviewed actions…</p> : null}
+    {loading ? <p className="registry-empty" role="status">Loading reviewed actions…</p> : null}
     {error ? <p className="ops-error" role="alert"><Icon name="info" size={15} />{error}</p> : null}
-    {engagementId && !loading && !error && intents.length === 0 ? <p className="registry-empty">No external actions have been proposed for this engagement.</p> : null}
+    {!loading && !error && intents.length === 0 ? <p className="registry-empty">{engagementId ? "No external actions have been proposed for this engagement or your client roster." : "No external actions have been proposed from your client roster. Open an engagement to review its actions too."}</p> : null}
     <div className="intent-list">{intents.map((intent) => <article key={intent.id}>
-      <header><div><Pill tone={intent.status === "executed" ? "success" : intent.status === "approved" ? "known" : intent.status === "rejected" || intent.status === "failed" ? "missing" : "assumed"}>{intent.status.replace(/_/g, " ")}</Pill><strong>{intent.type.replace(/_/g, " ")}</strong></div><small>Created {intent.created_at ? new Date(intent.created_at).toLocaleString() : "unknown"}{intent.executed_at ? ` · executed ${new Date(intent.executed_at).toLocaleString()}` : ""}</small></header>
+      <header><div><Pill tone={intent.status === "executed" ? "success" : intent.status === "approved" ? "known" : intent.status === "rejected" || intent.status === "failed" ? "missing" : "assumed"}>{intent.status.replace(/_/g, " ")}</Pill><strong>{intent.type.replace(/_/g, " ")}</strong><Pill>{intent.client_id ? "Client roster" : "This engagement"}</Pill></div><small>{intent.type === "audit_invite" ? `${intentRecipient(intent)} · ` : ""}Created {intent.created_at ? new Date(intent.created_at).toLocaleString() : "unknown"}{intent.executed_at ? ` · executed ${new Date(intent.executed_at).toLocaleString()}` : ""}</small></header>
       {(() => { const outcome = intentResultCopy(intent); return outcome ? <p className={`intent-result ${outcome.tone}`} role={outcome.tone === "missing" ? "alert" : "status"}><Icon name={outcome.tone === "success" ? "check" : "info"} size={15} /><span><b>{outcome.title}</b>{outcome.detail}</span></p> : null; })()}
       <details><summary>Payload sent on execution</summary><pre>{JSON.stringify(intent.payload, null, 2)}</pre></details>
       {confirming === intent.id ? <div className="intent-confirm"><Icon name="lock" size={17} /><div><strong>This performs a real external write now.</strong><small>The payload above is sent to the external provider for {intent.type.replace(/_/g, " ")}.</small></div><Button onClick={() => setConfirming("")} variant="secondary">Cancel</Button><Button disabled={busy === `${intent.id}:execute`} icon="external" onClick={() => act(intent, "execute")}>{busy === `${intent.id}:execute` ? "Executing…" : "Yes, execute the external write"}</Button></div> : <div className="intent-actions">

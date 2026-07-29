@@ -35,17 +35,32 @@ import {
   requireApprovedReadinessArtifact,
   requireConsentAttestation,
   requireDiagnosisApprovalEvidence,
+  requireInvitableClient,
 } from "./guards";
 import {
+  MAX_CSV_BYTES,
+  buildAuditInvitePayload,
+  planClientImport,
+  type ClientDraft,
+  type ClientRecord,
+  type ImportSummary,
+} from "./clients";
+import {
   addActivity,
+  addClientActivity,
   createArtifact,
+  createClient,
+  createClientIntent,
   createIntent,
   createTranscript,
   deleteEngagementCascade,
   getArtifact,
+  getClient,
   getEngagement,
   getIntent,
   insertEngagement,
+  listClients,
+  updateClient,
   updateEngagement,
   updateIntentStatus,
 } from "./store";
@@ -756,6 +771,149 @@ export async function buildFindingsAgenda(id: string, principal: Principal) {
   return { engagement, document };
 }
 
+/* ===========================================================================
+ * CLIENT ROSTER — the front of the pipeline
+ * ---------------------------------------------------------------------------
+ * A roster row is a company the advisor might work with. It is not an engagement
+ * and it carries no evidence: nothing captured here may ever be read as something
+ * the client stated. Importing a CSV, adding a row by hand, and queueing an
+ * invitation are all local writes. The only external write in this whole section
+ * is the send, and it happens in `reviewIntent` after an explicit approval.
+ * =========================================================================== */
+
+export async function listClientRoster(principal: Principal) {
+  return { clients: await listClients(principal.ownerId) };
+}
+
+export async function addClientManually(principal: Principal, draft: Partial<ClientDraft>) {
+  if (!draft.company?.trim()) throw new Error("A company name is required to add a client.");
+  const client = await createClient(principal.ownerId, {
+    company: draft.company,
+    website: draft.website?.trim() ?? "",
+    contactName: draft.contactName?.trim() ?? "",
+    contactRole: draft.contactRole?.trim() ?? "",
+    email: draft.email?.trim() ?? "",
+    industry: draft.industry?.trim() ?? "",
+    headcountBand: draft.headcountBand ?? "",
+    phone: draft.phone?.trim() ?? "",
+    source: "manual",
+  });
+  await addClientActivity(client, {
+    activityType: "Roster",
+    summary: `Added ${client.company} to the client roster`,
+    outcome: "Local record only; nothing was sent and no external system was contacted",
+  });
+  return { client };
+}
+
+/**
+ * Import a CSV export into the roster. The file is parsed on the server, never in the browser:
+ * the browser only reads the bytes. Rows without a company name are skipped and reported by
+ * line number, and a row matching an existing client (same company + email) updates that client
+ * rather than creating a second copy of it.
+ */
+export async function importClientsCsv(
+  principal: Principal,
+  input: { fileName?: string; content?: string },
+): Promise<{ clients: ClientRecord[]; summary: ImportSummary }> {
+  const content = typeof input.content === "string" ? input.content : "";
+  const fileName = (input.fileName ?? "").trim();
+  if (!content.trim()) throw new HttpError(400, "The uploaded file was empty.");
+  if (fileName && !/\.csv$/i.test(fileName)) {
+    throw new HttpError(400, `${fileName} is not a CSV file. Export the roster as CSV and upload that.`);
+  }
+  // Byte length, not character count: a UTF-8 export of accented company names is larger than
+  // its string length suggests, and the cap has to describe what was actually uploaded.
+  const bytes = new TextEncoder().encode(content).byteLength;
+  if (bytes > MAX_CSV_BYTES) {
+    throw new HttpError(400, `That file is ${(bytes / 1048576).toFixed(2)} MB. The import limit is 1 MB.`);
+  }
+  const existing = await listClients(principal.ownerId);
+  const plan = planClientImport(content, existing);
+  if (!plan.summary.rowsRead) {
+    throw new HttpError(400, "No data rows were found under the header row of that CSV.");
+  }
+  for (const draft of plan.creates) await createClient(principal.ownerId, draft);
+  for (const update of plan.updates) await updateClient(update.id, principal.ownerId, update.patch);
+  const clients = await listClients(principal.ownerId);
+  // The audit trail names a client the import actually touched, not whichever row happens to
+  // sort first — an activity row naming an unrelated company would be a small, quiet lie.
+  const touched = plan.creates[0]?.company ?? plan.updates[0]?.patch.company ?? "";
+  const subject = touched
+    ? clients.find((entry) => entry.company === touched)
+    : clients.find((entry) => entry.id === plan.updates[0]?.id);
+  if (subject && (plan.summary.imported || plan.summary.updated)) {
+    await addClientActivity(subject, {
+      activityType: "Roster",
+      summary: `Imported ${fileName || "a CSV"} into the client roster`,
+      outcome: `${plan.summary.imported} added, ${plan.summary.updated} updated, ${plan.summary.skipped.length} skipped; no external system was contacted`,
+    });
+  }
+  return { clients, summary: plan.summary };
+}
+
+/**
+ * Queue an invitation to a Throughput Audit for one roster client.
+ *
+ * This creates a `pending_review` intent and nothing else. No provider is contacted, no
+ * credential is resolved, and the client's status is left untouched — "invited" is written only
+ * once a send has actually executed. A client with no email address is refused here, server-side,
+ * so an unsendable invitation can never reach the approval queue.
+ */
+/**
+ * The exact payload that would be queued, without queueing anything. The confirm dialog shows
+ * this, so the advisor reviews the real message rather than a copy of it maintained separately
+ * in the browser. Runs the same recipient guard, so a client with no email is refused here too.
+ */
+export async function previewAuditInvite(principal: Principal, clientId: string) {
+  const client = requireInvitableClient(await getClient(clientId, principal.ownerId));
+  const settings = await getSettings(principal.ownerId);
+  const advisorName = settings.fromName || principal.displayName || "Tier 4 Advisor";
+  return { client, preview: buildAuditInvitePayload(client, advisorName) };
+}
+
+export async function createAuditInviteIntent(principal: Principal, clientId: string) {
+  const client = requireInvitableClient(await getClient(clientId, principal.ownerId));
+  const settings = await getSettings(principal.ownerId);
+  const advisorName = settings.fromName || principal.displayName || "Tier 4 Advisor";
+  const intent = await createClientIntent(
+    client,
+    "audit_invite",
+    buildAuditInvitePayload(client, advisorName),
+  );
+  await addClientActivity(client, {
+    activityType: "Invite",
+    summary: `Queued an audit invitation for ${client.company}`,
+    outcome: "No email was sent; the intent is pending explicit approval",
+  });
+  return { client, intent };
+}
+
+/**
+ * Link a roster client to the engagement that was just created from it. The client becomes
+ * `engaged` because an audit really did start — this is a record of something that happened,
+ * not a projection.
+ */
+export async function linkClientToEngagement(
+  principal: Principal,
+  clientId: string,
+  engagementId: string,
+) {
+  const client = await getClient(clientId, principal.ownerId);
+  if (!client) throw new Error("Client not found");
+  const engagement = await requireEngagement(engagementId, principal.ownerId);
+  const updated = await updateClient(client.id, principal.ownerId, {
+    status: "engaged",
+    engagementId: engagement.id,
+  });
+  await addClientActivity(updated, {
+    activityType: "Roster",
+    summary: `Started an audit for ${updated.company}`,
+    outcome: `Linked to engagement ${engagement.id}`,
+  });
+  return { client: updated };
+}
+
 /**
  * Approve, reject, or execute a reviewed external action. Execution is the only place in
  * the app that writes outside this system, and it is reachable only from an already
@@ -771,14 +929,25 @@ export async function reviewIntent(
   const status = String(intent.status);
   const type = String(intent.type);
   const payload = (intent.payload ?? {}) as Record<string, unknown>;
-  const engagement = await requireEngagement(String(intent.engagement_id), principal.ownerId);
+  // Exactly one scope is set on any intent row. A roster-scoped intent (an audit invitation)
+  // exists before there is an engagement, so its audit trail is written against the client.
+  const clientId = String(intent.client_id ?? "");
+  const client = clientId ? await getClient(clientId, principal.ownerId) : null;
+  if (clientId && !client) throw new Error("Client not found");
+  const engagement = clientId
+    ? null
+    : await requireEngagement(String(intent.engagement_id), principal.ownerId);
+  const record = async (input: { activityType: string; summary: string; outcome: string; sourceLink?: string | null }) => {
+    if (engagement) return addActivity(engagement, input);
+    if (client) return addClientActivity(client, input);
+  };
 
   if (action === "approve") {
     if (status !== "pending_review") throw new Error(`Only a pending intent may be approved (current: ${status}).`);
     const updated = await updateIntentStatus(intentId, principal.ownerId, "approved", {
       approvedBy: principal.email,
     });
-    await addActivity(engagement, {
+    await record({
       activityType: "Approval",
       summary: `Approved ${type} intent`,
       outcome: "Approved for execution; no external write has happened yet",
@@ -793,7 +962,7 @@ export async function reviewIntent(
     const updated = await updateIntentStatus(intentId, principal.ownerId, "rejected", {
       rejectedBy: principal.email,
     });
-    await addActivity(engagement, {
+    await record({
       activityType: "Approval",
       summary: `Rejected ${type} intent`,
       outcome: "No external write performed",
@@ -825,7 +994,16 @@ export async function reviewIntent(
     ? "executed"
     : result.status === "not-configured" ? "approved" : "failed";
   const updated = await updateIntentStatus(intentId, principal.ownerId, nextStatus, result);
-  await addActivity(engagement, {
+  // The roster only records "invited" once a send actually happened. A queued or approved
+  // invitation, and a send that returned not-configured or failed, all leave the status alone —
+  // the chip on the client list is a statement about the world, not about this app's intentions.
+  if (client && type === "audit_invite" && result.ok) {
+    await updateClient(client.id, principal.ownerId, {
+      status: client.status === "engaged" ? "engaged" : "invited",
+      invitedAt: new Date().toISOString(),
+    });
+  }
+  await record({
     activityType: "Integration",
     summary: result.status === "not-configured"
       ? `Could not execute ${type} intent`
@@ -848,6 +1026,19 @@ async function executeIntent(
       to: str("to"),
       subject: str("subject"),
       markdownBody: str("body"),
+      idempotencyKey: intentId,
+      credentials,
+    });
+  }
+  if (type === "audit_invite") {
+    // Both parts are composed at queue time: `body` is a real plain-text email, and `htmlBody`
+    // is the matching HTML. Supplying both means the adapter's markdown-to-HTML fallback never
+    // runs for this message, so the recipient does not receive markup as text or text as markup.
+    return sendEmail({
+      to: str("to"),
+      subject: str("subject"),
+      markdownBody: str("body"),
+      htmlBody: str("htmlBody"),
       idempotencyKey: intentId,
       credentials,
     });
