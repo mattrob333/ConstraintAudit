@@ -77,6 +77,12 @@ export const INTENT_TYPES = [
   "readiness_brief_send",
   "crm_write_back",
   "document_publish",
+  /**
+   * An invitation to a Throughput Audit, addressed to one client on the advisor's roster.
+   * Client-roster-scoped rather than engagement-scoped: it exists before any engagement does.
+   * Queuing it sends nothing — the send happens only from the Reviewed actions screen.
+   */
+  "audit_invite",
 ] as const;
 
 export const INTENT_STATUSES = [
@@ -88,10 +94,34 @@ export const INTENT_STATUSES = [
   "failed",
 ] as const;
 
+/**
+ * Firmographic bands. Deliberately coarse: an advisor can answer these from memory at intake,
+ * and a band is honest about its own precision in a way a headcount guess is not. `""` is a
+ * first-class value everywhere — firmographics are optional and "not stated" is never inferred.
+ */
+export const HEADCOUNT_BANDS = ["", "1-9", "10-49", "50-249", "250+"] as const;
+export const BUSINESS_MODELS = [
+  "", "services", "manufacturing", "distribution", "retail", "software", "other",
+] as const;
+
 export const BASELINE_STATUSES = ["Missing", "Partial", "Confirmed"] as const;
 export const READINESS_STATUSES = ["Not drafted", "Drafted", "Approved", "Sent"] as const;
 export const CONSTRAINT_TYPES = ["capacity", "latency", "quality", "knowledge", "policy"] as const;
 export const PROVENANCE = ["client-stated", "doc", "public-research", "advisor-note", "gap"] as const;
+
+/**
+ * How a kill condition is tested: which way the business metric had to move for the
+ * constraint to be the constraint. `does-not-move` is the honest default for a stop
+ * condition phrased as "and nothing changed".
+ */
+export const KILL_COMPARATORS = ["increases", "decreases", "reaches", "does-not-move"] as const;
+
+/**
+ * Whether the client's own stop condition survived the sprint. `not-tested` is the value a
+ * measurement starts at and is never a pass: an untested kill condition blocks the catalog
+ * write, because a pattern nobody tried to disprove is not a pattern.
+ */
+export const KILL_CONDITION_RESULTS = ["held", "fired", "not-tested"] as const;
 
 export type IntentType = (typeof INTENT_TYPES)[number];
 export type IntentStatus = (typeof INTENT_STATUSES)[number];
@@ -105,6 +135,79 @@ export type ReadinessStatus = (typeof READINESS_STATUSES)[number];
 export type ConstraintType = (typeof CONSTRAINT_TYPES)[number];
 export type Provenance = (typeof PROVENANCE)[number];
 export type FindingStatus = "none" | "provisional" | "client-verified" | "approved";
+export type HeadcountBand = (typeof HEADCOUNT_BANDS)[number];
+export type BusinessModel = (typeof BUSINESS_MODELS)[number];
+export type KillComparator = (typeof KILL_COMPARATORS)[number];
+export type KillConditionResult = (typeof KILL_CONDITION_RESULTS)[number];
+/**
+ * `"full"` only when the unit, the period, and (for a percentage) the denominator are each
+ * literally present in the client line the value was matched to. Anything else is `"partial"`:
+ * the number was said, what it measures was not. Only `"full"` can confirm a baseline.
+ */
+export type MetricGrounding = "full" | "partial";
+
+/**
+ * The advisor's kill condition in a shape the outcome can actually test, beside — never
+ * instead of — the client's own words. Absent whenever no honest structure can be derived:
+ * an invented threshold or window would be a fabricated commitment in the client's mouth.
+ */
+export interface KillConditionSpec {
+  /** The business measure being watched, e.g. "Win rate on quoted work". */
+  metric: string;
+  comparator: KillComparator;
+  /** How far it had to move, in the client's own terms, e.g. "no increase from 20 percent". */
+  threshold: string;
+  /** How long it was watched for, e.g. "4 weeks". */
+  window: string;
+}
+
+/**
+ * One advisor override of a model-authored field, kept beside the model's original so the
+ * document can always say which words are the advisor's judgment and which are the model's.
+ * Advisor prose is `advisor-note` provenance; it is never presented as a client quote.
+ */
+export interface AdvisorEdit {
+  field: string;
+  /** The model's value before the edit, serialized for display. */
+  original: string;
+  /** The advisor's value, serialized for display. */
+  edited: string;
+  editedAt: string;
+  editedBy: string;
+}
+
+/**
+ * What kind of business this is, captured at intake. Advisor-stated context, not evidence:
+ * nothing here is client-stated, nothing here may appear in a Canvas claim, a quote, or a
+ * baseline, and no part of the diagnosis is allowed to lean on it as fact.
+ */
+export interface Firmographics {
+  industry: string;
+  headcountBand: HeadcountBand;
+  businessModel: BusinessModel;
+}
+
+export function emptyFirmographics(): Firmographics {
+  return { industry: "", headcountBand: "", businessModel: "" };
+}
+
+/**
+ * Coerce arbitrary input into firmographics. An unrecognised band or model becomes `""`
+ * ("not stated") rather than being coerced to the nearest value — a wrong band read as a
+ * real one would be an invented fact about the client.
+ */
+export function normalizeFirmographics(value: unknown): Firmographics {
+  const source = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  const industry = typeof source.industry === "string" ? source.industry.trim().slice(0, 120) : "";
+  const headcountBand = isOneOf(HEADCOUNT_BANDS, source.headcountBand) ? source.headcountBand : "";
+  const businessModel = isOneOf(BUSINESS_MODELS, source.businessModel) ? source.businessModel : "";
+  return { industry, headcountBand, businessModel };
+}
+
+/** True when the advisor stated nothing at all, so the record can skip storing an empty object. */
+export function firmographicsAreEmpty(value: Firmographics): boolean {
+  return !value.industry && !value.headcountBand && !value.businessModel;
+}
 
 export interface Engagement {
   id: string;
@@ -138,6 +241,8 @@ export interface Engagement {
 }
 
 export interface EngagementData {
+  /** Optional advisor-stated context about the business. Never evidence — see Firmographics. */
+  firmographics?: Firmographics;
   sourceRegister?: SourceEntry[];
   research?: ResearchSynthesis;
   baseline?: BaselineMetric;
@@ -199,6 +304,20 @@ export interface OutcomeMeasurement {
   constraintMoved: boolean;
   nextConstraintObserved: string;
   evidence: Array<{ quote: string; source: string }>;
+  /**
+   * Whether the client's own kill condition held or fired. Audit F2: the operational metric
+   * moving is not the test — Dana's condition was "quotes in three days and we still do not
+   * win any more of them", and the schema had nowhere to record that it was never checked.
+   * `fired` is a first-class honest outcome: the pattern is still written to the catalog, and
+   * the entry records that the constraint was disproven.
+   */
+  killConditionResult: KillConditionResult;
+  /**
+   * The business number the constraint was supposed to move, before and after — distinct from
+   * the operational metric in `startingMetric`/`endingMetric`. For Meridian: the win rate, not
+   * the quote turnaround. Absent when no business reading was taken; it is never inferred.
+   */
+  businessMetric?: { starting: BaselineMetric; ending: BaselineMetric };
 }
 
 /**
@@ -226,6 +345,11 @@ export interface CatalogEntry {
   industryContext: string;
   reusableFor: string;
   writtenAt: string;
+  /**
+   * How the client's kill condition ended. A `fired` entry is kept, not suppressed — a pattern
+   * that was disproven on a real engagement is worth more to the next diagnosis than silence.
+   */
+  killConditionResult?: KillConditionResult;
 }
 
 export interface ApprovedReadinessBrief {
@@ -407,6 +531,16 @@ export interface TranscriptSynthesis {
    */
   groundingRejections?: Array<{ kind: string; reason: string; text: string }>;
   speakerSummary?: Array<{ speaker: string; lines: number; provenance: TranscriptLine["provenance"] }>;
+  /**
+   * Recorded when the model pass and the deterministic pass read the same transcript as
+   * different constraints. Its presence forces the finding to stay provisional; it is kept
+   * structured (not only as a gap sentence) so the disagreement can be surfaced, not buried.
+   */
+  pathDisagreement?: {
+    model: { constraintType: ConstraintType; canvasBlock: string };
+    deterministic: { constraintType: ConstraintType; canvasBlock: string };
+    fields: Array<"constraintType" | "canvasBlock">;
+  };
 }
 
 export interface ExtractedMetric {
@@ -418,6 +552,15 @@ export interface ExtractedMetric {
   unit: string;
   period: string;
   provenance: "client-stated";
+  /**
+   * Optional so anything persisted before the grounding layer still parses. Both read as the
+   * *weaker* value when absent, never the stronger one — an undefined `grounding` is not "full".
+   */
+  grounding?: MetricGrounding;
+  /** The exact spans of the cited line that carry the unit, the period, and the denominator. */
+  unitSpan?: string;
+  periodSpan?: string;
+  denominatorSpan?: string;
 }
 
 export interface BaselineMetric {
@@ -462,8 +605,21 @@ export interface ConstraintFinding {
   };
   humanOwner: { name: string; role: string };
   predictedNextConstraint: string;
+  /** The client's own stop condition, verbatim. Never rewritten by the structured spec below. */
   killCondition: string;
+  /**
+   * The same condition in a shape the outcome can test. Additive and optional: it is set only
+   * where a metric, comparator, threshold, and window can be read out honestly. Where they
+   * cannot, the sentence stands alone rather than being padded with an invented threshold.
+   */
+  killConditionSpec?: KillConditionSpec;
   appendixItems: string[];
+  /**
+   * Every advisor override of a model-authored field, with the model's original kept beside it.
+   * Editing never approves anything and never rewrites a quote — evidence edits are selection
+   * only, so nothing the advisor types can be presented as the client's words.
+   */
+  advisorEdits?: AdvisorEdit[];
 }
 
 export interface RoleMapEntry {
@@ -518,7 +674,7 @@ const MAGNITUDE: Record<string, number> = { k: 1e3, m: 1e6, bn: 1e9 };
  * "$900k" as 900 turned a revenue drop into a 749x "improvement". The suffix must be at a
  * word boundary — the negative lookahead stops "5 min" being read as five million.
  */
-function parseMeasure(value: string): number | null {
+export function parseMeasure(value: string): number | null {
   const cleaned = value.replace(/,/g, "");
   // A range is two numbers joined by a dash or "to"; it is not a single reading.
   if (/\d\s*(?:-|–|—|to)\s*\d/i.test(cleaned)) return null;
@@ -594,11 +750,36 @@ export function stageForState(state: WorkflowState): CrmStage {
   return STATE_TO_STAGE[state];
 }
 
+/**
+ * A baseline is bound when it names a real reading traced to a source. `Missing` is the exact
+ * string the grounding layer writes when no metric measured the constraint, so a finding
+ * carrying it has a baselineStatus that says Confirmed and a baseline that measures nothing.
+ */
+export function baselineMetricIsBound(metric: BaselineMetric | null | undefined): boolean {
+  if (!metric) return false;
+  const source = metric.source?.trim() ?? "";
+  if (!source || /^missing\b/i.test(source)) return false;
+  return Boolean(metric.name?.trim() && metric.value?.trim());
+}
+
+/**
+ * Evidence the state machine needs that the flat status columns cannot carry. Every field is
+ * optional and every absent field reads as the weaker value: an unsupplied baseline is
+ * unbound, an unsupplied kill-condition result is `not-tested`. The gate fails closed.
+ */
+export interface WorkflowTransitionEvidence {
+  /** The finding's own baseline, not the engagement's baselineStatus column. */
+  baselineMetric?: BaselineMetric | null;
+  /** The outcome's kill-condition test. */
+  killConditionResult?: KillConditionResult;
+}
+
 export function assertWorkflowTransition(
   current: WorkflowState,
   next: WorkflowState,
   baselineStatus: BaselineStatus,
   findingStatus: FindingStatus,
+  evidence: WorkflowTransitionEvidence = {},
 ): void {
   if (current === next) return;
   const currentIndex = WORKFLOW_STATES.indexOf(current);
@@ -606,14 +787,27 @@ export function assertWorkflowTransition(
   if (nextIndex !== currentIndex + 1) {
     throw new Error(`Workflow may advance only one checkpoint at a time (${current} -> ${next} is invalid).`);
   }
-  if (next === "DIAGNOSIS_APPROVED" && findingStatus === "approved" && baselineStatus !== "Confirmed") {
-    throw new Error("An approved finding requires a confirmed baseline; keep the finding provisional.");
+  if (next === "DIAGNOSIS_APPROVED" && findingStatus === "approved") {
+    if (baselineStatus !== "Confirmed") {
+      throw new Error("An approved finding requires a confirmed baseline; keep the finding provisional.");
+    }
+    // baselineStatus is constraint-blind: it says a number was confirmed somewhere in the call,
+    // not that the finding's own baseline measures this constraint (audit F4).
+    if (!baselineMetricIsBound(evidence.baselineMetric)) {
+      throw new Error("An approved finding requires a baseline bound to the constraint; this finding's baseline metric is Missing, so keep the finding provisional.");
+    }
   }
   if (next === "OUTCOME_MEASURED" && baselineStatus !== "Confirmed") {
     throw new Error("Outcome measurement requires a confirmed baseline.");
   }
   if (next === "CATALOG_WRITTEN" && current !== "OUTCOME_MEASURED") {
     throw new Error("Catalog write-back requires a measured outcome.");
+  }
+  // Audit F2: the catalog used to publish "improved" on an engagement where nobody checked the
+  // number the constraint was supposed to move. `fired` passes — a disproven constraint is an
+  // honest entry — but an untested one does not.
+  if (next === "CATALOG_WRITTEN" && (evidence.killConditionResult ?? "not-tested") === "not-tested") {
+    throw new Error("Catalog write-back is blocked while the kill condition is untested. Record on the Measure screen whether the client's own kill condition held or fired.");
   }
 }
 

@@ -6,6 +6,7 @@ import {
   type ConstraintFinding,
   type Engagement,
   type EvidenceClaim,
+  type ExtractedMetric,
   type OutcomeMeasurement,
   type Provenance,
   type RoleMapEntry,
@@ -14,16 +15,97 @@ import {
   type ValueFlowStep,
 } from "./workflow";
 
+/**
+ * Up to `limit` things we could not learn from public information, phrased as questions.
+ *
+ * Discovery questions are used first because they are already interrogative and already anchored
+ * to a fact or a gap. A research gap is a statement about what public sources fail to say — never
+ * about the client — so when one is used as a fallback it is wrapped into a question rather than
+ * printed as a finding about their business.
+ */
+function researchCuriosities(engagement: Engagement, limit = 2): string[] {
+  const research = engagement.data.research;
+  const questions = (research?.discoveryQuestions ?? []).filter((item) => text(item?.question));
+  // A question that tests something we actually read on their site ("your contact page says quotes
+  // come back within 48 hours") is worth far more here than a generic one: it shows we did the
+  // reading before asking for their hour. `publicAssumption` is recorded as "None…" when research
+  // found nothing, so a cited source is what separates the two.
+  const grounded = (item: (typeof questions)[number]): boolean =>
+    (item.sourceUrls?.length ?? 0) > 0 && !/^none\b/i.test(text(item.publicAssumption));
+  // Ordered for a brief the client reads *before* the call: a public promise to test, then who
+  // does what, then how work arrives. A "which step costs you work" question belongs in the room.
+  const sectionRank = ["promise", "roles", "demand", "flow", "baseline", "constraint", "feasibility"];
+  const rankOf = (section: string): number => {
+    const at = sectionRank.indexOf(section);
+    return at === -1 ? sectionRank.length : at;
+  };
+  const ranked = [
+    ...questions.filter(grounded).sort((a, b) => rankOf(a.section) - rankOf(b.section)),
+    ...questions.filter((item) => !grounded(item) && item.required),
+    ...questions.filter((item) => !grounded(item) && !item.required),
+  ];
+  const lines: string[] = [];
+  const seen = new Set<string>();
+  for (const item of ranked) {
+    const question = text(item.question);
+    if (seen.has(question.toLowerCase())) continue;
+    seen.add(question.toLowerCase());
+    lines.push(question);
+    if (lines.length >= limit) return lines;
+  }
+  for (const gap of research?.gaps ?? []) {
+    const statement = text(gap);
+    if (!statement || seen.has(statement.toLowerCase())) continue;
+    seen.add(statement.toLowerCase());
+    lines.push(`${statement.replace(/[.\s]+$/, "")}. Could you walk us through how that actually works?`);
+    if (lines.length >= limit) break;
+  }
+  return lines;
+}
+
+/** "12 May 2026 at 14:00 UTC" from a stored ISO timestamp; "" when nothing is scheduled. */
+function scheduledLine(value: string | null | undefined): string {
+  const match = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2})/.exec(text(value));
+  if (!match) return "";
+  return `${formatDocumentDate(match[1])} at ${match[2]}:${match[3]} UTC`;
+}
+
 export function generateReadinessBrief(
   engagement: Engagement,
-  logistics: { videoLink?: string; duration?: string } = {},
+  logistics: {
+    videoLink?: string;
+    duration?: string;
+    /** From the advisor's letterhead, so the first thing a client reads carries a person's name. */
+    advisorName?: string;
+    firmName?: string;
+  } = {},
 ): string {
+  const contact = text(engagement.primaryContact);
+  const advisor = text(logistics.advisorName) || text(engagement.advisor);
+  const firm = text(logistics.firmName);
+  const byline = [advisor, firm].filter(Boolean).join(", ");
+  const scheduled = scheduledLine(engagement.call1At);
+  const curiosities = researchCuriosities(engagement);
+  const salutation = [
+    contact ? `Prepared for ${contact} at ${engagement.client}` : `Prepared for ${engagement.client}`,
+    byline ? `by ${byline}` : "",
+  ].filter(Boolean).join(" ") + ".";
   return `# ${engagement.client} — Pre-Call Readiness Brief
+
+${salutation}${scheduled ? `\n\nScheduled: ${scheduled}.` : ""}
 
 ## What the session is
 
-We'll walk through a map of your business we've drafted from public information. You correct it. Expect specific questions about how work actually flows.
+${contact ? `${contact}, we'll` : "We'll"} walk through a map of your business we've drafted from public information. You correct it. Expect specific questions about how work actually flows.
+${curiosities.length
+  ? `
+## What we want to understand
 
+We could not answer these from the outside. They are questions, not conclusions — we have not assumed an answer to any of them:
+
+${curiosities.map((line) => `- ${line}`).join("\n")}
+`
+  : ""}
 ## Who should attend
 
 The owner or decision-maker, plus the person who can speak to the daily operation of the main workflow.
@@ -42,6 +124,7 @@ Approximate is fine. No reports, no spreadsheets — we just don't want you hunt
 
 ## Logistics
 
+- When: ${scheduled || "To be confirmed"}
 - Video link: ${logistics.videoLink?.trim() || "To be confirmed"}
 - Duration: ${logistics.duration?.trim() || "60 minutes"}
 - Recording: With your permission, we'll record and transcribe the session so we quote you accurately rather than paraphrasing you.
@@ -63,7 +146,7 @@ export function generateDiagnosisPackage(engagement: Engagement, finding: Constr
 
 ## One constraint
 
-**${finding.constraintType} constraint in ${constraintBlock(finding)}.**
+${clientConstraintHeadline(finding)}
 
 ${evidence}
 
@@ -189,6 +272,46 @@ function constraintStepLine(engagement: Engagement, finding: ConstraintFinding):
   return `Flow step ${step.order}: **${step.name}** — ${text(step.actor) || "actor not named"} working in ${text(step.system) || "an unnamed system"} (${status}).`;
 }
 
+/**
+ * A unit the value's own symbol has already stated. Appending it produced "$25,000 dollars" and
+ * "20% percent" — the two most visible proofreading failures in the proposal.
+ */
+const SYMBOL_UNITS: Array<[RegExp, RegExp]> = [
+  [/%/, /^(percent|percentage|pct|%)$/i],
+  [/\$/, /^(dollars?|usd|\$)$/i],
+  [/£/, /^(pounds?|gbp|£)$/i],
+  [/€/, /^(euros?|eur|€)$/i],
+];
+
+/** A stored period that is already a phrase ("per quote", "a month") rather than a bare noun. */
+const PERIOD_PREPOSITION = /^(per|a|an|each|every)\b/i;
+
+/**
+ * One extracted figure, written the way a person would say it.
+ *
+ * The extractor stores a value, a unit and a period as three separate strings, and the value often
+ * already carries one of them ("9 days"). Joining them blindly is where every malformed line in the
+ * proposal came from: "four years years", "20% percent", "$25,000 dollars", "30 requests month",
+ * "9 days quote". This is the single place that decides how the three become one phrase:
+ *
+ *  - a unit the value already contains, or that its currency/percent symbol already states, is dropped;
+ *  - a bare-noun period gets the preposition the extractor dropped, so it reads "per quote".
+ */
+export function measureLabel(value: string, unit: string, period: string): string {
+  const measure = text(value);
+  if (!measure) return "";
+  const lower = measure.toLowerCase();
+  const rawUnit = text(unit);
+  const symbolStated = SYMBOL_UNITS.some(([symbol, name]) => symbol.test(measure) && name.test(rawUnit));
+  const unitPart = rawUnit && !symbolStated && !lower.includes(rawUnit.toLowerCase()) ? ` ${rawUnit}` : "";
+  const rawPeriod = text(period);
+  if (!rawPeriod) return `${measure}${unitPart}`;
+  const periodLower = rawPeriod.toLowerCase();
+  if (lower.includes(periodLower)) return `${measure}${unitPart}`;
+  const periodPart = PERIOD_PREPOSITION.test(periodLower) ? rawPeriod : `per ${rawPeriod}`;
+  return `${measure}${unitPart} ${periodPart}`;
+}
+
 /** Only numbers the client actually said, each still carrying its quote. */
 function clientStatedNumbers(engagement: Engagement, finding: ConstraintFinding): string[] {
   const lines: string[] = [];
@@ -196,17 +319,13 @@ function clientStatedNumbers(engagement: Engagement, finding: ConstraintFinding)
     const number = text(symptom.number);
     if (number) lines.push(`- ${number} — ${text(symptom.statement) || "symptom recorded without a statement"}`);
   }
-  // `metric.value` already carries its unit ("3 days"), so appending unit and period blindly
-  // produced "four years years". Only add a part the value does not already contain, and drop
-  // the generated label entirely — "Client-stated year metric" is not language to read to a client.
+  // The generated label is dropped entirely — "Client-stated year metric" is not language to read
+  // to a client — and the three stored parts are composed by measureLabel above.
   const seen = new Set<string>();
   for (const record of synthesisRecords(engagement)) {
     for (const metric of record.metrics ?? []) {
-      const value = text(metric.value);
-      if (!value) continue;
-      const lower = value.toLowerCase();
-      const measure = [value, ...[text(metric.unit), text(metric.period)]
-        .filter((part) => part && !lower.includes(part.toLowerCase()))].join(" ");
+      const measure = measureLabel(metric.value, metric.unit, metric.period);
+      if (!measure) continue;
       const quote = text(metric.quote);
       // Overlapping extraction patterns can match the same figure in one line twice.
       const key = `${measure.toLowerCase()}|${quote.toLowerCase()}`;
@@ -417,14 +536,186 @@ ${baselineConfirmed
   : `The starting number for ${metricName} is not yet confirmed, so no return, payback period, or multiple is claimed against this fee. Confirming that number is the first task of the sprint; until it is measured, the fee is the only figure in this document.`}`;
 }
 
-export function generateProposal(engagement: Engagement, finding: ConstraintFinding): string {
-  const numbers = clientStatedNumbers(engagement, finding);
+/**
+ * The constraint as the person paying for it reads it.
+ *
+ * `knowledge constraint in Key Activities.` is our vocabulary, not theirs, and it is the first
+ * six words of the document. Client-facing pages print the plain sentence; advisor-facing
+ * surfaces — the developer spec, the sprint plan, the catalog entry, the cockpit itself —
+ * keep the enum, because that is where the enum is load-bearing.
+ */
+const CLIENT_CONSTRAINT_HEADLINE: Record<string, string> = {
+  capacity: "More work is arriving than this part of the business can get through.",
+  latency: "Work sits waiting between steps, so a job takes far longer than the work itself takes.",
+  quality: "Work comes back to be redone, so the same job gets paid for twice.",
+  knowledge: "The work waits on know-how that lives in one person's head.",
+  policy: "A rule or an approval is holding the work back — not the people, and not the tools.",
+};
+
+/** The plain-language constraint headline for a client-facing document. */
+export function clientConstraintHeadline(finding: ConstraintFinding): string {
+  const headline = CLIENT_CONSTRAINT_HEADLINE[finding.constraintType]
+    ?? "One step in the flow is limiting how much work gets finished.";
+  return `**${headline}** It shows up in ${constraintBlock(finding)}.`;
+}
+
+/**
+ * When the measurement clock starts, as one readable sentence.
+ *
+ * The stored value is sometimes a clause ("the price book is first used on a live enquiry") and
+ * sometimes a whole sentence of its own. Splicing the second kind into "…starts when X" produced a
+ * capital letter mid-sentence and a doubled full stop. A sentence is printed as itself; a clause is
+ * completed into one.
+ */
+function measurementClockSentence(finding: ConstraintFinding): string {
+  const raw = text(finding.baselineInstrumentation?.measurementClockStartsWhen);
+  if (!raw) return "The measurement clock starts when the starting metric is confirmed and reproducible.";
+  const isSentence = /^[A-Z]/.test(raw) && /[.!?][")”’]?$/.test(raw);
+  if (isSentence) return raw;
+  return `The measurement clock starts when ${raw.replace(/[.\s]+$/, "")}.`;
+}
+
+/** "a, b and c" — for a short list of names inside a sentence. */
+function sentenceList(items: string[]): string {
+  if (items.length <= 1) return items[0] ?? "";
+  return `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+}
+
+/** A figure the client stated, with the words it came from. Nothing here is computed by us. */
+interface StatedFigure {
+  label: string;
+  figure: string;
+  attribution: string;
+}
+
+const VOLUME_NOUNS = /\b(quote|quotes|bid|bids|request|requests|enquir\w*|inquir\w*|order|orders|lead|leads|job|jobs|invoice|invoices|ticket|tickets|call|calls|unit|units)\b/i;
+const PERIOD_WORDS = /\b(month|week|day|year|quarter)\b/i;
+const RATE_WORDS = /\b(win|wins|winning|won|award\w*|convert\w*|conversion|clos\w+|hit rate|success rate)\b/i;
+
+/**
+ * The client's own arithmetic: the baseline they confirmed, how much work arrives, and how much of
+ * it they win — each only when they actually said it, and each still carrying the line it came from.
+ *
+ * These are the three numbers an owner needs to work out what the constraint is costing them. We
+ * assemble them and stop. Multiplying them together would be a projection, which this product does
+ * not make; handing the owner their own figures and the formula is not the same act.
+ */
+function clientArithmetic(engagement: Engagement, finding: ConstraintFinding): StatedFigure[] {
+  const rows: StatedFigure[] = [];
+  if (text(finding.baselineMetric?.value)) {
+    rows.push({
+      label: text(finding.baselineMetric?.name) || "The constraint metric, today",
+      figure: metricLabel(finding),
+      attribution: text(finding.baselineMetric?.source) || "confirmed on the call",
+    });
+  }
+  const metrics = synthesisRecords(engagement).flatMap((record) => record.metrics ?? []);
+  const add = (label: string, match: (metric: ExtractedMetric) => boolean): void => {
+    const hit = metrics.find(match);
+    if (!hit) return;
+    const figure = measureLabel(hit.value, hit.unit, hit.period);
+    if (!figure || rows.some((row) => row.figure.toLowerCase() === figure.toLowerCase())) return;
+    const quote = text(hit.quote);
+    const who = [text(hit.speaker), text(hit.timestamp)].filter(Boolean).join(", ");
+    rows.push({
+      label,
+      figure,
+      attribution: quote ? `“${quote}”${who ? ` — ${who}` : ""}` : who || "stated on the call",
+    });
+  };
+  add("How much work arrives", (metric) =>
+    PERIOD_WORDS.test(text(metric.period)) &&
+    (VOLUME_NOUNS.test(text(metric.unit)) || VOLUME_NOUNS.test(text(metric.value))));
+  add("How much of it you win", (metric) =>
+    /%|percent/i.test(`${text(metric.value)} ${text(metric.unit)}`) && RATE_WORDS.test(text(metric.quote)));
+  return rows;
+}
+
+/**
+ * What replaces the old static "Likelihood" line, which sat exactly where a buyer asks "will this
+ * actually work?" and answered with a sentence about our methodology.
+ *
+ * Three things stand in its place, all of them already on the record: the kill condition (how we
+ * would know we were wrong), the evidence the diagnosis rests on with the people who said it, and
+ * the client's own figures beside the formula — explicitly not multiplied out.
+ */
+function likelihoodSection(engagement: Engagement, finding: ConstraintFinding): string {
+  const evidence = finding.evidence ?? [];
+  const speakers = [...new Set(evidence.map((item) => text(item.speaker)).filter(Boolean))];
+  const rows = clientArithmetic(engagement, finding);
+  const formula = text(finding.projectedDelta?.formula);
+  const parts = [
+    `We are not going to forecast a result for you. Three honest things stand in place of one invented one: how we would know we were wrong, what the diagnosis actually rests on, and your own figures with the arithmetic left in your hands.`,
+    `### How we would know we were wrong`,
+    text(finding.killCondition) ||
+      `No kill condition has been written down yet. One is required before this proposal is signed — without it there is no way to tell a sprint that worked from one that did not.`,
+    `### What this rests on`,
+    evidence.length
+      ? `${evidence.length} client-stated ${evidence.length === 1 ? "quote" : "quotes"} on the record${speakers.length ? `, from ${sentenceList(speakers)}` : ""}, each carrying a speaker and a timestamp. Every claim in this document traces back to one of them. Where we had no quote, we have said so rather than filled the gap.`
+      : `No client-stated quote is on the record yet, so the diagnosis is not evidenced in your own words. That has to be fixed before this proposal is signed.`,
+    `### Your numbers, your arithmetic — we project nothing`,
+  ];
+  if (rows.length) {
+    parts.push(rows.map((row) => `- **${row.label}:** ${row.figure} — ${row.attribution}`).join("\n"));
+    if (formula) parts.push(`The change this sprint is measured by: \`${formula}\`.`);
+    parts.push(`Those are your figures, in your words, and the formula we will measure against. We have deliberately not multiplied them together for you: any number produced that way would be our projection wearing your numbers. The arithmetic is yours, and you are better placed to do it than we are.`);
+  } else {
+    parts.push(`You have not yet given us a figure we could stand behind, so there is nothing to lay out here. Nothing in this proposal is quantified until you confirm a starting number.`);
+  }
+  return parts.join("\n\n");
+}
+
+/**
+ * The block that makes the document signable: when it was issued, how long it stands, what it
+ * costs, what starts it, how it stops, and two places to sign.
+ *
+ * Every term is one the record already supports. There is no payment schedule, no deposit, no
+ * notice period and no legal boilerplate here, because none of that exists anywhere in this
+ * engagement and inventing it would be inventing a commitment.
+ */
+function acceptanceSection(
+  engagement: Engagement,
+  finding: ConstraintFinding,
+  issuedAt: string,
+): string {
+  const issued = formatDocumentDate(issuedAt);
+  const validUntil = formatDocumentDate(addDays(issuedAt, 30));
+  const instrument = finding.baselineInstrumentation?.required
+    ? ` The first task is then ${text(finding.baselineInstrumentation.firstSprintTask) || "instrumenting the starting measurement"}.`
+    : "";
+  const advisorParty = text(engagement.advisor) || "the advisor";
+  return `## Acceptance
+
+- **Date issued:** ${issued || "not dated"}
+- **Valid until:** ${validUntil || "thirty days from issue"} — thirty days from issue. After that the scope and the fee are confirmed with you again, not assumed.
+- **Fee:** ${PRICE_LABEL}, fixed, exactly as set out under Investment above.
+- **Work starts when:** ${ownerLabel(finding.humanOwner)} accepts this proposal in writing.${instrument}
+- **Stopping:** either side can stop the sprint at any Monday, in writing. There is no notice period and no commitment beyond the sprint described here.
+
+Signing below means the constraint, the scope, the metric and the named owner above are agreed as written. Nothing outside this page is being agreed to.
+
+| For ${engagement.client} | For ${advisorParty} |
+| --- | --- |
+| Signature: | Signature: |
+| Name: ${ownerLabel(finding.humanOwner)} | Name: |
+| Date: | Date: |`;
+}
+
+export function generateProposal(
+  engagement: Engagement,
+  finding: ConstraintFinding,
+  options: { issuedAt?: string } = {},
+): string {
+  // Only the constraint-relevant figures reach a client-facing page. The unfiltered list carries
+  // the age of their website and how long a former hire lasted, which reads as a transcript dump.
+  const numbers = constraintRelevantNumbers(engagement, finding);
   const appendix = finding.appendixItems ?? [];
+  const issuedAt = text(options.issuedAt).slice(0, 10) || new Date().toISOString().slice(0, 10);
   return `# ${engagement.client} — Fixed-Sprint Proposal
 
 ## The one constraint this sprint buys down
 
-**${finding.constraintType} constraint in ${constraintBlock(finding)}.**
+${clientConstraintHeadline(finding)}
 
 ${constraintStepLine(engagement, finding)}
 
@@ -442,13 +733,15 @@ Move ${text(finding.baselineMetric?.name) || "the constraint metric"} in ${const
 
 ${projectionBlock(finding)}
 
-## Likelihood
+## Whether this will work
 
-Grounded only in the client-stated evidence listed in the approved diagnosis and measured results from prior engagements when linked.
+${likelihoodSection(engagement, finding)}
 
 ## Time
 
-Fixed two-week sprint. The measurement clock starts when ${text(finding.baselineInstrumentation?.measurementClockStartsWhen) || "the starting metric is confirmed and reproducible"}.
+Fixed two-week sprint.
+
+${measurementClockSentence(finding)}
 
 ## Effort
 
@@ -480,12 +773,45 @@ ${appendix.length
 - What would disprove the diagnosis? ${text(finding.killCondition) || "No kill condition has been recorded — one is required before signature."}
 
 No ROI value is claimed without client-confirmed inputs.
+
+${acceptanceSection(engagement, finding, issuedAt)}
 `;
 }
 
 /* ------------------------------------------------------------------ *
  * Developer specification
  * ------------------------------------------------------------------ */
+
+const SYSTEM_WORDS = /\b(software|systems?|integrations?|integrate\w*|automat\w+|apps?|application|tool|tools|tooling|databases?|api|apis|portal|dashboard|scripts?|webhooks?|crm|erp|platform|spreadsheet\s+macro)\b/i;
+
+/**
+ * A negated mention is not a mention. "hires nobody, buys no software, and changes no system" is
+ * an argument that the prescription is *paper and people* — reading it as a system requirement is
+ * exactly backwards, and it is how the practice engagement produced a developer spec for a
+ * one-page price book.
+ */
+const NEGATED_SYSTEM = /\b(no|not|never|without|nothing|neither|nor)\b[^.;:]{0,40}?\b(software|systems?|integrations?|automat\w+|apps?|tool|tools|tooling|databases?|api|apis|platform)\b/gi;
+
+/**
+ * Whether the prescription actually asks somebody to build something.
+ *
+ * A third-party developer specification — autonomy boundaries, audit history, failure states — is
+ * a real document when there is a system to build, and an embarrassment when the intervention is a
+ * price book and a changed handoff. Only the prescription's own description and the sprint's tasks
+ * are read: the "why this is the smallest intervention" argument routinely lists the systems the
+ * change deliberately avoids.
+ */
+export function prescriptionImplicatesSystem(
+  engagement: Engagement,
+  finding: ConstraintFinding,
+): boolean {
+  const haystack = [
+    text(finding.prescription?.description),
+    ...(engagement.data.sprint?.tasks ?? []).map((task) => text(task?.task)),
+  ].filter(Boolean).join(" ");
+  if (!haystack) return false;
+  return SYSTEM_WORDS.test(haystack.replace(NEGATED_SYSTEM, " "));
+}
 
 export function generateDeveloperSpec(engagement: Engagement, finding: ConstraintFinding): string {
   const step = constraintStep(engagement, finding);
@@ -771,9 +1097,14 @@ function roleEntries(engagement: Engagement): RoleMapEntry[] {
   return entries;
 }
 
+/**
+ * How the type of work is described in the document the owner may circulate to the people it
+ * names. The stored enum is unchanged — `judgmentOrGrind` is still `judgment | grind | mixed`
+ * everywhere in the record — but "grind" is not a word to print beside a named employee.
+ */
 const WORK_TYPE: Record<string, string> = {
-  judgment: "judgment — decisions only they can make",
-  grind: "grind — repetitive work that does not need their judgment",
+  judgment: "judgment-led — decisions only they can make",
+  grind: "repeatable — work that does not need their judgment",
   mixed: "mixed — some judgment, a lot of repetition",
 };
 
@@ -1420,6 +1751,119 @@ ${body}
 `;
 }
 
+/**
+ * Generated Markdown as readable plain text, for the text part of an email.
+ *
+ * A recipient whose client shows the text part sees exactly what we send it. Sending raw Markdown
+ * means they read `## What the session is` and `**bold**` as literal characters, which is the
+ * difference between a letter and a config file. Structure is preserved — headings stay on their
+ * own line, list markers survive, a link keeps its address — only the syntax is removed.
+ */
+export function markdownToPlainText(markdown: string): string {
+  const source = (typeof markdown === "string" ? markdown : "").replace(/\r\n?/g, "\n");
+  const out: string[] = [];
+  let inFence = false;
+  for (const raw of source.split("\n")) {
+    if (FENCE.test(raw)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) {
+      out.push(raw);
+      continue;
+    }
+    if (RULE.test(raw)) {
+      out.push("");
+      continue;
+    }
+    // The dashes under a table header carry no words at all.
+    if (TABLE_DIVIDER.test(raw) && raw.includes("-")) continue;
+    const heading = HEADING.exec(raw);
+    let line = heading ? heading[2].trim() : raw.replace(/^\s{0,3}>\s?/, "");
+    line = line
+      .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, "$1 ($2)")
+      .replace(/`([^`]+)`/g, "$1")
+      .replace(/\*\*([^*]+)\*\*/g, "$1")
+      .replace(/__([^_]+)__/g, "$1")
+      .replace(/(^|[^*\w])\*([^*\n]+)\*(?![*\w])/g, "$1$2")
+      .replace(/(^|[^_\w])_([^_\n]+)_(?![_\w])/g, "$1$2")
+      .replace(/~~([^~]+)~~/g, "$1");
+    if (/^\s*\|.*\|\s*$/.test(line)) {
+      line = line.replace(/^\s*\|/, "").replace(/\|\s*$/, "").split("|")
+        .map((cell) => cell.trim()).filter(Boolean).join(" — ");
+    }
+    out.push(line.replace(/\s+$/, ""));
+  }
+  return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+/**
+ * The firm's identity on a page. Nothing here is evidence and nothing here is a secret — it is
+ * the advisor's own name, their firm's name, one address line, the confidentiality sentence they
+ * want at the foot of every page, and an optional logo held inline as a data URL.
+ *
+ * Every field is optional in practice: a document renders with graceful fallbacks when the advisor
+ * has configured none of it, so an unconfigured account never prints a broken header.
+ */
+export interface LetterheadSettings {
+  firmName: string;
+  advisorName: string;
+  /** One line, as it should print: street, city, postcode, or just a phone and an email. */
+  addressLine: string;
+  /** Printed at the foot of every page. Defaults to the standard confidentiality sentence. */
+  footerLine: string;
+  /** `data:image/png;base64,…` or `data:image/jpeg;base64,…`. Empty when no logo is set. */
+  logoDataUrl: string;
+}
+
+/** The confidentiality sentence a new advisor starts with, and the fallback when theirs is blank. */
+export const DEFAULT_FOOTER_LINE =
+  "Confidential — not to be shared beyond the intended recipient.";
+
+/** Decoded size ceiling for an uploaded logo. Big enough for a real mark, small enough to inline. */
+export const MAX_LOGO_BYTES = 200 * 1024;
+
+/** The only two image types Drive's HTML→Doc conversion reliably carries through. */
+export const LOGO_MIME_TYPES = ["image/png", "image/jpeg"] as const;
+
+const LOGO_DATA_URL = /^data:image\/(png|jpeg);base64,([A-Za-z0-9+/\r\n]+={0,2})$/;
+
+/** Decoded byte length of a base64 payload, without allocating the decoded bytes. */
+function base64Bytes(payload: string): number {
+  const clean = payload.replace(/[\r\n]/g, "");
+  const padding = clean.endsWith("==") ? 2 : clean.endsWith("=") ? 1 : 0;
+  return Math.floor((clean.length * 3) / 4) - padding;
+}
+
+/**
+ * Check an uploaded logo before it is stored. Returns the value to store, or a message written
+ * for the advisor rather than for a log file. An empty value is valid: it means "no logo".
+ */
+export function validateLogoDataUrl(
+  input: unknown,
+): { ok: true; dataUrl: string } | { ok: false; message: string } {
+  const value = text(input);
+  if (!value) return { ok: true, dataUrl: "" };
+  if (!value.startsWith("data:")) {
+    return { ok: false, message: "That logo could not be read. Upload a PNG or JPEG file." };
+  }
+  const match = LOGO_DATA_URL.exec(value);
+  if (!match) {
+    return {
+      ok: false,
+      message: "That file is not a PNG or JPEG. Save your logo as a .png or .jpg and upload that.",
+    };
+  }
+  const bytes = base64Bytes(match[2]);
+  if (bytes > MAX_LOGO_BYTES) {
+    return {
+      ok: false,
+      message: `That logo is ${Math.round(bytes / 1024)} KB. The limit is ${Math.round(MAX_LOGO_BYTES / 1024)} KB — save a smaller copy and upload it again.`,
+    };
+  }
+  return { ok: true, dataUrl: value.replace(/[\r\n]/g, "") };
+}
+
 /* ------------------------------------------------------------------ *
  * Standard deliverable shell (title block + body + footer)
  * ------------------------------------------------------------------ */
@@ -1431,6 +1875,60 @@ export interface DeliverableDocMeta {
   date: string;         // caller passes an ISO or display date — do NOT call Date.now() here
   confidential?: boolean;
   kind?: string;        // artifact kind, optional, for a small label
+  /** The firm's identity, as configured in Settings. Absent or empty renders a clean fallback. */
+  letterhead?: LetterheadSettings | null;
+}
+
+const MONTHS = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
+
+/**
+ * A date a client reads, from an ISO timestamp, with no locale data and no timezone surprises:
+ * `2026-07-29T…` becomes `29 July 2026`. Anything unparseable is returned as it arrived, because
+ * a date we cannot read is still better shown than silently dropped.
+ */
+export function formatDocumentDate(value: string): string {
+  const raw = text(value);
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(raw);
+  if (!match) return raw;
+  const month = MONTHS[Number(match[2]) - 1];
+  if (!month) return raw;
+  return `${Number(match[3])} ${month} ${match[1]}`;
+}
+
+/** `2026-07-29` plus n days, as `YYYY-MM-DD`. Returns "" when the input is not a date. */
+export function addDays(value: string, days: number): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(text(value));
+  if (!match) return "";
+  const at = Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  if (!Number.isFinite(at)) return "";
+  return new Date(at + days * 86_400_000).toISOString().slice(0, 10);
+}
+
+/** Empty-but-valid letterhead, so every render path can assume the five fields exist. */
+function letterheadOf(meta: DeliverableDocMeta): LetterheadSettings {
+  const source = meta.letterhead ?? null;
+  const logo = text(source?.logoDataUrl);
+  return {
+    firmName: text(source?.firmName),
+    advisorName: text(source?.advisorName),
+    addressLine: text(source?.addressLine),
+    footerLine: text(source?.footerLine) || DEFAULT_FOOTER_LINE,
+    // A logo is only ever emitted from a value that still validates as PNG/JPEG base64.
+    logoDataUrl: validateLogoDataUrl(logo).ok ? logo : "",
+  };
+}
+
+/**
+ * The byline: the advisor's name from the letterhead when they set one, otherwise whatever the
+ * caller knew, followed by the firm. "Prepared by" never prints empty.
+ */
+function bylineName(meta: DeliverableDocMeta, letterhead: LetterheadSettings): string {
+  const advisor = letterhead.advisorName || text(meta.advisor);
+  const parts = [advisor, letterhead.firmName].filter(Boolean);
+  return parts.length ? parts.join(", ") : "the advisor";
 }
 
 /**
@@ -1443,6 +1941,17 @@ function metaField(value: unknown): string {
   return escapeHtml(text(value));
 }
 
+/**
+ * Drop the artifact's own leading `# Client — Title` line. The shell prints the title itself, and
+ * two H1s at the top of a client document reads as a mistake in a way nothing else on the page does.
+ */
+function bodyWithoutLeadingHeading(markdown: string): string[] {
+  const lines = (typeof markdown === "string" ? markdown : "").replace(/\r\n?/g, "\n").split("\n");
+  let at = 0;
+  while (at < lines.length && !lines[at].trim()) at += 1;
+  return at < lines.length && /^#\s+\S/.test(lines[at]) ? lines.slice(at + 1) : lines;
+}
+
 /** The <title> element text: "{client} — {title}", escaped, with sensible fallbacks. */
 function deliverableWindowTitle(meta: DeliverableDocMeta): string {
   const label = [text(meta.client), text(meta.title)].filter(Boolean).join(" — ");
@@ -1450,49 +1959,130 @@ function deliverableWindowTitle(meta: DeliverableDocMeta): string {
 }
 
 /**
- * The standard title block. Real document structure only — a heading, the client, the
- * byline, the date, an optional kind label, and (when confidential) an explicit line —
- * so the whole block survives Drive's HTML→Doc conversion without relying on any CSS.
+ * The letterhead band: the firm's mark on the left, the firm's name and address right-aligned.
+ *
+ * It is a two-cell table on purpose. Drive's HTML→Doc conversion throws away almost all CSS but
+ * keeps table structure and inline base64 images, so a table is the only layout that means the
+ * same thing in the browser, in print, and in a converted Google Doc. The logo is width-capped at
+ * 150px for the same reason: a modest inline image converts reliably, a full-width one does not.
+ */
+function letterheadBand(letterhead: LetterheadSettings): string {
+  const logo = letterhead.logoDataUrl
+    ? `<img alt="${escapeHtml(letterhead.firmName || "Firm logo")}" src="${escapeHtml(letterhead.logoDataUrl)}" width="150" />`
+    : "";
+  const firm = [
+    letterhead.firmName ? `<strong>${escapeHtml(letterhead.firmName)}</strong>` : "",
+    letterhead.addressLine ? escapeHtml(letterhead.addressLine) : "",
+  ].filter(Boolean).join("<br />");
+  // Nothing configured at all: no empty band, no stray rule — the document simply starts at its title.
+  if (!logo && !firm) return "";
+  return [
+    `<table class="letterhead"><tbody><tr>`,
+    `<td class="letterhead-mark">${logo}</td>`,
+    `<td class="letterhead-firm" style="text-align:right">${firm}</td>`,
+    `</tr></tbody></table>`,
+  ].join("");
+}
+
+/**
+ * The standard title block: the letterhead band, the document's own title, then one attribution
+ * line — who it was prepared for, who prepared it, and when — and a rule. Real document structure
+ * only, so the whole block survives Drive's HTML→Doc conversion without relying on any CSS.
  */
 function deliverableTitleBlock(meta: DeliverableDocMeta): string {
+  const letterhead = letterheadOf(meta);
   const client = metaField(meta.client) || "the client";
   const title = metaField(meta.title) || "Advisory Deliverable";
-  const advisor = metaField(meta.advisor) || "the advisor";
-  const date = metaField(meta.date);
+  const date = escapeHtml(formatDocumentDate(text(meta.date)));
   const kind = metaField(meta.kind);
-  const lines = [`<h1>${title}</h1>`, `<p><strong>Prepared for ${client}</strong></p>`];
-  if (kind) lines.push(`<p>${kind}</p>`);
-  lines.push(`<p>Prepared by ${advisor}</p>`);
-  if (date) lines.push(`<p>${date}</p>`);
-  if (meta.confidential) {
-    lines.push(`<p><strong>Confidential — prepared for ${client}</strong></p>`);
-  }
+  const attribution = [
+    `Prepared for ${client}`,
+    `Prepared by ${escapeHtml(bylineName(meta, letterhead))}`,
+    date,
+  ].filter(Boolean).join(" · ");
+  const lines = [letterheadBand(letterhead), `<h1>${title}</h1>`].filter(Boolean);
+  if (kind) lines.push(`<p class="doc-kind">${kind}</p>`);
+  lines.push(`<p class="doc-attribution">${attribution}</p>`);
   lines.push("<hr />");
   return lines.join("\n");
 }
 
 /**
- * The standard footer: a rule, then one authorship/confidentiality line and the generator
- * line. Structural elements only, so it converts cleanly into a Google Doc.
+ * The standard footer: a rule, the authorship line, and the advisor's own confidentiality
+ * sentence. Structural elements only, so it converts cleanly into a Google Doc; in the printable
+ * view the same block is pinned so it repeats on every printed page.
  */
 function deliverableFooter(meta: DeliverableDocMeta): string {
+  const letterhead = letterheadOf(meta);
   const client = metaField(meta.client) || "the client";
-  const advisor = metaField(meta.advisor) || "the advisor";
-  const authorship = meta.confidential
-    ? `Confidential — prepared for ${client} by ${advisor}. Not to be shared beyond the intended recipient.`
-    : `Prepared for ${client} by ${advisor}.`;
-  return ["<hr />", `<p>${authorship}</p>`, "<p>Generated by the Tier 4 Advisor Cockpit.</p>"].join("\n");
+  const authorship = `Prepared for ${client} by ${escapeHtml(bylineName(meta, letterhead))}.`;
+  const confidentiality = meta.confidential === false ? "" : escapeHtml(letterhead.footerLine);
+  return [
+    "<hr />",
+    `<div class="doc-footer">`,
+    `<p>${authorship}</p>`,
+    confidentiality ? `<p>${confidentiality}</p>` : "",
+    `</div>`,
+  ].filter(Boolean).join("\n");
 }
 
 /**
- * A print-ready HTML document with the standard title block and confidentiality footer,
- * for the IN-APP printable view. Reuses the full renderer's markdown conversion and keeps
- * the complete print stylesheet, because this path is viewed and printed in a browser —
- * it is never handed to Drive, so its CSS is safe to rely on.
+ * Everything that makes a printed page look like it came from a firm rather than out of a browser.
+ * Appended after PRINT_STYLES so it overrides the app's screen defaults without editing them.
+ *
+ * The rules that matter when this hits paper: a 2cm page margin on every side; a print-safe stack
+ * (serif body, sans headings — no webfont, no network request); headings that do not orphan at a
+ * page break; table headers that repeat on a continuation page; and a footer that is pinned to the
+ * bottom of every printed page rather than appearing once at the end of the document.
+ */
+const LETTERHEAD_STYLES = `body {
+  font-family: Georgia, "Times New Roman", "Liberation Serif", Times, serif;
+  color: #14161a;
+}
+h1, h2, h3, h4, h5, h6 {
+  font-family: "Helvetica Neue", Helvetica, Arial, "Liberation Sans", sans-serif;
+  letter-spacing: -0.005em;
+}
+table.letterhead { width: 100%; border-collapse: collapse; margin: 0 0 1.75rem; font-size: 0.95rem; }
+table.letterhead td { border: 0; padding: 0; vertical-align: middle; }
+table.letterhead td.letterhead-mark { width: 150px; }
+table.letterhead img { max-width: 150px; height: auto; display: block; }
+table.letterhead td.letterhead-firm { line-height: 1.5; }
+p.doc-kind { margin: 0 0 0.35rem; font-size: 0.9rem; letter-spacing: 0.06em; text-transform: uppercase; color: #5b6069; }
+p.doc-attribution { margin: 0 0 1rem; color: #3f4249; font-size: 0.98rem; }
+.doc-footer { color: #4a4e56; font-size: 0.85rem; }
+.doc-footer p { margin: 0.15rem 0; }
+thead { display: table-header-group; }
+tfoot { display: table-footer-group; }
+h1, h2, h3, h4, h5, h6 { break-after: avoid-page; page-break-after: avoid; }
+p, li, blockquote { orphans: 3; widows: 3; }
+@page { margin: 20mm; }
+@media print {
+  body { padding: 0 0 22mm; font-size: 11pt; }
+  table.letterhead { margin-bottom: 1.2rem; }
+  /* Pinned, so the confidentiality line lands on every page and not only the last one. */
+  .doc-footer {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    padding-top: 3mm;
+    border-top: 1px solid #d8d8d2;
+    background: #fff;
+  }
+  .doc-footer + hr, hr + .doc-footer { break-before: avoid; }
+  table { break-inside: auto; }
+  tr, img { break-inside: avoid; page-break-inside: avoid; }
+}`;
+
+/**
+ * A print-ready HTML document with the firm's letterhead, the standard title block and the
+ * confidentiality footer, for the IN-APP printable view. Reuses the full renderer's markdown
+ * conversion and keeps the complete print stylesheet, because this path is viewed and printed in a
+ * browser — it is never handed to Drive, so its CSS is safe to rely on.
  */
 export function renderDeliverableDocument(markdown: string, meta: DeliverableDocMeta): string {
-  const source = typeof markdown === "string" ? markdown : "";
-  const body = renderBlocks(source.replace(/\r\n?/g, "\n").split("\n"));
+  const body = renderBlocks(bodyWithoutLeadingHeading(markdown));
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -1502,6 +2092,7 @@ export function renderDeliverableDocument(markdown: string, meta: DeliverableDoc
 <title>${deliverableWindowTitle(meta)}</title>
 <style>
 ${PRINT_STYLES}
+${LETTERHEAD_STYLES}
 </style>
 </head>
 <body>
@@ -1523,8 +2114,7 @@ ${deliverableFooter(meta)}
  * markdown→HTML conversion as the printable view, just without the heavy stylesheet.
  */
 export function renderGoogleDocHtml(markdown: string, meta: DeliverableDocMeta): string {
-  const source = typeof markdown === "string" ? markdown : "";
-  const body = renderBlocks(source.replace(/\r\n?/g, "\n").split("\n"));
+  const body = renderBlocks(bodyWithoutLeadingHeading(markdown));
   return `<!doctype html>
 <html lang="en">
 <head>

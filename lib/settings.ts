@@ -1,4 +1,18 @@
+import {
+  DEFAULT_FOOTER_LINE,
+  LOGO_MIME_TYPES,
+  MAX_LOGO_BYTES,
+  validateLogoDataUrl,
+  type LetterheadSettings,
+} from "./deliverables";
 import { getSettingsRow, putSettingsRow } from "./store";
+
+// The letterhead's shape, its default confidentiality line, its size ceiling and its validation
+// live beside the code that renders a document, because a letterhead is a document concern and
+// nothing there needs the database. They are re-exported here so a caller already talking to
+// settings does not need a second import, and so the storage rules below stay the only rules.
+export { DEFAULT_FOOTER_LINE, LOGO_MIME_TYPES, MAX_LOGO_BYTES, validateLogoDataUrl };
+export type { LetterheadSettings };
 
 /**
  * Per-advisor, non-secret configuration.
@@ -16,6 +30,8 @@ export interface AdvisorSettings {
   driveFolderId: string;
   /** Optional display name for outgoing email. */
   fromName: string;
+  /** What every printed and published client document is headed and footed with. */
+  letterhead: LetterheadSettings;
 }
 
 /**
@@ -49,11 +65,20 @@ export const CRM_MATCH_KEY = "Engagement ID";
 /** Tab an advisor gets before they rename it. */
 export const DEFAULT_CRM_SHEET_TAB = "Engagements";
 
+const DEFAULT_LETTERHEAD: LetterheadSettings = {
+  firmName: "",
+  advisorName: "",
+  addressLine: "",
+  footerLine: DEFAULT_FOOTER_LINE,
+  logoDataUrl: "",
+};
+
 const DEFAULT_SETTINGS: AdvisorSettings = {
   crmSpreadsheetId: "",
   crmSheetTab: DEFAULT_CRM_SHEET_TAB,
   driveFolderId: "",
   fromName: "",
+  letterhead: DEFAULT_LETTERHEAD,
 };
 
 function asString(value: unknown): string {
@@ -91,6 +116,23 @@ export function parseDriveFolderId(input: string): string {
   return token ? token[1] : "";
 }
 
+/**
+ * Coerce an arbitrary parsed object into a fully-defaulted, trimmed letterhead. A stored logo that
+ * no longer validates (a hand-edited row, a format we stopped accepting) is dropped rather than
+ * printed, so a bad value can never reach a client-facing page.
+ */
+function normalizeLetterhead(raw: unknown): LetterheadSettings {
+  const source = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
+  const logo = validateLogoDataUrl(source.logoDataUrl);
+  return {
+    firmName: asString(source.firmName).trim(),
+    advisorName: asString(source.advisorName).trim(),
+    addressLine: asString(source.addressLine).replace(/\s+/g, " ").trim(),
+    footerLine: asString(source.footerLine).trim() || DEFAULT_FOOTER_LINE,
+    logoDataUrl: logo.ok ? logo.dataUrl : "",
+  };
+}
+
 /** Coerce an arbitrary parsed object into a fully-defaulted, trimmed AdvisorSettings. */
 function normalize(raw: unknown): AdvisorSettings {
   const source = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
@@ -99,6 +141,7 @@ function normalize(raw: unknown): AdvisorSettings {
     crmSheetTab: asString(source.crmSheetTab).trim() || DEFAULT_CRM_SHEET_TAB,
     driveFolderId: parseDriveFolderId(asString(source.driveFolderId)),
     fromName: asString(source.fromName).trim(),
+    letterhead: normalizeLetterhead(source.letterhead),
   };
 }
 
@@ -135,6 +178,11 @@ export async function putSettings(
   }
   if (patch.fromName !== undefined) {
     next.fromName = asString(patch.fromName).trim();
+  }
+  // Same rule one level down: a letterhead patch changes only the keys it carries, so saving a
+  // firm name cannot silently clear an uploaded logo.
+  if (patch.letterhead !== undefined) {
+    next.letterhead = normalizeLetterhead({ ...current.letterhead, ...(patch.letterhead ?? {}) });
   }
   // Persist a defaulted object, never the caller's raw shape, so unknown keys never reach the DB.
   await putSettingsRow(ownerId, JSON.stringify({ ...DEFAULT_SETTINGS, ...next }));

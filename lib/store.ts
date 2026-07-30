@@ -1,14 +1,25 @@
 import { getD1 } from "@/db";
 import { legacyOwnerEmail, ownerIdForEmail } from "./auth";
 import {
+  CLIENT_SOURCES,
+  CLIENT_STATUSES,
+  type ClientDraft,
+  type ClientRecord,
+  type ClientSource,
+  type ClientStatus,
+} from "./clients";
+import {
+  HEADCOUNT_BANDS,
   BASELINE_STATUSES,
   CRM_STAGES,
   CRM_STATUSES,
   READINESS_STATUSES,
   WORKFLOW_STATES,
   assertWorkflowTransition,
+  firmographicsAreEmpty,
   isOneOf,
   makeId,
+  normalizeFirmographics,
   stageForState,
   type BaselineStatus,
   type CrmStage,
@@ -16,6 +27,8 @@ import {
   type Engagement,
   type EngagementData,
   type FindingStatus,
+  type Firmographics,
+  type HeadcountBand,
   type ReadinessStatus,
   type WorkflowState,
 } from "./workflow";
@@ -66,11 +79,28 @@ const TABLE_STATEMENTS = [
     outcome TEXT NOT NULL, next_action TEXT NOT NULL, owner TEXT NOT NULL,
     source_link TEXT, created_at TEXT NOT NULL
   )`,
+  // `client_id` carries the roster-scoped intents (audit_invite). Exactly one of engagement_id
+  // and client_id is set on any row; both columns stay NOT NULL DEFAULT '' so the reconcile path
+  // can add client_id to a database that already holds engagement-scoped intents.
   `CREATE TABLE IF NOT EXISTS intents (
     id TEXT PRIMARY KEY, engagement_id TEXT NOT NULL, owner_id TEXT NOT NULL DEFAULT '',
+    client_id TEXT NOT NULL DEFAULT '',
     type TEXT NOT NULL, status TEXT NOT NULL, payload_json TEXT NOT NULL,
     result_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL,
     updated_at TEXT, executed_at TEXT
+  )`,
+  // The advisor's client roster — the front of the pipeline, before any engagement exists.
+  // A proper table rather than a JSON blob: rows are searched, deduplicated on import, and
+  // updated one at a time, which is exactly what every other owner-scoped table here does.
+  `CREATE TABLE IF NOT EXISTS clients (
+    id TEXT PRIMARY KEY, owner_id TEXT NOT NULL DEFAULT '',
+    company TEXT NOT NULL, website TEXT NOT NULL DEFAULT '',
+    contact_name TEXT NOT NULL DEFAULT '', contact_role TEXT NOT NULL DEFAULT '',
+    email TEXT NOT NULL DEFAULT '', industry TEXT NOT NULL DEFAULT '',
+    headcount_band TEXT NOT NULL DEFAULT '', phone TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT 'manual', status TEXT NOT NULL DEFAULT 'none',
+    engagement_id TEXT NOT NULL DEFAULT '', invited_at TEXT,
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
   )`,
   // Per-owner, non-secret advisor configuration (CRM sheet id, tab, Drive folder, from-name).
   // Real credentials never live here — they stay in Cloudflare/wrangler secrets.
@@ -113,9 +143,24 @@ const REQUIRED_COLUMNS: Record<string, Record<string, string>> = {
   activities: { owner_id: "TEXT NOT NULL DEFAULT ''" },
   intents: {
     owner_id: "TEXT NOT NULL DEFAULT ''",
+    client_id: "TEXT NOT NULL DEFAULT ''",
     result_json: "TEXT NOT NULL DEFAULT '{}'",
     updated_at: "TEXT",
     executed_at: "TEXT",
+  },
+  clients: {
+    owner_id: "TEXT NOT NULL DEFAULT ''",
+    website: "TEXT NOT NULL DEFAULT ''",
+    contact_name: "TEXT NOT NULL DEFAULT ''",
+    contact_role: "TEXT NOT NULL DEFAULT ''",
+    email: "TEXT NOT NULL DEFAULT ''",
+    industry: "TEXT NOT NULL DEFAULT ''",
+    headcount_band: "TEXT NOT NULL DEFAULT ''",
+    phone: "TEXT NOT NULL DEFAULT ''",
+    source: "TEXT NOT NULL DEFAULT 'manual'",
+    status: "TEXT NOT NULL DEFAULT 'none'",
+    engagement_id: "TEXT NOT NULL DEFAULT ''",
+    invited_at: "TEXT",
   },
   // owner_id is the PRIMARY KEY and always arrives with the CREATE, so only the value columns are
   // reconciled here. NOT NULL adds need a DEFAULT so ALTER succeeds on a table that already has rows.
@@ -146,6 +191,8 @@ const INDEX_STATEMENTS = [
   "CREATE INDEX IF NOT EXISTS idx_activities_owner ON activities (owner_id, created_at DESC)",
   "CREATE INDEX IF NOT EXISTS idx_intents_owner ON intents (owner_id, created_at DESC)",
   "CREATE INDEX IF NOT EXISTS idx_advisor_secrets_owner ON advisor_secrets (owner_id)",
+  "CREATE INDEX IF NOT EXISTS idx_intents_client ON intents (client_id, created_at DESC)",
+  "CREATE INDEX IF NOT EXISTS idx_clients_owner ON clients (owner_id, updated_at DESC)",
 ] as const;
 
 const CLEANUP_STATEMENTS = [
@@ -321,6 +368,8 @@ export interface CreateEngagementInput {
   email?: string;
   advisor?: string;
   notes?: string;
+  /** Optional advisor-stated context captured at intake. Stored under `data`, never as evidence. */
+  firmographics?: Firmographics;
 }
 
 export async function createEngagement(
@@ -330,6 +379,7 @@ export async function createEngagement(
   const owner = requireOwner(input.ownerId);
   const client = input.client?.trim();
   if (!client) throw new Error("client is required");
+  const firmographics = normalizeFirmographics(input.firmographics);
   const now = new Date().toISOString();
   const engagement: Engagement = {
     id: makeId("eng"),
@@ -354,7 +404,12 @@ export async function createEngagement(
     engagementFolder: "",
     notes: input.notes?.trim() ?? "",
     findingStatus: "none",
-    data: { sourceRegister: [] },
+    // An entirely blank firmographics block is not stored: "the advisor said nothing" and
+    // "the advisor said nothing three times" are the same fact, and an empty object on the
+    // record would later read as though something had been captured.
+    data: firmographicsAreEmpty(firmographics)
+      ? { sourceRegister: [] }
+      : { sourceRegister: [], firmographics },
     version: 1,
     createdAt: now,
     updatedAt: now,
@@ -388,7 +443,13 @@ function validatePatch(existing: Engagement, patch: EngagementPatch): Engagement
   if (!["none", "provisional", "client-verified", "approved"].includes(findingStatus)) {
     throw new Error("Invalid findingStatus");
   }
-  assertWorkflowTransition(existing.workflowState, workflowState, baselineStatus, findingStatus);
+  // The checkpoint gates read the merged record, not the flat status columns: the baseline the
+  // finding is actually bound to and the kill-condition result the outcome actually carries.
+  const data = patch.data ? mergeData(existing.data, patch.data) : existing.data;
+  assertWorkflowTransition(existing.workflowState, workflowState, baselineStatus, findingStatus, {
+    baselineMetric: data.finding?.baselineMetric ?? null,
+    killConditionResult: data.outcome?.killConditionResult,
+  });
   const stage = patch.stage ?? (patch.workflowState ? stageForState(workflowState) : existing.stage);
   if (!isOneOf(CRM_STAGES, stage)) throw new Error("Invalid stage");
   const status = patch.status ?? existing.status;
@@ -414,7 +475,7 @@ function validatePatch(existing: Engagement, patch: EngagementPatch): Engagement
     // Merge, but never let an `undefined` value in the patch delete a stored key. A caller
     // that means to clear a field sets it to null or an empty value, not undefined — which is
     // usually an accidental `obj?.maybeMissing` that would otherwise erase confirmed evidence.
-    data: patch.data ? mergeData(existing.data, patch.data) : existing.data,
+    data,
     version: existing.version + 1,
     createdAt: existing.createdAt,
     updatedAt: new Date().toISOString(),
@@ -634,8 +695,14 @@ export async function deleteEngagementCascade(id: string, ownerId: string): Prom
   return true;
 }
 
-export async function createIntent(
-  engagement: Engagement,
+/**
+ * Insert one intent, always `pending_review`. `engagementId` and `clientId` are alternatives:
+ * an engagement-scoped intent carries the first, a roster-scoped one the second. Neither shape
+ * can be created in any other status — approval is a separate, explicit write.
+ */
+async function insertIntent(
+  ownerId: string,
+  scope: { engagementId?: string; clientId?: string },
   type: string,
   payload: unknown,
 ): Promise<DbRow> {
@@ -643,8 +710,9 @@ export async function createIntent(
   const now = new Date().toISOString();
   const intent = {
     id: makeId("intent"),
-    engagement_id: engagement.id,
-    owner_id: requireOwner(engagement.ownerId),
+    engagement_id: scope.engagementId ?? "",
+    owner_id: requireOwner(ownerId),
+    client_id: scope.clientId ?? "",
     type,
     status: "pending_review" satisfies IntentStatus,
     payload_json: JSON.stringify(payload),
@@ -655,10 +723,30 @@ export async function createIntent(
   };
   await getD1().prepare(
     `INSERT INTO intents
-     (id, engagement_id, owner_id, type, status, payload_json, result_json, created_at, updated_at, executed_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+     (id, engagement_id, owner_id, client_id, type, status, payload_json, result_json, created_at, updated_at, executed_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).bind(...Object.values(intent)).run();
   return { ...intent, payload, result: {} };
+}
+
+export async function createIntent(
+  engagement: Engagement,
+  type: string,
+  payload: unknown,
+): Promise<DbRow> {
+  return insertIntent(engagement.ownerId, { engagementId: engagement.id }, type, payload);
+}
+
+/**
+ * A roster-scoped intent. The client pipeline exists before any engagement does, so an
+ * invitation cannot hang off an engagement id — it hangs off the roster row instead.
+ */
+export async function createClientIntent(
+  client: ClientRecord,
+  type: string,
+  payload: unknown,
+): Promise<DbRow> {
+  return insertIntent(client.ownerId, { clientId: client.id }, type, payload);
 }
 
 export async function getIntent(id: string, ownerId: string): Promise<DbRow | null> {
@@ -668,6 +756,25 @@ export async function getIntent(id: string, ownerId: string): Promise<DbRow | nu
     "SELECT * FROM intents WHERE id = ? AND owner_id = ? LIMIT 1"
   ).bind(id, owner).first<DbRow>();
   return row ? mapIntent(row) : null;
+}
+
+/**
+ * Roster-scoped intents for one advisor, newest first. Kept separate from `listIntents` so an
+ * engagement's own action list never silently gains rows that belong to a different scope.
+ */
+export async function listClientIntents(ownerId: string, clientId?: string): Promise<DbRow[]> {
+  await ensureDatabase();
+  const owner = requireOwner(ownerId);
+  const db = getD1();
+  const statement = clientId
+    ? db.prepare(
+      "SELECT * FROM intents WHERE owner_id = ? AND client_id = ? ORDER BY created_at DESC"
+    ).bind(owner, clientId)
+    : db.prepare(
+      "SELECT * FROM intents WHERE owner_id = ? AND client_id != '' ORDER BY created_at DESC"
+    ).bind(owner);
+  const result = await statement.all<DbRow>();
+  return (result.results ?? []).map(mapIntent);
 }
 
 export async function listIntents(ownerId: string, engagementId?: string): Promise<DbRow[]> {
@@ -808,6 +915,183 @@ export async function getAppConfig(key: string): Promise<string> {
     "SELECT value FROM app_config WHERE key = ? LIMIT 1"
   ).bind(key).first<DbRow>();
   return text(row ?? {}, "value");
+}
+
+/* ===========================================================================
+ * CLIENT ROSTER
+ * ---------------------------------------------------------------------------
+ * The pipeline's front door. Stored as its own owner-scoped table rather than a
+ * per-owner JSON blob, because a roster is searched, deduplicated on import, and
+ * patched one row at a time — the same access pattern every other table here has.
+ * A blob would force a read-modify-write of the whole roster for a single status
+ * change, and would lose the row-level tenancy that `owner_id` gives for free.
+ * =========================================================================== */
+
+function mapClient(row: DbRow): ClientRecord {
+  const source = text(row, "source");
+  const status = text(row, "status");
+  const band = text(row, "headcount_band");
+  return {
+    id: text(row, "id"),
+    ownerId: text(row, "owner_id"),
+    company: text(row, "company"),
+    website: text(row, "website"),
+    contactName: text(row, "contact_name"),
+    contactRole: text(row, "contact_role"),
+    email: text(row, "email"),
+    industry: text(row, "industry"),
+    // An unreadable stored band reads as "not stated" rather than as the nearest real band.
+    headcountBand: (HEADCOUNT_BANDS as readonly string[]).includes(band) ? band as HeadcountBand : "",
+    phone: text(row, "phone"),
+    source: (CLIENT_SOURCES as readonly string[]).includes(source) ? source as ClientSource : "manual",
+    status: (CLIENT_STATUSES as readonly string[]).includes(status) ? status as ClientStatus : "none",
+    engagementId: text(row, "engagement_id"),
+    invitedAt: nullableText(row, "invited_at"),
+    createdAt: text(row, "created_at"),
+    updatedAt: text(row, "updated_at"),
+  };
+}
+
+export async function listClients(ownerId: string): Promise<ClientRecord[]> {
+  await ensureDatabase();
+  const owner = requireOwner(ownerId);
+  const result = await getD1().prepare(
+    "SELECT * FROM clients WHERE owner_id = ? ORDER BY updated_at DESC, company ASC"
+  ).bind(owner).all<DbRow>();
+  return (result.results ?? []).map(mapClient);
+}
+
+/** Another owner's client is indistinguishable from a missing one. */
+export async function getClient(id: string, ownerId: string): Promise<ClientRecord | null> {
+  await ensureDatabase();
+  const owner = requireOwner(ownerId);
+  const row = await getD1().prepare(
+    "SELECT * FROM clients WHERE id = ? AND owner_id = ? LIMIT 1"
+  ).bind(id, owner).first<DbRow>();
+  return row ? mapClient(row) : null;
+}
+
+export async function createClient(ownerId: string, draft: ClientDraft): Promise<ClientRecord> {
+  await ensureDatabase();
+  const owner = requireOwner(ownerId);
+  const company = draft.company?.trim();
+  if (!company) throw new Error("company is required");
+  const now = new Date().toISOString();
+  const client: ClientRecord = {
+    id: makeId("cli"),
+    ownerId: owner,
+    company,
+    website: draft.website?.trim() ?? "",
+    contactName: draft.contactName?.trim() ?? "",
+    contactRole: draft.contactRole?.trim() ?? "",
+    email: draft.email?.trim() ?? "",
+    industry: draft.industry?.trim() ?? "",
+    headcountBand: draft.headcountBand ?? "",
+    phone: draft.phone?.trim() ?? "",
+    source: draft.source === "csv" ? "csv" : "manual",
+    status: "none",
+    engagementId: "",
+    invitedAt: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+  await getD1().prepare(
+    `INSERT INTO clients
+     (id, owner_id, company, website, contact_name, contact_role, email, industry,
+      headcount_band, phone, source, status, engagement_id, invited_at, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).bind(
+    client.id, client.ownerId, client.company, client.website, client.contactName,
+    client.contactRole, client.email, client.industry, client.headcountBand, client.phone,
+    client.source, client.status, client.engagementId, client.invitedAt,
+    client.createdAt, client.updatedAt,
+  ).run();
+  return client;
+}
+
+export type ClientPatch = Partial<
+  Pick<
+    ClientRecord,
+    "company" | "website" | "contactName" | "contactRole" | "email" | "industry"
+    | "headcountBand" | "phone" | "status" | "engagementId" | "invitedAt"
+  >
+>;
+
+const CLIENT_PATCH_COLUMNS: Array<[keyof ClientPatch, string]> = [
+  ["company", "company"], ["website", "website"], ["contactName", "contact_name"],
+  ["contactRole", "contact_role"], ["email", "email"], ["industry", "industry"],
+  ["headcountBand", "headcount_band"], ["phone", "phone"], ["status", "status"],
+  ["engagementId", "engagement_id"], ["invitedAt", "invited_at"],
+];
+
+/**
+ * Patch one roster row. Only keys present in the patch are written, so a partial update from a
+ * CSV import can never blank a field the file simply did not carry a column for.
+ */
+export async function updateClient(
+  id: string,
+  ownerId: string,
+  patch: ClientPatch,
+): Promise<ClientRecord> {
+  await ensureDatabase();
+  const owner = requireOwner(ownerId);
+  const columns: string[] = [];
+  const values: Array<string | null> = [];
+  for (const [key, column] of CLIENT_PATCH_COLUMNS) {
+    const value = patch[key];
+    if (value === undefined) continue;
+    if (key === "status" && !(CLIENT_STATUSES as readonly string[]).includes(String(value))) {
+      throw new Error(`Invalid client status: ${String(value)}`);
+    }
+    if (key === "headcountBand" && !(HEADCOUNT_BANDS as readonly string[]).includes(String(value))) {
+      throw new Error(`Invalid headcount band: ${String(value)}`);
+    }
+    columns.push(`${column} = ?`);
+    values.push(value === null ? null : String(value).trim());
+  }
+  if (columns.length) {
+    const now = new Date().toISOString();
+    const result = await getD1().prepare(
+      `UPDATE clients SET ${columns.join(", ")}, updated_at = ? WHERE id = ? AND owner_id = ?`
+    ).bind(...values, now, id, owner).run();
+    if (!result.meta.changes) throw new Error("Client not found");
+  }
+  const updated = await getClient(id, owner);
+  if (!updated) throw new Error("Client not found");
+  return updated;
+}
+
+export async function deleteClient(id: string, ownerId: string): Promise<boolean> {
+  await ensureDatabase();
+  const owner = requireOwner(ownerId);
+  const db = getD1();
+  const result = await db.prepare(
+    "DELETE FROM clients WHERE id = ? AND owner_id = ?"
+  ).bind(id, owner).run();
+  if (!result.meta.changes) return false;
+  await db.prepare("DELETE FROM intents WHERE client_id = ? AND owner_id = ?").bind(id, owner).run();
+  return true;
+}
+
+/**
+ * An activity row for a roster action. `engagement_id` is empty because no engagement exists
+ * yet; the row still carries the company so the advisor's audit trail stays continuous from
+ * first import through to the engagement that follows.
+ */
+export async function addClientActivity(
+  client: ClientRecord,
+  input: ActivityInput,
+): Promise<void> {
+  await ensureDatabase();
+  await getD1().prepare(
+    `INSERT INTO activities
+     (id, engagement_id, owner_id, client, activity_type, summary, outcome, next_action, owner, source_link, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).bind(
+    makeId("act"), "", requireOwner(client.ownerId), client.company,
+    input.activityType, input.summary, input.outcome ?? "", input.nextAction ?? "",
+    input.owner ?? "", input.sourceLink ?? null, new Date().toISOString(),
+  ).run();
 }
 
 export async function putAppConfig(key: string, value: string): Promise<void> {

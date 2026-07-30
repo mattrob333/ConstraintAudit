@@ -1,7 +1,11 @@
+import type { ClientRecord } from "./clients";
+import { HttpError } from "./http";
+import { baselineMetricIsBound } from "./workflow";
 import type {
   ConsentAttestation,
   ConstraintFinding,
   Engagement,
+  Firmographics,
   WorkflowState,
 } from "./workflow";
 
@@ -54,20 +58,62 @@ export function requireApprovedReadinessArtifact(
   return artifact;
 }
 
+/** A constraint needs corroboration, not one line read twice. Same bar as the grounding layer. */
+const MIN_APPROVAL_QUOTES = 2;
+
+function quoteKey(quote: string): string {
+  return quote.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+/**
+ * The approval bar, matched to the grounding layer's own bar rather than sitting under it.
+ *
+ * One quote was enough here while `groundConstraint` required two distinct client lines, so a
+ * finding the evidence layer would never have built could still be approved once the advisor
+ * edited it — and a baseline reading `Missing` could be approved beside a `Confirmed`
+ * engagement column (audit F3/F4/F6). Both are now checked on the finding itself.
+ */
 export function requireDiagnosisApprovalEvidence(finding: ConstraintFinding): void {
   if (!finding.humanOwner.name.trim() || !finding.humanOwner.role.trim()) {
     throw new Error("Diagnosis approval requires a named human owner and role.");
   }
-  const evidence = finding.evidence.filter(
-    (item) =>
-      item.provenance === "client-stated" &&
-      item.quote.trim() &&
-      item.speaker.trim() &&
-      item.timestamp.trim(),
+  const distinct = new Set(
+    finding.evidence
+      .filter(
+        (item) =>
+          item.provenance === "client-stated" &&
+          item.quote.trim() &&
+          item.speaker.trim() &&
+          item.timestamp.trim(),
+      )
+      .map((item) => `${item.timestamp.trim()}|${quoteKey(item.quote)}`),
   );
-  if (evidence.length === 0) {
-    throw new Error("Diagnosis approval requires at least one client-stated quote with speaker and timestamp.");
+  if (distinct.size < MIN_APPROVAL_QUOTES) {
+    throw new Error(
+      `Diagnosis approval requires at least ${MIN_APPROVAL_QUOTES} distinct client-stated quotes with speaker and timestamp; this finding carries ${distinct.size}.`,
+    );
   }
+  if (!baselineMetricIsBound(finding.baselineMetric)) {
+    throw new Error("Diagnosis approval requires a baseline metric bound to the constraint; this finding's baseline is Missing.");
+  }
+}
+
+/**
+ * An invitation needs somewhere to go. This is the server-side gate: a roster client with no
+ * email address can never reach the queue, so a pending intent with no recipient cannot exist
+ * for an advisor to approve later. Enforced here rather than in the browser only.
+ */
+export function requireInvitableClient(client: ClientRecord | null): ClientRecord {
+  if (!client) throw new Error("Client not found");
+  // Explicit 400s: these are the advisor's input to correct, not a server fault. Left to the
+  // message-shape fallback in `jsonError` they read as 500s, which shows a working app as broken.
+  if (!client.company.trim()) {
+    throw new HttpError(400, "This client has no company name, so no invitation can be addressed.");
+  }
+  if (!client.email.trim()) {
+    throw new HttpError(400, "This client has no email address. Add one before an audit invitation can be queued.");
+  }
+  return client;
 }
 
 export type EngagementPatchCommand =
@@ -78,6 +124,7 @@ export type EngagementPatchCommand =
         client: string;
         website: string;
         primaryContact: string;
+        primaryContactRole: string;
         email: string;
         advisor: string;
         notes: string;
@@ -86,6 +133,8 @@ export type EngagementPatchCommand =
         call2At: string | null;
         lastContact: string | null;
         engagementFolder: string;
+        /** Optional advisor-stated context. Stored under engagement.data, never as evidence. */
+        firmographics: Firmographics;
       }>;
     }
   | {
@@ -107,7 +156,7 @@ export function requirePatchCommand(value: unknown): EngagementPatchCommand {
     }
     const allowed = new Set([
       "client", "website", "primaryContact", "primaryContactRole", "email", "advisor", "notes",
-      "dueDate", "call1At", "call2At", "lastContact", "engagementFolder",
+      "dueDate", "call1At", "call2At", "lastContact", "engagementFolder", "firmographics",
     ]);
     const keys = Object.keys(input.fields as object);
     if (keys.some((key) => !allowed.has(key))) {

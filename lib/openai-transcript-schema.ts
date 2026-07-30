@@ -1,5 +1,6 @@
 import {
   CONSTRAINT_TYPES,
+  KILL_COMPARATORS,
   canonicalCanvasBlock,
   type CanvasBlock,
   type CanvasUpdate,
@@ -7,6 +8,9 @@ import {
   type DiscoveryQuestion,
   type EvidenceClaim,
   type ExtractedMetric,
+  type KillComparator,
+  type KillConditionSpec,
+  type MetricGrounding,
   type RoleMapEntry,
   type TranscriptContradiction,
   type TranscriptDecision,
@@ -17,6 +21,16 @@ import {
 } from "./workflow";
 
 /* ------------------------------------------------------------------ types */
+
+/** Re-exported so grounding callers keep one import for the whole evidence vocabulary. */
+export type { MetricGrounding };
+
+/** What a constraint citation is doing. A constraint with no `mechanism` citation is not one. */
+export const EVIDENCE_ROLES = ["symptom", "mechanism", "magnitude", "single_point_dependency"] as const;
+export type EvidenceRole = (typeof EVIDENCE_ROLES)[number];
+
+/** The dimension a metric measures in, used to check a baseline actually measures the constraint. */
+export type MetricDimension = "time" | "count-per-period" | "rate";
 
 export type GroundingRejection = NonNullable<TranscriptSynthesis["groundingRejections"]>[number];
 export type FlowConfirmation = NonNullable<TranscriptSynthesis["flowConfirmations"]>[number];
@@ -32,6 +46,21 @@ export type GroundedQuote = {
   line: number;
 };
 
+/** A constraint citation that survived grounding, carrying what the client line is doing. */
+export type ConstraintCitation = GroundedQuote & { role: EvidenceRole };
+
+/** A rival the model examined and rejected, with the client line that argues against it. */
+export type RejectedHypothesis = {
+  constraintType: ConstraintType;
+  canvasBlock: CanvasBlock;
+  reason: string;
+  quote: string;
+  speaker: string;
+  timestamp: string;
+  /** 1-based index of the transcript line the rejection was grounded to. */
+  line: number;
+};
+
 export type ModelConstraint = {
   constraintType: ConstraintType;
   canvasBlock: CanvasBlock;
@@ -40,8 +69,16 @@ export type ModelConstraint = {
   prescription: string;
   whySmallestIntervention: string;
   killCondition: string;
+  /** The testable form of the same condition, or null when it could not be read out honestly. */
+  killConditionSpec: KillConditionSpec | null;
   predictedNextConstraint: string;
-  evidence: GroundedQuote[];
+  evidence: ConstraintCitation[];
+  /** Index into `GroundedSynthesis.metrics`, or -1 when no metric survived baseline validation. */
+  baselineMetricIndex: number;
+  /** The validated baseline itself. Null means Missing; it is never silently reassigned. */
+  baselineMetric: ExtractedMetric | null;
+  /** Why that metric measures this constraint. Required for knowledge and policy constraints. */
+  baselineReason: string;
 };
 
 /** Optional catalogs the caller already holds. Absent context narrows what can be grounded, never widens it. */
@@ -66,6 +103,8 @@ export type GroundedSynthesis = {
   gaps: string[];
   rejections: GroundingRejection[];
   constraint: ModelConstraint | null;
+  /** Grounded rivals the model rejected. Ungrounded ones are discarded, never printed. */
+  rejectedHypotheses: RejectedHypothesis[];
   unansweredQuestions: DiscoveryQuestion[];
 };
 
@@ -75,11 +114,17 @@ const MAX_ITEMS = 25;
 const MAX_ROLES = 12;
 const MAX_REJECTIONS = 60;
 const MAX_QUOTE = 1_000;
+const MAX_SPAN = 160;
+/** Two rivals, per the audit: enough to show the work, few enough to stay readable. */
+const MAX_REJECTED_HYPOTHESES = 2;
+/** A constraint needs corroboration, not one line read twice. */
+const MIN_CONSTRAINT_LINES = 2;
 
 const RESOLUTIONS = new Set<string>(["client-corrected", "client-confirmed", "unresolved"]);
 const FLOW_STATUSES = new Set<string>(["confirmed", "corrected", "unconfirmed"]);
 const JUDGMENT_VALUES = new Set<string>(["judgment", "grind", "mixed"]);
 const TYPES = new Set<string>(CONSTRAINT_TYPES);
+const ROLES = new Set<string>(EVIDENCE_ROLES);
 
 function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -127,6 +172,278 @@ function normalize(value: string): string {
     out += (UNIFY[raw] ?? raw).toLowerCase();
   }
   return out;
+}
+
+/** Exposed so every pass grounds spans in exactly the space quote grounding matches in. */
+export function normalizeForGrounding(value: string): string {
+  return normalize(value);
+}
+
+/* ------------------------------------------------------ metric semantics */
+
+/** Elapsed-time units, singular and plural. A latency baseline has to be one of these. */
+const TIME_UNITS = new Set<string>([
+  "second", "seconds", "sec", "secs", "minute", "minutes", "min", "mins",
+  "hour", "hours", "hr", "hrs", "day", "days", "business day", "business days",
+  "working day", "working days", "calendar day", "calendar days",
+  "week", "weeks", "month", "months", "quarter", "quarters", "year", "years",
+]);
+
+/** Symbols a client says out loud as a symbol but a model writes as a word. */
+const UNIT_SYMBOLS: Record<string, string> = {
+  "$": "dollars", "£": "pounds", "€": "euros", "%": "percent",
+};
+
+export function isPercentUnit(unit: string): boolean {
+  const value = normalize(unit);
+  return value === "%" || value === "percent" || value === "percentage" || value === "percentage points";
+}
+
+export function isTimeUnit(unit: string): boolean {
+  return TIME_UNITS.has(normalize(unit));
+}
+
+/**
+ * What the metric measures in, not what it is called. `null` means the metric is not a
+ * measurement of anything nameable — a bare number, or a count with no period over which it
+ * was counted — and so can never be a baseline.
+ */
+export function metricDimension(unit: string, period: string): MetricDimension | null {
+  if (isPercentUnit(unit)) return "rate";
+  if (isTimeUnit(unit)) return "time";
+  if (unit.trim() && period.trim()) return "count-per-period";
+  return null;
+}
+
+/**
+ * Does this metric measure the thing the constraint names?
+ *
+ * latency is time, capacity is throughput counted over a period, quality is a rate. Knowledge
+ * and policy constraints have no single dimension — a price book can be measured in days or in
+ * quotes — so any real dimension is allowed there, and the *reason* carries the burden instead.
+ */
+export function dimensionMatchesConstraint(
+  constraintType: ConstraintType,
+  unit: string,
+  period: string,
+): boolean {
+  const dimension = metricDimension(unit, period);
+  if (!dimension) return false;
+  if (constraintType === "latency") return dimension === "time";
+  if (constraintType === "capacity") return dimension === "count-per-period";
+  if (constraintType === "quality") return dimension === "rate";
+  return true;
+}
+
+/** Constraint types whose baseline is only defensible with a written justification. */
+export function baselineReasonRequired(constraintType: ConstraintType): boolean {
+  return constraintType === "knowledge" || constraintType === "policy";
+}
+
+/** A span grounds a unit when the client's own words contain it, symbol or word. */
+function spanCarries(span: string, value: string): boolean {
+  const haystack = normalize(span);
+  const needle = normalize(value);
+  if (!haystack || !needle) return false;
+  if (haystack.includes(needle)) return true;
+  const symbol = UNIT_SYMBOLS[span.trim()];
+  return symbol !== undefined && symbol === needle;
+}
+
+export type MetricSpans = { unitSpan: string; periodSpan: string; denominatorSpan: string };
+
+export type MetricGroundingResult = MetricSpans & {
+  grounding: MetricGrounding;
+  unit: string;
+  period: string;
+};
+
+/**
+ * The unit, the period and the denominator are grounded exactly the way a quote is: each must
+ * be a contiguous span of the client line the number came from, matched on normalized text.
+ *
+ * F1 of the 2026-07-29 audit: a model emitted `unit:"quotes", period:"month"` against a line
+ * that said "9 days per quote", and the grounding layer checked only the digits. A unit or
+ * period the client never said is now dropped and the metric lands `partial`, which can never
+ * confirm a baseline. A percentage additionally needs the denominator said out loud — a rate
+ * with no "out of what" is not a measurement.
+ */
+export function groundMetricSpans(
+  lineText: string,
+  unit: string,
+  period: string,
+  spans: Partial<MetricSpans>,
+): MetricGroundingResult {
+  const line = normalize(lineText);
+  const inLine = (raw: string | undefined): string => {
+    const span = unwrapQuote((raw ?? "").trim()).slice(0, MAX_SPAN);
+    const needle = normalize(span);
+    return needle && line.includes(needle) ? span : "";
+  };
+  const unitSpan = inLine(spans.unitSpan);
+  const periodSpan = inLine(spans.periodSpan);
+  const denominatorSpan = inLine(spans.denominatorSpan);
+
+  const unitOk = Boolean(unit.trim()) && spanCarries(unitSpan, unit);
+  const periodOk = Boolean(period.trim()) && spanCarries(periodSpan, period);
+  const denominatorOk = !isPercentUnit(unit) || Boolean(denominatorSpan);
+
+  return {
+    // A unit or period the client did not say is not carried on the metric at all: leaving it
+    // in place is how "9 days per quote" became "quotes won per month" downstream.
+    unit: unitOk ? unit : "",
+    period: periodOk ? period : "",
+    unitSpan: unitOk ? unitSpan : "",
+    periodSpan: periodOk ? periodSpan : "",
+    denominatorSpan,
+    grounding: unitOk && periodOk && denominatorOk ? "full" : "partial",
+  };
+}
+
+/* -------------------------------------------------- kill condition spec */
+
+const COMPARATORS = new Set<string>(KILL_COMPARATORS);
+
+/**
+ * The one place a structured kill condition is allowed to come into existence.
+ *
+ * All four parts or nothing. A spec with an empty window is a stop condition nobody can
+ * ever declare fired, and a spec with an invented threshold puts a commitment in the
+ * client's mouth they never made — so a partial answer becomes no spec at all, and the
+ * client's verbatim sentence carries the condition on its own. Audit F2/1.5: the structure
+ * exists to make the outcome testable, never to make an untested outcome look tested.
+ */
+export function killConditionSpecFrom(parts: {
+  metric?: string;
+  comparator?: string;
+  threshold?: string;
+  window?: string;
+}): KillConditionSpec | null {
+  const metric = (parts.metric ?? "").trim().slice(0, 160);
+  const comparator = (parts.comparator ?? "").trim().toLowerCase().replace(/[\s_]+/g, "-");
+  const threshold = (parts.threshold ?? "").trim().slice(0, 160);
+  const window = (parts.window ?? "").trim().slice(0, 80);
+  if (!metric || !threshold || !window || !COMPARATORS.has(comparator)) return null;
+  return { metric, comparator: comparator as KillComparator, threshold, window };
+}
+
+const PLACEHOLDER_NAME = /^(?:client-stated\b|unnamed\b|metric$|number$)/i;
+
+/** A generated stand-in is not a name. A metric that has no name cannot anchor a baseline. */
+export function hasMeaningfulMetricName(label: string): boolean {
+  const name = label.trim();
+  return name.length > 1 && !PLACEHOLDER_NAME.test(name);
+}
+
+/**
+ * A readable name built only from what the client actually said. `metricLabel` used to emit
+ * "Client-stated day metric", which then fed metric-direction inference and the catalog as if
+ * it were the name of a business measure (audit F4).
+ */
+export function metricNameFor(unit: string, period: string): string {
+  const measure = unit.trim().toLowerCase();
+  const over = period.trim().toLowerCase().replace(/^per\s+/, "");
+  if (measure && over) return capitalize(`${measure} per ${over}`);
+  if (measure) return capitalize(measure);
+  if (over) return `Unnamed rate per ${over}`;
+  return "Unnamed client-stated number";
+}
+
+function capitalize(value: string): string {
+  return value ? value[0].toUpperCase() + value.slice(1) : value;
+}
+
+/** A range ("3 to 5 days") is a spread, not a reading, so it can never anchor a delta. */
+const RANGE_VALUE = /\d\s*(?:-|–|—|to)\s*\d/i;
+
+/** Everything a metric must satisfy before it is allowed to be called a confirmed baseline. */
+export function metricCanConfirmBaseline(metric: ExtractedMetric): boolean {
+  return Boolean(
+    metric &&
+    metric.grounding === "full" &&
+    hasMeaningfulMetricName(metric.label ?? "") &&
+    metric.value?.trim() &&
+    /\d/.test(metric.value) &&
+    !RANGE_VALUE.test(metric.value) &&
+    metric.unit?.trim() &&
+    metric.period?.trim() &&
+    metric.quote?.trim() &&
+    metric.speaker?.trim() &&
+    metric.timestamp?.trim() &&
+    metric.provenance === "client-stated",
+  );
+}
+
+/**
+ * The baseline is the first fully grounded metric that measures the constraint's own dimension.
+ * There is deliberately no fallback: "first number with a period" (audit F4) made monthly
+ * enquiry volume the baseline for a latency constraint. No match means Missing.
+ */
+export function selectBaselineMetric(
+  metrics: ExtractedMetric[],
+  constraintType: ConstraintType,
+): ExtractedMetric | null {
+  return (metrics ?? []).find((metric) =>
+    metricCanConfirmBaseline(metric) &&
+    dimensionMatchesConstraint(constraintType, metric.unit, metric.period)) ?? null;
+}
+
+/* ------------------------------------------------- two passes, one finding */
+
+export type ConstraintReading = { constraintType: ConstraintType; canvasBlock: string };
+export type PathDisagreement = NonNullable<TranscriptSynthesis["pathDisagreement"]>;
+
+/**
+ * Where the model pass and the deterministic pass read the same transcript differently.
+ *
+ * Audit F5: the same upload produced `knowledge` or `latency` depending on whether an HTTP
+ * call succeeded, and the disagreement was written into a gap string that changed nothing.
+ * Returning a structured value here is what lets `findingStatusFor` withdraw verification and
+ * what lets the disagreement be shown rather than buried in prose.
+ */
+export function pathDisagreementBetween(
+  deterministic: ConstraintReading | null | undefined,
+  model: ConstraintReading | null | undefined,
+): PathDisagreement | null {
+  if (!deterministic || !model) return null;
+  const fields: PathDisagreement["fields"] = [];
+  if (deterministic.constraintType !== model.constraintType) fields.push("constraintType");
+  if (deterministic.canvasBlock !== model.canvasBlock) fields.push("canvasBlock");
+  if (fields.length === 0) return null;
+  return {
+    model: { constraintType: model.constraintType, canvasBlock: model.canvasBlock },
+    deterministic: {
+      constraintType: deterministic.constraintType,
+      canvasBlock: deterministic.canvasBlock,
+    },
+    fields,
+  };
+}
+
+/**
+ * The single place a finding is allowed to stop being provisional. Every clause is a veto:
+ * a confirmed baseline, a baseline that measures *this* constraint, the second call, no
+ * conflict with the first call, and no disagreement between the two reading passes.
+ */
+export function findingStatusFor(input: {
+  baselineStatus: TranscriptSynthesis["baselineStatus"];
+  baselineMetric: ExtractedMetric | null;
+  callNumber: 1 | 2;
+  priorConflict: boolean;
+  pathDisagreement: PathDisagreement | null;
+}): "client-verified" | "provisional" {
+  const verified =
+    input.baselineStatus === "Confirmed" &&
+    input.baselineMetric !== null &&
+    input.callNumber === 2 &&
+    !input.priorConflict &&
+    input.pathDisagreement === null;
+  return verified ? "client-verified" : "provisional";
+}
+
+/** The "not the constraint" appendix line for a rival the model examined and rejected. */
+export function rejectedHypothesisAppendixItem(item: RejectedHypothesis): string {
+  return `Not the constraint — ${item.constraintType} (${item.canvasBlock}): ${item.reason} Client line ${item.line}, ${item.speaker} at ${item.timestamp}: "${item.quote.slice(0, 220)}"`;
 }
 
 /** Wrapping quotation marks and truncation ellipses are presentation, not content. */
@@ -190,6 +507,10 @@ function citationText(entry: Record<string, unknown>): string {
  * to a literal search across the transcript. Matching is exact-or-substring on normalized text
  * only — never fuzzy, never semantic — the matched line must be `client-stated`, and the quote,
  * speaker, and timestamp are rewritten from that line rather than from what the model said.
+ *
+ * A citation carrying a line number and no span used to auto-ground (audit F3): it let a
+ * constraint be built out of bare line numbers pointing at a question and a logging aside. A
+ * citation must now always say which words it is relying on.
  */
 function groundCitation(index: GroundingIndex, entry: Record<string, unknown>): Grounding {
   const quote = citationText(entry);
@@ -203,7 +524,7 @@ function groundCitation(index: GroundingIndex, entry: Record<string, unknown>): 
     if (line.provenance !== "client-stated") {
       return { ok: false, reason: `line-not-client-stated (${line.provenance})`, detail };
     }
-    if (!quote) return { ok: true, value: groundedFrom(index, position) };
+    if (!quote) return { ok: false, reason: "citation-has-no-quote-span", detail };
     const needle = normalize(quote);
     if (!needle || !index.normals[position].includes(needle)) {
       return { ok: false, reason: "quote-not-in-cited-line", detail };
@@ -284,6 +605,7 @@ function emptySynthesis(): GroundedSynthesis {
     gaps: [],
     rejections: [],
     constraint: null,
+    rejectedHypotheses: [],
     unansweredQuestions: [],
   };
 }
@@ -373,26 +695,54 @@ function groundPayload(
     })
     .filter((item): item is GroundedTranscriptQuote => Boolean(item));
 
+  // Model-side positions of the metrics that survived, so `baseline_metric_index` can be
+  // resolved against the array the model actually saw rather than the filtered one.
+  const metricModelIndex: number[] = [];
   const metrics = list(model.metrics).slice(0, MAX_ITEMS)
-    .map((item): ExtractedMetric | null => {
+    .map((item, position): ExtractedMetric | null => {
       const entry = record(item);
       if (!entry) return reject("metric", "not-an-object", "");
       const value = text(entry.value, 60);
       if (!value) return reject("metric", "empty-value", text(entry.label, 120));
       const grounded = groundOr("metric", entry);
       if (!grounded) return null;
+      const lineText = lines[grounded.line - 1].text;
       // The number has to be in the client's own line, not only in the model's rendering of it.
-      if (!valueAppearsInLine(value, lines[grounded.line - 1].text)) {
+      if (!valueAppearsInLine(value, lineText)) {
         return reject("metric", "value-not-in-matched-line", `${value} | ${grounded.quote}`);
       }
+      // ...and so does what the number is a measurement of.
+      const measured = groundMetricSpans(
+        lineText,
+        text(entry.unit, 60).toLowerCase(),
+        text(entry.period, 60).toLowerCase(),
+        {
+          unitSpan: text(entry.unit_span, MAX_SPAN),
+          periodSpan: text(entry.period_span, MAX_SPAN),
+          denominatorSpan: text(entry.denominator_span, MAX_SPAN),
+        },
+      );
+      const label = text(entry.label, 120) || metricNameFor(measured.unit, measured.period);
+      if (measured.grounding === "partial") {
+        reject(
+          "metric.grounding",
+          "unit-period-or-denominator-not-in-cited-line",
+          `${label} | ${text(entry.unit, 60)}/${text(entry.period, 60)} | ${grounded.quote}`,
+        );
+      }
+      metricModelIndex.push(position);
       return {
-        label: text(entry.label, 120) || "Client-stated metric",
+        label,
         value,
         quote: grounded.quote,
         speaker: grounded.speaker,
         timestamp: grounded.timestamp,
-        unit: text(entry.unit, 60).toLowerCase(),
-        period: text(entry.period, 60).toLowerCase(),
+        unit: measured.unit,
+        period: measured.period,
+        unitSpan: measured.unitSpan,
+        periodSpan: measured.periodSpan,
+        denominatorSpan: measured.denominatorSpan,
+        grounding: measured.grounding,
         provenance: "client-stated",
       };
     })
@@ -560,6 +910,38 @@ function groundPayload(
     })
     .filter((item): item is DiscoveryQuestion => Boolean(item));
 
+  const rejectedHypotheses = list(model.rejected_hypotheses).slice(0, 6)
+    .map((item): RejectedHypothesis | null => {
+      const entry = record(item);
+      if (!entry) return reject("rejected_hypothesis", "not-an-object", "");
+      const constraintType = text(entry.constraint_type, 30);
+      if (!TYPES.has(constraintType)) {
+        return reject("rejected_hypothesis", "unknown-constraint-type", constraintType || "(empty)");
+      }
+      const canvasBlock = canonicalCanvasBlock(entry.canvas_block);
+      if (!canvasBlock) {
+        return reject("rejected_hypothesis", "unknown-canvas-block", text(entry.canvas_block, 120));
+      }
+      const reason = text(entry.reason, 400);
+      if (!reason) return reject("rejected_hypothesis", "empty-reason", constraintType);
+      // A rival is only worth printing if the line that argues against it is real.
+      const grounded = groundOr("rejected_hypothesis", entry);
+      if (!grounded) return null;
+      return {
+        constraintType: constraintType as ConstraintType,
+        canvasBlock,
+        reason,
+        quote: grounded.quote,
+        speaker: grounded.speaker,
+        timestamp: grounded.timestamp,
+        line: grounded.line,
+      };
+    })
+    .filter((item): item is RejectedHypothesis => Boolean(item))
+    .slice(0, MAX_REJECTED_HYPOTHESES);
+
+  const gaps = strings(model.gaps, 300, 15);
+
   return {
     quotes,
     metrics,
@@ -570,42 +952,138 @@ function groundPayload(
     tasks,
     roles,
     narrative: text(model.narrative, 3_000),
-    gaps: strings(model.gaps, 300, 15),
+    gaps,
     rejections,
-    constraint: groundConstraint(model.constraint, groundOr, reject),
+    constraint: groundConstraint(model.constraint, {
+      groundOr,
+      reject,
+      gaps,
+      metrics,
+      metricModelIndex,
+    }),
+    rejectedHypotheses,
     unansweredQuestions,
   };
 }
 
+type ConstraintGroundingContext = {
+  groundOr: (kind: string, entry: Record<string, unknown>) => GroundedQuote | null;
+  reject: (kind: string, reason: string, detail: string) => null;
+  gaps: string[];
+  metrics: ExtractedMetric[];
+  metricModelIndex: number[];
+};
+
+/**
+ * A constraint has to be about something the client said, in more than one place, with at
+ * least one line explaining *how* throughput is limited.
+ *
+ * Audit F3: `evidence.length > 0` was the whole test, and a citation with no quote span
+ * auto-grounded, so a capacity/Key Resources story was assembled from a whiteboard aside and
+ * a question. Audit F4: the baseline was whatever number came first. Both are now decided
+ * here, and a failure returns null with a gap saying why — never a quietly weakened finding.
+ */
 function groundConstraint(
   value: unknown,
-  groundOr: (kind: string, entry: Record<string, unknown>) => GroundedQuote | null,
-  reject: (kind: string, reason: string, detail: string) => null,
+  context: ConstraintGroundingContext,
 ): ModelConstraint | null {
+  const { groundOr, reject, gaps, metrics, metricModelIndex } = context;
   const entry = record(value);
   if (!entry) return null;
   const constraintType = text(entry.constraint_type, 30);
   const canvasBlock = canonicalCanvasBlock(entry.canvas_block);
-  const evidence = list(entry.evidence).slice(0, 8)
-    .map((item): GroundedQuote | null => {
-      const citation = record(item);
-      if (!citation) return reject("constraint_evidence", "not-an-object", "");
-      return groundOr("constraint_evidence", citation);
-    })
-    .filter((item): item is GroundedQuote => Boolean(item));
   if (!TYPES.has(constraintType)) return reject("constraint", "unknown-constraint-type", constraintType);
   if (!canvasBlock) return reject("constraint", "unknown-canvas-block", text(entry.canvas_block, 120));
-  // A constraint with nothing the client actually said behind it is exactly what must not ship.
-  if (evidence.length === 0) return reject("constraint", "no-grounded-evidence", text(entry.reasoning, 300));
+  const type = constraintType as ConstraintType;
+
+  const evidence = list(entry.evidence).slice(0, 8)
+    .map((item): ConstraintCitation | null => {
+      const citation = record(item);
+      if (!citation) return reject("constraint_evidence", "not-an-object", "");
+      const role = text(citation.role, 40).toLowerCase().replace(/[\s-]+/g, "_");
+      if (!ROLES.has(role)) {
+        return reject("constraint_evidence", "unknown-evidence-role", role || "(empty)");
+      }
+      const grounded = groundOr("constraint_evidence", citation);
+      if (!grounded) return null;
+      return { ...grounded, role: role as EvidenceRole };
+    })
+    .filter((item): item is ConstraintCitation => Boolean(item));
+
+  const distinctLines = new Set(evidence.map((item) => item.line));
+  if (distinctLines.size < MIN_CONSTRAINT_LINES) {
+    gaps.push(
+      `The model proposed a ${type} constraint at ${canvasBlock} on ${distinctLines.size} grounded client line(s). A constraint needs at least ${MIN_CONSTRAINT_LINES} distinct client-stated lines, so it was not carried into the finding.`,
+    );
+    return reject("constraint", "fewer-than-two-grounded-client-lines", text(entry.reasoning, 300));
+  }
+  if (!evidence.some((item) => item.role === "mechanism")) {
+    gaps.push(
+      `The model proposed a ${type} constraint at ${canvasBlock} with no mechanism citation — no client line saying how throughput is actually limited — so it was not carried into the finding. Symptoms alone do not locate a constraint.`,
+    );
+    return reject("constraint", "no-mechanism-citation", text(entry.reasoning, 300));
+  }
+
+  const baselineReason = text(entry.baseline_reason, 400);
+  const nominated = Number(entry.baseline_metric_index);
+  let baselineMetricIndex = -1;
+  let baselineMetric: ExtractedMetric | null = null;
+  if (Number.isInteger(nominated) && nominated >= 0) {
+    const position = metricModelIndex.indexOf(nominated);
+    const metric = position === -1 ? undefined : metrics[position];
+    if (!metric) {
+      reject("constraint.baseline", "baseline-metric-not-grounded", `index ${nominated}`);
+    } else if (!metricCanConfirmBaseline(metric)) {
+      reject("constraint.baseline", "baseline-metric-not-fully-grounded", `${metric.label}: ${metric.value}`);
+    } else if (!dimensionMatchesConstraint(type, metric.unit, metric.period)) {
+      reject(
+        "constraint.baseline",
+        "baseline-metric-dimension-mismatch",
+        `${type} constraint against ${metric.value} (${metric.unit} per ${metric.period})`,
+      );
+    } else if (baselineReasonRequired(type) && !baselineReason) {
+      reject("constraint.baseline", "baseline-reason-required", `${type} constraint`);
+    } else {
+      baselineMetricIndex = position;
+      baselineMetric = metric;
+    }
+    if (!baselineMetric) {
+      gaps.push(
+        `The metric the model nominated as the baseline does not measure the ${type} constraint it was nominated for, so the baseline is recorded as Missing rather than reassigned.`,
+      );
+    }
+  }
+
+  // The structured stop condition is an all-or-nothing read of what the model returned; a
+  // half-filled spec is dropped and the client's verbatim sentence stands on its own.
+  const specEntry = record(entry.kill_condition_spec) ?? {};
+  const killConditionSpec = killConditionSpecFrom({
+    metric: text(specEntry.metric, 160),
+    comparator: text(specEntry.comparator, 40),
+    threshold: text(specEntry.threshold, 160),
+    window: text(specEntry.window, 80),
+  });
+  if (!killConditionSpec && Object.values(specEntry).some((part) => text(part, 200))) {
+    reject(
+      "constraint.kill_condition_spec",
+      "incomplete-or-unknown-comparator",
+      `${text(specEntry.metric, 160)} | ${text(specEntry.comparator, 40)} | ${text(specEntry.threshold, 160)} | ${text(specEntry.window, 80)}`,
+    );
+  }
+
   return {
-    constraintType: constraintType as ConstraintType,
+    constraintType: type,
     canvasBlock,
     reasoning: text(entry.reasoning, 1_200),
     symptomVsConstraint: text(entry.symptom_vs_constraint, 800),
     prescription: text(entry.prescription, 600),
     whySmallestIntervention: text(entry.why_smallest_intervention, 600),
     killCondition: text(entry.kill_condition, 400),
+    killConditionSpec,
     predictedNextConstraint: text(entry.predicted_next_constraint, 400),
     evidence,
+    baselineMetricIndex,
+    baselineMetric,
+    baselineReason,
   };
 }

@@ -2,6 +2,7 @@ import { requirePrincipalAsync } from "@/lib/auth";
 import { readJson, route } from "@/lib/http";
 import { validatePublicUrl } from "@/lib/research";
 import { createEngagement, listEngagements, type CreateEngagementInput } from "@/lib/store";
+import { normalizeFirmographics } from "@/lib/workflow";
 
 export const dynamic = "force-dynamic";
 
@@ -23,6 +24,8 @@ export async function POST(request: Request) {
       engagement: await createEngagement({
         ...input,
         website,
+        // Optional and never inferred: an unrecognised band or model is normalised to "".
+        firmographics: normalizeFirmographics(input.firmographics),
         advisor: input.advisor?.trim() || principal.displayName,
         ownerId: principal.ownerId,
       }),
