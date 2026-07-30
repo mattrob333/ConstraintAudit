@@ -1,4 +1,5 @@
 import type { ClientRecord } from "./clients";
+import { HttpError } from "./http";
 import { baselineMetricIsBound } from "./workflow";
 import type {
   ConsentAttestation,
@@ -104,11 +105,13 @@ export function requireDiagnosisApprovalEvidence(finding: ConstraintFinding): vo
  */
 export function requireInvitableClient(client: ClientRecord | null): ClientRecord {
   if (!client) throw new Error("Client not found");
+  // Explicit 400s: these are the advisor's input to correct, not a server fault. Left to the
+  // message-shape fallback in `jsonError` they read as 500s, which shows a working app as broken.
   if (!client.company.trim()) {
-    throw new Error("This client has no company name, so no invitation can be addressed.");
+    throw new HttpError(400, "This client has no company name, so no invitation can be addressed.");
   }
   if (!client.email.trim()) {
-    throw new Error("This client has no email address. Add one before an audit invitation can be queued.");
+    throw new HttpError(400, "This client has no email address. Add one before an audit invitation can be queued.");
   }
   return client;
 }

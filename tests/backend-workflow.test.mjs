@@ -495,6 +495,17 @@ test("an audit invitation cannot be queued for a client with no email", () => {
   assert.equal(requireInvitableClient(client()).email, "maya@acme.example");
 });
 
+test("a client the advisor can fix is refused with a 400, not a server error", () => {
+  // These refusals are the advisor's input to correct. Reaching the client as a 500 would show a
+  // working app as broken, and `jsonError` only infers 400 from the wording — so state it.
+  for (const broken of [client({ email: "" }), client({ company: "  " })]) {
+    assert.throws(() => requireInvitableClient(broken), (error) => {
+      assert.equal(error.status, 400, `${error.message} must carry an explicit 400`);
+      return true;
+    });
+  }
+});
+
 test("queueing an audit invitation composes the message and performs no external call", async () => {
   assert.ok(INTENT_TYPES.includes("audit_invite"), "audit_invite must be a reviewed intent type");
 
